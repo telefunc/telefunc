@@ -37,8 +37,8 @@ class SendCredit {
   /** Bytes sent since this side's sender last yielded or waited. */
   private unyieldedBytes = 0
   private readonly yieldBytes: number
-  private isShutdown = false
-  private shutdownError: Error | undefined
+  /** Set once it shut down, with the error its waiters get, if any. */
+  private shutDown: { error: Error | undefined } | null = null
   /** Since it last answered a `BDP_PING`, the least its wire held as credit ran out; 0: unknown, `Infinity`: none. */
   private leastBacklog = Infinity
 
@@ -112,8 +112,7 @@ class SendCredit {
   }
 
   shutdown(err?: Error): void {
-    this.shutdownError = err
-    this.isShutdown = true
+    this.shutDown = { error: err }
     this.tryWakeCreditWaiters()
   }
 
@@ -135,9 +134,10 @@ class SendCredit {
   private tryWakeCreditWaiters(): void {
     const waiters = this.waiters
     if (waiters === null) return
-    if (this.isShutdown) {
+    const { shutDown } = this
+    if (shutDown !== null) {
       for (let waiter = waiters.shift(); waiter; waiter = waiters.shift()) {
-        if (this.shutdownError) waiter.reject(this.shutdownError)
+        if (shutDown.error) waiter.reject(shutDown.error)
         else waiter.resolve()
       }
       return
@@ -167,7 +167,8 @@ class SendCredit {
   }
 
   private waitForCredit(): Promise<void> {
-    if (this.isShutdown) return this.shutdownError ? Promise.reject(this.shutdownError) : resolvedPromise
+    const { shutDown } = this
+    if (shutDown !== null) return shutDown.error ? Promise.reject(shutDown.error) : resolvedPromise
     this.unyieldedBytes = 0
     const waiters = (this.waiters ??= new Fifo())
     return new Promise<void>((resolve, reject) => waiters.push({ resolve, reject }))

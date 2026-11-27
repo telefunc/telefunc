@@ -1,5 +1,5 @@
 export { ATTACHABLE_NOW, Channel, ServerChannel }
-export type { CallPage, MuxChannel, ResponseChannel }
+export type { CallPage }
 
 const SERVER_CHANNEL_BRAND = Symbol.for('telefunc.ServerChannel')
 
@@ -141,34 +141,6 @@ const ATTACHABLE_NOW: CallPage = { lastSign: () => Number.NEGATIVE_INFINITY, nev
 
 type ChannelOptions = { ack?: boolean; id?: string }
 
-/** A channel as the mux and its wires hold it, whatever data it carries. */
-type MuxChannel = Pick<
-  ServerChannel,
-  | 'id'
-  | 'heldBytes'
-  | '_phase'
-  | '_callRequest'
-  | '_lastClientSeq'
-  | '_replayBuffer'
-  | '_registerChannel'
-  | '_applyCallWant'
-  | '_confirmWant'
-  | '_attachPeer'
-  | '_dispatchFrame'
-  | '_acknowledge'
-  | '_onPageAttach'
-  | '_onPageMoving'
-  | '_onPageClosed'
-  | '_onPeerDisconnect'
-  | '_onPeerGone'
-  | '_onPeerRecoveryFailure'
-  | '_onServerEnd'
-  | '_release'
->
-
-/** A channel as a response carries it, whatever data it carries. */
-type ResponseChannel = MuxChannel & Pick<ServerChannel, '_validators' | '_setResponseAbort' | 'onClose'>
-
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements Channel<ClientToServer, ServerToClient>, ChannelLifecycleOwner, BufferedSender, MemoryHolder
 {
@@ -190,8 +162,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return hasProp(value, SERVER_CHANNEL_BRAND)
   }
 
-  /** @internal `closing` once `close`, `abort` or the page's CLOSE starts the close; `ended` once `shutdown` ran. */
-  /** Open; closing, once it takes no more sends; ended. `ChannelEnding` owns it. */
+  /** @internal Open; closing once it takes no more sends (`close`, `abort` or the page's CLOSE began it); ended.
+   *  `ChannelEnding` owns it. */
   get _phase(): 'open' | 'closing' | 'ended' {
     if (this.lifecycle.ended) return 'ended'
     return this.lifecycle.stopped ? 'closing' : 'open'
@@ -217,14 +189,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   })
   /** It ends because its page left or never attached: nothing it holds for the page can reach it. */
   protected endsPageGone = false
-  private ttlTimer: ReturnType<typeof setTimeout> | null = null
+  /** Ends it where its page doesn't come: the connect window, from its registration to the first attach, then the grace
+   *  period after each loss of its page's wire. */
+  private pageWait: ReturnType<typeof setTimeout> | null = null
   protected selfTime = new SelfTime()
   /** Paces fire-and-forget TEXT and BINARY sends, lossy ones too, to what the page grants; see `constants.ts`. */
   protected sendCredit: SendCredit
   /** A send nobody awaits can't show its rejection, so the first refusal warns. */
   private refusalWarned = false
   protected receiveCredit: ReceiveCredit
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private responseAbort: ((abortValue?: unknown) => void) | null = null
   private pendingAckRes: Array<{ ackedSeq: number; result: string; status: AckResultStatus }> = []
   /** What each ack request being answered holds, by its seq: its answer takes that place. */
@@ -584,7 +557,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return unsubscribeOf(this.binaryListeners.add(callback, options))
   }
 
-  /** What it ended with, as its `closed` rejects. */
+  /** What it ended with, or `ChannelClosedError` for a graceful close (used to reject `opened` and waiting sends). */
   protected endError(): Error {
     return this.lifecycle.closeError ?? new ChannelClosedError()
   }
@@ -677,9 +650,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const registeredAt = performance.now()
     // Each time it runs out, the window counts again from the page's last sign, until a whole one passed without any.
     const waitForPage = (ms: number) => {
-      this.ttlTimer = unrefTimer(
+      this.pageWait = unrefTimer(
         setTimeout(() => {
-          this.ttlTimer = null
+          this.pageWait = null
           const waited = performance.now() - Math.max(registeredAt, page.lastSign())
           if (waited < connectTtl) return waitForPage(connectTtl - waited)
           page.neverCame()
@@ -698,10 +671,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _attachPeer(peer: IndexedPeer, state?: AttachState): void {
     const live = this._phase !== 'ended'
     if (live) {
-      if (this.ttlTimer) clearTimeout(this.ttlTimer)
-      this.ttlTimer = null
-      if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
-      this.reconnectTimer = null
+      this.stopPageWait()
       this.peer = peer
       this._replayBuffer?.moving()
       this.receiveCredit.attach(peer.sender.sendWait())
@@ -977,12 +947,17 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.receiveCredit.detach()
     if (this.endUnconfirmed(reconnectTimeout)) return
     this._replayBuffer?.dateStall(performance.now())
-    this.reconnectTimer = unrefTimer(
+    this.pageWait = unrefTimer(
       setTimeout(() => {
-        this.reconnectTimer = null
+        this.pageWait = null
         this.loseConnection(new NetworkError('Channel timed out: client did not reconnect within grace period', true))
       }, reconnectTimeout),
     )
+  }
+
+  private stopPageWait(): void {
+    if (this.pageWait) clearTimeout(this.pageWait)
+    this.pageWait = null
   }
 
   /** Ends the channel, at a loss of its page's wire, if what it sent hasn't been confirmed for over `reconnectTimeout`
@@ -1263,10 +1238,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.peer = null
     this.wireRequest = undefined
     this.receiveCredit.detach()
-    if (this.ttlTimer) clearTimeout(this.ttlTimer)
-    this.ttlTimer = null
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
-    this.reconnectTimer = null
+    this.stopPageWait()
     // Kept for a page that may still attach and lacks something, or for a response that has yet to carry it.
     const keep = !pageGone && !this.pageNeedsNothing()
     if (!keep) this._release()
@@ -1283,7 +1255,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this.offlineBuffer.rejectAcks(ackErr)
     }
     this.pendingAcks.clear()
-    this.letAnsweringGo()
+    // Nothing answers its requests once it ends, so what they held goes.
+    for (const held of this.answering.values()) letGo(this, held)
+    this.answering.clear()
   }
 
   /** Its send that waited for room is never made: an end that sends its own word made it first (`sendWaitingNow`), so
@@ -1294,12 +1268,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.roomWait = null
     waiting.wait.cancel()
     waiting.reject(this.lifecycle.waitingSendOutcome ?? err ?? this.endError())
-  }
-
-  /** Nothing answers its requests once it ends, so what they held goes. */
-  private letAnsweringGo(): void {
-    for (const held of this.answering.values()) letGo(this, held)
-    this.answering.clear()
   }
 
   /** @internal `MemoryHolder`: ended with its page in the close, which confirmed reading what the server sent of it up to

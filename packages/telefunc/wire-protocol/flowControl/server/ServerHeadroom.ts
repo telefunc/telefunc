@@ -46,9 +46,8 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   /** Ranges whose acknowledgement spans may include time spent waiting on the app. */
   private readonly appLimited = new Fifo<{ start: number; end: number }>()
   private lastAppLimited: { start: number; end: number } | null = null
-  /** Whether the sender is sending what waited for headroom, and whether it handed data of it yet. */
-  private releasing = false
-  private releasedData = false
+  /** Whether the sender is sending what waited for headroom (`sendWaiting`), and whether it handed data of it yet. */
+  private release: 'none' | 'started' | 'handedData' = 'none'
   /** Bytes handed since the newest data: an in-order socket holding no more holds none of it, bar what is carried. */
   private handedSinceData = 0
   /** What the path holds of what the sender handed, as of `inPathAt`: the rate drains it. */
@@ -56,7 +55,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private inPathAt = 0
   /** Looks again for copy room, which another wire's page may free, or for the window the rate drains. */
   private paceTimer: ReturnType<typeof setTimeout> | null = null
-  /** Asks for the page's word once a wire waiting for copy room has heard nothing for a while (`askSoon`). */
+  /** Asks for the page's word once a wire waiting for copy room has heard nothing for a while. */
   private askTimer: ReturnType<typeof setTimeout> | null = null
   /** The copies handed and not covered by an acknowledgement: where each ends, of all the sender handed. */
   private readonly copied = new Fifo<{ end: number; bytes: number }>()
@@ -110,7 +109,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     return cut.count()
   }
 
-  /** What the path takes past what it holds. Unmeasured, the kernel's TCP paces what the app hands, as on main. */
+  /** What the path takes past what it holds. Unmeasured, the kernel's TCP paces what the app hands. */
   headroom(): number {
     return this.window() - this.pathHolds(performance.now())
   }
@@ -144,8 +143,9 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     const end = this.sender.transmittedBytes
     // Unmeasured, what waits in the sender waits for the probe's answer or for copy room, not for the path: a release's
     // first data arrives after that wait, and only what follows it arrives as the path takes it.
-    const pathHeld = this.drain.rate > 0 ? this.releasing || this.sender.dataWaits : this.releasedData
-    if (this.releasing) this.releasedData = true
+    const { release } = this
+    const pathHeld = this.drain.rate > 0 ? release !== 'none' || this.sender.dataWaits : release === 'handedData'
+    if (release !== 'none') this.release = 'handedData'
     if (!pathHeld && this.socket.bufferedAmount <= this.handedSinceData) {
       const start = end - bytes
       this.markAppLimited(start, start + firstBytes)
@@ -176,17 +176,13 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   copyRoom(): number {
     if (hasCopyRoom()) return Number.POSITIVE_INFINITY
     // What this task gathered goes with its message, so it takes copy room as handed bytes do.
-    const room = WIRE_SEND_AHEAD_MIN_BYTES - this.unconfirmed() - this.sender.ungivenBytes
+    const unconfirmed = this.sender.transmittedBytes - this.sender.confirmedBytes
+    const room = WIRE_SEND_AHEAD_MIN_BYTES - unconfirmed - this.sender.ungivenBytes
     // Where copy room and not the window holds what waits, its end frees it with no word from the page: look again.
     if (room < this.headroom()) this.awaitsCopyRoom = true
     if (room >= WIRE_PIECES_ACK_BYTES) return room
     this.awaitsCopyRoom = true
     return 0
-  }
-
-  /** What the sender handed that the page hasn't said it took. */
-  private unconfirmed(): number {
-    return this.sender.transmittedBytes - this.sender.confirmedBytes
   }
 
   /** Takes a heartbeat (see `PieceSender.heartbeat`), which an acknowledgement's lost tail waits for. */
@@ -264,11 +260,6 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     return true
   }
 
-  /** Asks the page soon, unless it says first: copy room would otherwise wait out its acknowledgement gap. */
-  private askSoon(): void {
-    if (this.askTimer === null) this.askTimer = unrefTimer(setTimeout(this.askNow, WIRE_ASK_AFTER_MS))
-  }
-
   /** The page said what it took: the window it frees is the one to ask about, if it blocks again. */
   private heard(): void {
     if (this.askTimer !== null) clearTimeout(this.askTimer)
@@ -312,10 +303,9 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private readonly sendWaiting = (): void => {
     this.awaitsCopyRoom = false
     if (this.sender.dataWaits) {
-      this.releasing = true
+      this.release = 'started'
       this.sender.sendWaiting(this.headroom())
-      this.releasing = false
-      this.releasedData = false
+      this.release = 'none'
     }
     this.pace()
   }
@@ -325,7 +315,8 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     const { waitingBytes, acknowledgedBytes, awaitsProbe } = this.sender
     if (waitingBytes === 0 || awaitsProbe) return
     if (this.awaitsCopyRoom) {
-      this.askSoon()
+      // Asks the page soon, unless it says first: copy room would otherwise wait out its acknowledgement gap.
+      if (this.askTimer === null) this.askTimer = unrefTimer(setTimeout(this.askNow, WIRE_ASK_AFTER_MS))
       // Another wire freeing room can't wake this one: on a Durable Object its socket is out of that wire's reach.
       if (acknowledgedBytes > 0 && this.paceTimer === null)
         this.paceTimer = unrefTimer(setTimeout(this.lookAgain, WIRE_PIECES_ACK_GAP_MS))

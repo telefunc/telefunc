@@ -1,5 +1,5 @@
 // The twins, on the real Node server, of ClientConnection.marked.spec.ts's rows on the scripted server: what the page
-// does with Telefunc's own refusals of its SSE requests (decisions/516-sse-carrier.md, the ruling on step 6's check).
+// does with Telefunc's own refusals of its SSE requests.
 // Each refusal is the real server's own, made by what the page sends; a fetch wrapper stands for what is between them:
 // a page that breaks the protocol (a body cut or unframed), a proxy that drops the wire version from the URL, and one
 // that rewrites the refusal's `Content-Type` into another form a header may take. The rows of a `frames` refusal that

@@ -299,7 +299,7 @@ class PieceSender {
       this.open === null &&
       this.probe === null &&
       this.carried.length === 0 &&
-      !messages.atOnce &&
+      messages.gathered !== 'atOnce' &&
       messages.bytes + messages.lengthAhead + bytes <= this.gatherUpTo &&
       messages.ungivenBytes + messages.lengthAhead + bytes <= headroom &&
       (!this.copiesOnSend || bytes + messages.lengthAhead <= this.copyRoom())
@@ -581,8 +581,9 @@ class PieceSender {
     const bytes = frame.byteLength
     const messages = this.messages
     if (
-      messages.gathered &&
-      ((data && (messages.atOnce || this.cutsData)) || messages.bytes + messages.lengthAhead + bytes > this.gatherUpTo)
+      messages.gathered !== 'none' &&
+      ((data && (messages.gathered === 'atOnce' || this.cutsData)) ||
+        messages.bytes + messages.lengthAhead + bytes > this.gatherUpTo)
     ) {
       messages.flush()
     }
@@ -599,7 +600,7 @@ class PieceSender {
   /** As the task ends, what it gathered goes. */
   private readonly endTask = (): void => {
     this.endQueued = false
-    if (this.messages.gathered) this.messages.flush()
+    if (this.messages.gathered !== 'none') this.messages.flush()
   }
 
   /** Counts a gathered or carried `frame` as handed as its message goes, after the LENGTH `length` the frame before it
@@ -612,7 +613,7 @@ class PieceSender {
   /** Before a message that gathers nothing: the frames sent before it go ahead, and those only carried ride on it,
    *  counted first. */
   private give(): void {
-    if (this.messages.gathered) this.messages.flush()
+    if (this.messages.gathered !== 'none') this.messages.flush()
     else this.messages.commit()
   }
 
@@ -954,10 +955,8 @@ class SocketMessages {
   private readonly socket: PieceSocket
   /** The bytes of the frames it holds, with the LENGTH ahead of each that needs one. */
   bytes = 0
-  /** It holds frames gathered, not only carried. */
-  gathered = false
-  /** It holds a gathered frame that isn't data. */
-  atOnce = false
+  /** The frames gathered it holds, not only carried: none, only data, or one that isn't data and so goes at once. */
+  gathered: 'none' | 'data' | 'atOnce' = 'none'
   /** The bytes of the LENGTH its last frame needs once another follows it. */
   lengthAhead = 0
   /** The largest message handed: a browser may count a message in full while sending it. */
@@ -1033,13 +1032,13 @@ class SocketMessages {
     this.given = this.givenBytes = 0
     this.bytes = 0
     this.lengthAhead = 0
-    this.gathered = this.atOnce = false
+    this.gathered = 'none'
   }
 
   /** Adds `frame`, which the task sent. */
   gather(frame: Uint8Array<ArrayBuffer>): void {
-    this.gathered = true
-    if (!isSequencedTag(readTag(frame))) this.atOnce = true
+    if (!isSequencedTag(readTag(frame))) this.gathered = 'atOnce'
+    else if (this.gathered === 'none') this.gathered = 'data'
     this.add(frame)
   }
 

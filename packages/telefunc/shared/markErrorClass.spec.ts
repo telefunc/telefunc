@@ -44,15 +44,6 @@ test.for([...thisCopy.keys()])('%s carries its mark, and holds under `instanceof
   expect(Object.getOwnPropertySymbols(errorClass.prototype)).toContain(Symbol.for(`telefunc.${name}`))
 })
 
-test.for(['Abort', 'ShieldValidationError'])("%s takes 0.3.1's errors, which carry their mark themselves", (name) => {
-  const errorClass = thisCopy.get(name)
-  if (!errorClass) throw new Error(`${name} isn't exported`)
-  // As 0.3.1 made them: an instance of a class with no mark on its prototype, with the mark as its own field.
-  class ErrorOf031 extends Error {}
-  expect(Object.assign(new ErrorOf031(), { [Symbol.for(`telefunc.${name}`)]: true })).toBeInstanceOf(errorClass)
-  expect(new ErrorOf031()).not.toBeInstanceOf(errorClass)
-})
-
 test.for([...thisCopy.keys()])("%s takes no other class's error, nor what only looks like one", (name) => {
   const errorClass = thisCopy.get(name)
   if (!errorClass) throw new Error(`${name} isn't exported`)

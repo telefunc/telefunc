@@ -511,7 +511,7 @@ async function downloadFor(wire: Wire, ms: number, during: (t: number) => void =
   return { quiet, frames, got }
 }
 
-// What follows a first burst on a slow link waits behind it, as on `main`; a wire that keeps delivering is alive.
+// What follows a first burst on a slow link waits behind it; a wire that keeps delivering is alive.
 describe('a link that is or becomes slow', () => {
   test('on Slow 3G from the start, a download keeps the page within its ping deadline and arrives whole', async () => {
     const wire = wireTo(SLOW)

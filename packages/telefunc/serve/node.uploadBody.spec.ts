@@ -13,7 +13,7 @@ import { frameworkRequest } from './frameworkRequest.fixture.js'
 
 // The body of a binary call (a telefunction given a `Blob`) and of an SSE upload, read through Telefunc's body reader,
 // fails on the app's side: printed and given to `onBug()` as the app's own error. A client that leaves stays quiet.
-// Through a Fetch `Request` (`serve({ request })`), nothing tells the two apart: both are a truncation, as in 0.3.1.
+// Through a Fetch `Request` (`serve({ request })`), nothing tells the two apart: both are a truncation.
 
 vi.hoisted(() => vi.stubEnv('NODE_ENV', 'development'))
 // The app's telefunctions (requestBody.telefunc.js), which Telefunc loads from `config.telefuncFiles` as an app's.
@@ -326,7 +326,7 @@ test("a binary call whose request an app destroys in its metadata has the app's 
   expect(printed).toEqual([expect.stringContaining('app body transform failed')])
 })
 
-// A Fetch body's failure says nothing of who failed it: it is taken for the client leaving, as in 0.3.1.
+// A Fetch body's failure says nothing of who failed it: it is taken for the client leaving.
 test("a binary call whose Fetch body an app's transform fails while the telefunction reads its Blob is answered 500 with a truncation, the app's error its cause", async () => {
   const { printed, bugs } = recordErrors()
   const appError = new Error('app body transform failed')

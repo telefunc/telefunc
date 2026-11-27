@@ -3,7 +3,7 @@ export type { LivenessOwner }
 
 import type { ChannelTable } from './ChannelTable.js'
 import type { ClientChannelTransport } from './ClientConnection.js'
-import type { SendGate } from './SendGate.js'
+import type { SendQueue } from './SendQueue.js'
 import { CHANNEL_PING_INTERVAL_MIN_MS, CHANNEL_PING_INTERVAL_MS } from '../../constants.js'
 import { encode, type PingEntry, type PongEntry } from '../../wire/frame.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
@@ -17,7 +17,7 @@ interface LivenessOwner {
 type LivenessOptions = {
   owner: LivenessOwner
   channels: ChannelTable
-  gate: SendGate
+  sendQueue: SendQueue
 }
 
 /** The heartbeat on the connection's wire: each PING names the closed channels the server attached, and its PONG says
@@ -25,15 +25,15 @@ type LivenessOptions = {
 class Liveness {
   private readonly owner: LivenessOwner
   private readonly channels: ChannelTable
-  private readonly gate: SendGate
+  private readonly sendQueue: SendQueue
   private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
   /** The heartbeat last installed is the provisional one before a first RECONCILED (see `beatFromReconcile`). */
   private provisionalHeartbeat = false
 
-  constructor({ owner, channels, gate }: LivenessOptions) {
+  constructor({ owner, channels, sendQueue }: LivenessOptions) {
     this.owner = owner
     this.channels = channels
-    this.gate = gate
+    this.sendQueue = sendQueue
   }
 
   /** The PING interval the last RECONCILED set. */
@@ -86,11 +86,11 @@ class Liveness {
     for (const { ix, lastSeq } of ended) {
       const record = this.channels.get(ix)
       if (record === undefined || record.state.tag !== 'closed') continue
-      if (lastSeq === null) this.gate.release(record)
+      if (lastSeq === null) this.sendQueue.release(record)
       else this.channels.serverHas(record, record.state, this.channels.sentThrough(ix, lastSeq))
     }
     // What the frames of one let go held back may go.
-    this.gate.sendRunnable()
+    this.sendQueue.sendRunnable()
   }
 
   /** A PING at once, outside the heartbeat, naming the closed channels: its PONG tells how far the server has them. */
@@ -113,9 +113,9 @@ class Liveness {
       const { ix, state } = record
       if (state.tag !== 'closed' || state.initial) continue
       if (state.reported && record.replay.length === 0) {
-        queued ??= this.gate.queuedIxes()
+        queued ??= this.sendQueue.queuedIxes()
         if (!queued.has(ix)) {
-          this.gate.release(record)
+          this.sendQueue.release(record)
           continue
         }
       }

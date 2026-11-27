@@ -19,11 +19,10 @@ import { StreamTruncatedError } from '../../wire/StreamTruncatedError.js'
 import { getChannelMux } from './ChannelMux.js'
 import { EventStream } from './EventStream.js'
 import { queueMemory } from './channelMemory.js'
-import type { Fault, ReconcileOutcome, ServerTransport, SessionHold, WireClose } from './ChannelMux.js'
+import type { Fault, ReconcileOutcome, ServerTransport, SessionHold, TakesUpgrades, WireClose } from './ChannelMux.js'
 import { channelOf, encode } from '../../wire/frame.js'
 import { HEADER } from '../../wire/header.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
-import type { TakesUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 import { ProtocolViolationError } from '../../wire/protocolViolation.js'
 import {
   WIRE_VERSION_REFUSAL,

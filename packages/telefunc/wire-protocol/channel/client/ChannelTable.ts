@@ -28,7 +28,6 @@ type ClosedState = Extract<ChannelState, { tag: 'closed' }>
 type ChannelRecord = {
   readonly ix: number
   readonly channel: MuxChannel
-  readonly lossyBroadcast: boolean
   state: ChannelState
   /** What the page sent on it, till the server has it. */
   readonly replay: ReplayBuffer
@@ -125,7 +124,8 @@ class ChannelTable {
     // A seq already seen: a replay resends what arrived.
     if (seq <= prev) return null
     record.lastSeq = seq
-    const lossy = record.lossyBroadcast || ((frame.tag === TAG.TEXT || frame.tag === TAG.BINARY) && frame.lossy)
+    const lossy =
+      record.channel._lossyBroadcast || ((frame.tag === TAG.TEXT || frame.tag === TAG.BINARY) && frame.lossy)
     record.receivedAt = lossy ? performance.now() : undefined
     return seq
   }
@@ -142,11 +142,10 @@ class ChannelTable {
 
   // ── Per-channel state transitions: every write of a `record.state`, or of its fields, goes through these. ──
 
-  add(ix: number, channel: MuxChannel, replay: ReplayBuffer, lossyBroadcast = false): ChannelRecord {
+  add(ix: number, channel: MuxChannel, replay: ReplayBuffer): ChannelRecord {
     const record: ChannelRecord = {
       ix,
       channel,
-      lossyBroadcast,
       state: { tag: 'pending' },
       replay,
       lastSeq: 0,

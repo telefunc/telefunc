@@ -49,8 +49,8 @@ class FrameDemuxer {
   private totalConsumers = 0
   /** Until the page has what the call returned, it can't read a stream to make way for a file the call waits for. */
   private canStopReading = false
-  private stallTimer: ReturnType<typeof setTimeout> | undefined
-  private stallWarned = false
+  /** The stall warning's timer, while reading stopped with a consumer waiting; `'warned'` once it warned. */
+  private stallWarning: ReturnType<typeof setTimeout> | 'warned' | undefined
 
   constructor(streamReader: BaseStreamReader, telefunctionName: string) {
     this.streamReader = streamReader
@@ -135,7 +135,7 @@ class FrameDemuxer {
     if (this.reading) return
     // Reading may have stopped while no consumer waited, so no warning is on its way for this one.
     if (this.pausedByIndex !== null) {
-      if (this.stallTimer === undefined) this.warnIfStillStalledLater()
+      if (this.stallWarning === undefined) this.warnIfStillStalledLater()
       return
     }
     this.reading = true
@@ -214,18 +214,18 @@ class FrameDemuxer {
 
   /** Reading stopped with a consumer waiting: the next read restarts it, which clears this. */
   private warnIfStillStalledLater(): void {
-    if (this.stallWarned || this.indexWaiters.size === 0) return
-    this.stallTimer = unrefTimer(setTimeout(() => this.warnStalled(), STALL_WARNING_MS))
+    if (this.stallWarning === 'warned' || this.indexWaiters.size === 0) return
+    this.stallWarning = unrefTimer(setTimeout(() => this.warnStalled(), STALL_WARNING_MS))
   }
 
   private clearStallTimer(): void {
-    clearTimeout(this.stallTimer)
-    this.stallTimer = undefined
+    if (this.stallWarning === 'warned') return
+    clearTimeout(this.stallWarning)
+    this.stallWarning = undefined
   }
 
   private warnStalled(): void {
-    this.stallWarned = true
-    this.stallTimer = undefined
+    this.stallWarning = 'warned'
     assertWarning(
       false,
       `Reading what ${this.telefunctionName}() returned is waiting for a stream of it with 1 MiB unread: read all of the streams a call returned concurrently, or cancel the ones you don't want.`,

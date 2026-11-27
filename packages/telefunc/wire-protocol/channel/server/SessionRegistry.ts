@@ -1,14 +1,15 @@
 export { SessionRegistry }
 export type { ChannelHandle, Session }
 
-import type { MuxChannel } from './ServerChannel.js'
+import type { ServerChannel } from './ServerChannel.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import type { WireEntry } from './ChannelMux.js'
 import type { SessionCause } from '../endCause.js'
 import { DeadlineTimer } from '../DeadlineTimer.js'
+import { catchUpDroppedTimer } from '../../../workarounds/workerdDroppedTimers.js'
 
 /** A channel as one session holds it: its index there and the peer it sends through, none once its wire went. */
-type ChannelHandle = { channel: MuxChannel; ix: number; peer: IndexedPeer | null }
+type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer | null }
 
 /** A page's session, under one id for its life: its channels by index, and the one wire that holds it, which alone
  *  speaks for its channels. */
@@ -60,9 +61,7 @@ class SessionRegistry {
   /** Keeps `end` under `sessionId` until `leavesAt`, where no record is kept under it; one kept already stands. */
   keepEnd(sessionId: string, end: KeptEnd['end'], high: number, leavesAt: number): void {
     if (this.keptOf(sessionId) !== undefined) return
-    // The sweep is past its instant where its timer didn't run: a host may drop the timers of a request it answered
-    // (workerd). What it would have freed goes now.
-    if (this.sweepAt !== null && this.sweepAt <= performance.now()) this.drain()
+    catchUpDroppedTimer(this.sweepAt, this.drain)
     // One past its instant that the sweep hasn't freed yet goes, so that the map stays in the order of the instants.
     this.kept.delete(sessionId)
     this.kept.set(sessionId, { end, high, leavesAt })

@@ -47,8 +47,8 @@ const CHUNK_OVERFLOW_TEXT =
 class ChannelStreamSource {
   private readonly queue = new Fifo<{ frame: Uint8Array<ArrayBuffer>; onConsumed: () => void }>()
   private wake: (() => void) | null = null
-  private closed = false
-  private closeError: Error | null = null
+  /** Its channel closed: with `error`, or cleanly (`null`). */
+  private closed: { error: Error | null } | null = null
   private cancelled = false
   private ended = false
   private readonly channel: StreamSourceChannel
@@ -69,8 +69,7 @@ class ChannelStreamSource {
     })
 
     channel.onClose((err) => {
-      this.closed = true
-      this.closeError = err ?? null
+      this.closed = { error: err ?? null }
       this.wake?.()
       this.wake = null
     })
@@ -121,7 +120,7 @@ class ChannelStreamSource {
       for (let frame: Uint8Array<ArrayBuffer> | null = first; frame !== null; frame = await this.readNextFrame()) {
         parts.push(frame.subarray(1))
         if (frame[0] !== CHANNEL_PUMP_TAG_PART) return concatAll(parts)
-        this.holdPart(frame.byteLength)
+        if (this.memory && !this.memory.tryHold(frame.byteLength)) throw new ChannelOverflowError(CHUNK_OVERFLOW_TEXT)
         held += frame.byteLength
       }
       return null
@@ -130,17 +129,11 @@ class ChannelStreamSource {
     }
   }
 
-  /** Counts a part of `bytes` that this reader keeps, and throws where the server can't hold it. */
-  private holdPart(bytes: number): void {
-    if (!this.memory) return
-    if (!this.memory.tryHold(bytes)) throw new ChannelOverflowError(CHUNK_OVERFLOW_TEXT)
-  }
-
   /** The stream's next data frame, a chunk or a part of one: null at its end, and an error frame throws. */
   private async readNextFrame(): Promise<Uint8Array<ArrayBuffer> | null> {
     while (this.queue.length === 0) {
       if (this.ended) return null
-      if (this.closed) return this.endOfClosed()
+      if (this.closed) return this.endOfClosed(this.closed.error)
       await new Promise<void>((r) => {
         this.wake = r
       })
@@ -165,8 +158,8 @@ class ChannelStreamSource {
   }
 
   /** A read of the stream once its channel closed with nothing left queued: the end only if the reader cancelled. */
-  private endOfClosed(): null {
-    if (this.closeError) throw this.closeError
+  private endOfClosed(error: Error | null): null {
+    if (error) throw error
     if (!this.cancelled) throw new NetworkError('Channel closed before the end of its stream', true)
     return null
   }
