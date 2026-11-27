@@ -145,6 +145,11 @@ function waitingHello(sends: NewSubscriptionWait) {
   return waiting
 }
 
+/** What a waiting send sent: its own copy of the payload, in its turn. */
+function sendOf(waiting: WaitingSend<string>): Promise<string> {
+  return waiting.run(async (payload) => payload)
+}
+
 /** A frame as commands.ts's scripts write it: the lane key on a fan-in channel, the place where the source's kinds
  *  share one seq (`placed`), then `[seq_hi][seq_lo][ts_hi][ts_lo]`, u32 big-endian, the commit's id and its
  *  predecessor's, and the payload. Its id is its place unless given, and so is the one before it, so a lane's frames
@@ -704,7 +709,7 @@ describe('a publish waiting on its key’s new subscriptions', () => {
     expect(binary.state()).toBe('establishing')
     second.resolve(none())
 
-    await expect(waiting.turn).resolves.toBe('hello')
+    await expect(sendOf(waiting)).resolves.toBe('hello')
     expect(binary.state()).toBe('ready')
   })
 
@@ -718,13 +723,11 @@ describe('a publish waiting on its key’s new subscriptions', () => {
       const { listen, sends, missed } = setup()
       const read = createDeferred<Starts>()
       const attempt = listen(TEXT, () => read.promise)
-      const waiting = waitingHello(sends)
-      const turn = waiting.turn.then((payload) => payload)
+      const turn = sendOf(waitingHello(sends))
       await vi.advanceTimersByTimeAsync(59_999)
       const early = await Promise.race([turn, Promise.resolve('waiting')])
       await vi.advanceTimersByTimeAsync(1)
       const sent = await turn
-      waiting.sent()
       read.resolve(none())
       await vi.advanceTimersByTimeAsync(0)
 
@@ -744,10 +747,9 @@ describe('a publish waiting on its key’s new subscriptions', () => {
       await Promise.all(subscriptions.establishingOn([TEXT]))
       const read = createDeferred<Starts>()
       listen(TEXT, () => read.promise, frames, 'new')
-      const waiting = waitingHello(sends)
+      const turn = sendOf(waitingHello(sends))
       await vi.advanceTimersByTimeAsync(60_000)
-      await waiting.turn
-      waiting.sent()
+      await turn
       read.resolve(none())
       await vi.advanceTimersByTimeAsync(0)
       const told = [...missed]
@@ -768,7 +770,7 @@ describe('a publish waiting on its key’s new subscriptions', () => {
         const binaryRead = createDeferred<Starts>()
         listen(TEXT, () => textRead.promise)
         listen(BINARY, () => binaryRead.promise)
-        const waitings: WaitingSend<string>[] = [waitingHello(sends)]
+        const turns = [sendOf(waitingHello(sends))]
         if (told.length === 2) {
           const binary = sends.waitTurn<string>(
             { ...RULE, failsOn: [BINARY], budget: BINARY },
@@ -776,13 +778,10 @@ describe('a publish waiting on its key’s new subscriptions', () => {
             (payload) => payload,
           )
           assert(binary !== null)
-          waitings.push(binary)
+          turns.push(sendOf(binary))
         }
         await vi.advanceTimersByTimeAsync(60_000)
-        for (const waiting of waitings) {
-          await waiting.turn
-          waiting.sent()
-        }
+        await Promise.all(turns)
         textRead.resolve(none())
         binaryRead.resolve(none())
         await vi.advanceTimersByTimeAsync(0)
@@ -796,11 +795,10 @@ describe('a publish waiting on its key’s new subscriptions', () => {
       const { listen, sends, missed } = setup()
       const read = createDeferred<Starts>()
       const attempt = listen(TEXT, () => read.promise)
-      const waiting = waitingHello(sends)
+      const turn = sendOf(waitingHello(sends))
       await vi.advanceTimersByTimeAsync(59_000)
       read.resolve(none())
-      const sent = await waiting.turn
-      waiting.sent()
+      const sent = await turn
       await vi.advanceTimersByTimeAsync(60_000)
 
       expect({ sent, state: attempt.state(), missed }).toEqual({ sent: 'hello', state: 'ready', missed: [] })
@@ -817,21 +815,20 @@ describe('a publish waiting on its key’s new subscriptions', () => {
       assert(waiting !== null)
       return waiting
     }
-    const uncharged = turnOf('track-a', UNHELD)
+    const unchargedOut = createDeferred()
+    const uncharged = turnOf('track-a', UNHELD).run(() => unchargedOut.promise)
     const charged = turnOf('track-b', 'hello')
     read.resolve(none())
-    await charged.turn
-    charged.sent()
+    await sendOf(charged)
     listen(TEXT, () => later.promise, undefined, 'later')
 
     expect(() => turnOf('track-c', UNHELD)).toThrow(ChannelOverflowError)
-    await uncharged.turn
-    uncharged.sent()
+    unchargedOut.resolve()
+    await uncharged
     const next = turnOf('track-c', UNHELD)
     expect(() => turnOf('track-d', UNHELD)).toThrow(ChannelOverflowError)
     later.resolve(none())
-    await next.turn
-    next.sent()
+    await sendOf(next)
   })
 
   it('fails with the refusal when Redis refuses the subscription of its own kind it waits for', async () => {
@@ -841,7 +838,7 @@ describe('a publish waiting on its key’s new subscriptions', () => {
     listen(TEXT)
     listen(BINARY)
 
-    await expect(waitingHello(sends).turn).rejects.toMatchObject({ name: 'BackendError', code: 'denied' })
+    await expect(sendOf(waitingHello(sends))).rejects.toMatchObject({ name: 'BackendError', code: 'denied' })
   })
 
   it('goes out when Redis refuses only the other kind’s subscription, which it waited for', async () => {
@@ -851,7 +848,7 @@ describe('a publish waiting on its key’s new subscriptions', () => {
     listen(TEXT)
     listen(BINARY)
 
-    await expect(waitingHello(sends).turn).resolves.toBe('hello')
+    await expect(sendOf(waitingHello(sends))).resolves.toBe('hello')
   })
 })
 

@@ -15,7 +15,7 @@ import { broadcastChannel } from './keys.js'
 import type { RedisConnection } from './RedisConnection.js'
 import { neverReachedSubscription } from './RedisSubscriptions.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
-import type { WaitingSend, WaitRule } from './NewSubscriptionWait.js'
+import type { WaitRule } from './NewSubscriptionWait.js'
 
 type RedisBackendOptions = { connection: RedisConnection }
 
@@ -38,7 +38,7 @@ class RedisBackend implements BroadcastDriver {
     const { sends, prefix } = this.connection
     const waiting = sends.sendsMayWait ? sends.waitTurn(broadcastWaitRule(prefix, route), payload, ownPayload) : null
     if (waiting === null) return this.connection.run(REDIS_COMMANDS.publish, { route, payload })
-    return this.publishInTurn(route, waiting)
+    return waiting.run((owned) => this.connection.run(REDIS_COMMANDS.publish, { route, payload: owned }))
   }
 
   subscribe(route: BroadcastRoute, receiver: BackendReceiver, holder: string): DriverAttempt {
@@ -57,16 +57,6 @@ class RedisBackend implements BroadcastDriver {
         reportBroadcastDeliveryLost(route.key, neverReachedSubscription(count, `${route.kind} message`)),
       holder,
     })
-  }
-
-  /** Publishes in its turn while one of our subscriptions is new, then lets later publishes past. */
-  private async publishInTurn(route: BroadcastRoute, waiting: WaitingSend<BroadcastPayload>): Promise<PublishResult> {
-    const payload = await waiting.turn
-    try {
-      return await this.connection.run(REDIS_COMMANDS.publish, { route, payload })
-    } finally {
-      waiting.sent()
-    }
   }
 }
 

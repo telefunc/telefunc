@@ -36,9 +36,9 @@ type Wait = {
 /** How many sends of one budget wait, and the ledger's holder for their bytes. */
 type WaitingBudget = { sends: number; readonly memory: QueueMemory }
 
-/** A send's place in its queue's wait: `await turn` for its own copy of the payload, send that, then `sent()`. A turn
- *  that rejects has left the wait already. */
-type WaitingSend<Payload> = { readonly turn: Promise<Payload>; sent(): void }
+/** A send's place in its queue's wait: `run(send)` sends its own copy of the payload in its turn, and the send leaves
+ *  the wait once `send` settled or the turn failed. */
+type WaitingSend<Payload> = { run<Result>(send: (payload: Payload) => Promise<Result>): Promise<Result> }
 
 type NewSubscriptionWaitOptions = { subscriptions: RedisSubscriptions }
 
@@ -97,22 +97,19 @@ class NewSubscriptionWait {
     waiting.sends++
     this.budgets.set(budget, waiting)
     const owned = own(payload)
-    const sent = () => this.endWait(queue, wait, budget, waiting, charged)
-    return { turn: this.turnOf(wait, failsOn, owned, sent), sent }
-  }
-
-  /** The payload, once `wait` is over; a send that Redis refused one of its `failsOn` for counts as gone. */
-  private async turnOf<Payload>(
-    wait: Wait,
-    failsOn: readonly string[],
-    owned: Payload,
-    sent: () => void,
-  ): Promise<Payload> {
-    await wait.ready
-    const refusedOn = failsOn.find((channel) => wait.refused.has(channel))
-    if (refusedOn === undefined) return owned
-    sent()
-    throw wait.refused.get(refusedOn)
+    return {
+      run: async (send) => {
+        try {
+          await wait.ready
+          // A send that Redis refused one of its `failsOn` for counts as gone.
+          const refusedOn = failsOn.find((channel) => wait.refused.has(channel))
+          if (refusedOn !== undefined) throw wait.refused.get(refusedOn)
+          return await send(owned)
+        } finally {
+          this.endWait(queue, wait, budget, waiting, charged)
+        }
+      },
+    }
   }
 
   /** A waiting send went out: the last of its wait's sends unmaps it, so a send made before then still queues behind

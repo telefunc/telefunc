@@ -63,7 +63,7 @@ import { assert } from './assert.js'
 import type { RedisConnection } from './RedisConnection.js'
 import { neverReachedSubscription } from './RedisSubscriptions.js'
 import { RAW_COMMANDS } from './rawCommands.js'
-import type { WaitingSend, WaitRule } from './NewSubscriptionWait.js'
+import type { WaitRule } from './NewSubscriptionWait.js'
 
 const NO_FENCE_TOKENS: FenceTokens = { lane: '', everyTrack: '', everyMember: '' }
 
@@ -256,35 +256,35 @@ class RedisRoomDriver implements RoomDriver {
     const lane = this.kit.OPERATION_COMMIT_LANE
     const laneKey = this.kit.encodeLaneKey(lane)
     const channels = commitChannels(prefix, roomId, inc, lane, laneKey, this.kit)
+    const operate = async (payload: Uint8Array) => {
+      const fence = this.connection.subscriptions.prepareFence(channels)
+      const commit: CommitInput = {
+        roomId,
+        inc,
+        lane,
+        laneKey,
+        channels,
+        payload,
+        retain: false,
+        owner: undefined,
+        closingLease: undefined,
+        required: undefined,
+        fenceTokens: fence.tokens,
+        kit: this.kit,
+      }
+      const run = () => this.connection.run(REDIS_COMMANDS.operation, { ...input, commit })
+      try {
+        const outcome = await (isCluster(this.connection.client)
+          ? this.inLaneTurn(laneTurnKey(roomId, inc, laneKey), run)
+          : run())
+        return { fence, outcome }
+      } catch (error) {
+        fence.cancel()
+        throw error
+      }
+    }
     const waiting = sends.sendsMayWait ? sends.waitTurn(commitWaitRule(channels), writes.commit, ownBytes) : null
-    const payload = waiting === null ? writes.commit : await waiting.turn
-    const fence = this.connection.subscriptions.prepareFence(channels)
-    const commit: CommitInput = {
-      roomId,
-      inc,
-      lane,
-      laneKey,
-      channels,
-      payload,
-      retain: false,
-      owner: undefined,
-      closingLease: undefined,
-      required: undefined,
-      fenceTokens: fence.tokens,
-      kit: this.kit,
-    }
-    const run = () => this.connection.run(REDIS_COMMANDS.operation, { ...input, commit })
-    let outcome
-    try {
-      outcome = await (isCluster(this.connection.client)
-        ? this.inLaneTurn(laneTurnKey(roomId, inc, laneKey), run)
-        : run())
-    } catch (error) {
-      fence.cancel()
-      throw error
-    } finally {
-      waiting?.sent()
-    }
+    const { fence, outcome } = await (waiting === null ? operate(writes.commit) : waiting.run(operate))
     if (outcome.kind !== 'done' || outcome.commit?.kind !== 'accepted') {
       fence.cancel()
       if (outcome.kind !== 'done') return outcome
@@ -308,7 +308,7 @@ class RedisRoomDriver implements RoomDriver {
     const channels = commitChannels(prefix, roomId, inc, lane, this.kit.encodeLaneKey(lane), this.kit)
     const waiting = sends.waitTurn(commitWaitRule(channels), payload, ownBytes)
     if (waiting === null) return this.commitNow(target, payload, opts)
-    return this.commitInTurn(target, waiting, opts)
+    return waiting.run((owned) => this.commitNow(target, owned, opts))
   }
 
   /** A delivered payload is published, and a stored one is also committed, so both meet the commit's rule: a stored
@@ -356,20 +356,6 @@ class RedisRoomDriver implements RoomDriver {
   private sameAuthority(first: string | null, read: StartRead<unknown>): string {
     if (first !== null && read.authority !== first) throw staleStart(addressOf(this.connection.client))
     return read.authority
-  }
-
-  /** Commits in its turn while one of our subscriptions is new, then lets later commits past. */
-  private async commitInTurn(
-    target: CommitTarget,
-    waiting: WaitingSend<Uint8Array>,
-    opts?: CommitOptions,
-  ): Promise<CommitResult> {
-    const payload = await waiting.turn
-    try {
-      return await this.commitNow(target, payload, opts)
-    } finally {
-      waiting.sent()
-    }
   }
 
   private commitNow(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
