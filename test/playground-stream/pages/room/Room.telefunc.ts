@@ -576,15 +576,22 @@ async function onRoomWhileAway(roomId: string, memberId: string) {
 /** Run by the test with `runServerAction()` while the page is away, once per absence: the room's meta changes, then a
  *  member's meta changes. */
 async function onRoomMetaWhileAway(roomId: string) {
-  const srv = await (await Room.get(roomId)).join({ meta: { name: 'Srv' } })
+  const key = `roomMetaAway_${roomId}`
+  const room = await Room.get(roomId)
+  const srv = await room.join({ meta: { name: 'Srv' } })
   awayMembers.set(roomId, [srv])
   let absence = 0
-  onServerAction(`roomMetaAway_${roomId}`, async () => {
-    absence++
-    await Room.setMeta(roomId, { topic: `away-${absence}` })
-    for (let n = 0; n < 6; n++) await srv.setMeta({ name: 'Srv', filler: `${absence}`.padEnd(128 * 1024) })
-    cleanupState[`roomMetaAway_${roomId}`] = `done-${absence}`
-  })
+  onServerAction(
+    key,
+    async () => {
+      absence++
+      await Room.setMeta(roomId, { topic: `away-${absence}` })
+      for (let n = 0; n < 6; n++) await srv.setMeta({ name: 'Srv', filler: `${absence}`.padEnd(128 * 1024) })
+      cleanupState[key] = `done-${absence}`
+    },
+    { once: false },
+  )
+  room.onClose(() => forgetServerAction(key))
 }
 
 /** A member the test removes, with `runServerAction()`, while the page is away. */

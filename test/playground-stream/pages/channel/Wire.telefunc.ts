@@ -223,7 +223,8 @@ async function onWireChat() {
   const save = new Promise<void>((resolve) => (saved = resolve))
   onServerAction(`wireChat_${ch.id}_saved`, () => saved())
   onServerAction(`wireChat_${ch.id}_close`, () => void ch.close({ timeout: 60_000 }))
-  onServerAction(`wireChat_${ch.id}_check`, () => report(ch.isClosed ? 'closing' : 'check'))
+  // A test polls it.
+  onServerAction(`wireChat_${ch.id}_check`, () => report(ch.isClosed ? 'closing' : 'check'), { once: false })
   ch.listen(async (message) => {
     report('message')
     await save
@@ -232,7 +233,10 @@ async function onWireChat() {
   ch.onOpen(() => report('open'))
   ch.onDisconnect(() => report('disconnect'))
   ch.onReconnect(() => report('reconnect'))
-  ch.onClose(() => report('close'))
+  ch.onClose(() => {
+    report('close')
+    for (const action of ['saved', 'close', 'check']) forgetServerAction(`wireChat_${ch.id}_${action}`)
+  })
   return { channel: ch.client, channelId: ch.id }
 }
 
