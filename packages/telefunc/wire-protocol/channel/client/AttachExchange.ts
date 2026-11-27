@@ -36,6 +36,8 @@ type ReconciledWait = {
   timer: ReturnType<typeof setTimeout>
   /** A later RECONCILE's batch POST is out unanswered: what the event stream delivers meanwhile doesn't excuse it. */
   carrierOut: boolean
+  /** What the RECONCILE asked, till its RECONCILED is applied (`takeInFlight`). */
+  inFlight: ReconcileInFlight | null
 }
 
 /** The RECONCILE in flight. */
@@ -88,7 +90,6 @@ class AttachExchange {
   private reconciledWait: ReconciledWait | null = null
   /** Resolved once no RECONCILE is in flight. */
   private reconcileSettledWaiters: (() => void)[] = []
-  private inFlight = reconcileInFlight()
   /** A channel registered since the last RECONCILE, which owes the server one naming it. */
   private isReconcileOwed = false
   private registerReconcileTimer: ReturnType<typeof setTimeout> | null = null
@@ -137,7 +138,7 @@ class AttachExchange {
       record.state.tag !== 'pending' &&
       !record.awaited &&
       !this.channels.isUndeclared(ix) &&
-      !this.inFlight.ixes.has(ix)
+      this.reconciledWait?.inFlight?.ixes.has(ix) !== true
     )
   }
 
@@ -189,7 +190,6 @@ class AttachExchange {
   /** The server stops awaiting channels as their wire goes, and the next wire's RECONCILE lists them again. */
   forgetWire(): void {
     this.channels.stopAwaiting()
-    this.inFlight = reconcileInFlight()
     this.exitReconciling()
   }
 
@@ -214,9 +214,9 @@ class AttachExchange {
 
   /** The old wire's last frame; a channel no RECONCILE named yet is left out, to reconcile after the handoff. */
   buildBarrierFrame({ sessionId, upgradeId, uplink }: ProbeSession): OutboundFrame {
-    this.enterReconciling(false)
+    const inFlight = this.enterReconciling(false)
     // Its entries attach on the WebSocket, `uplink`'s wire, the one after this one.
-    const open = this.declareOpenEntries(this.channels.values(), { skipUndeclared: true, uplink })
+    const open = this.declareOpenEntries(this.channels.values(), inFlight, { skipUndeclared: true, uplink })
     // A new wire's RECONCILE releases what it leaves out.
     this.channels.takeReleased()
     return { kind: 'reconcile', frame: encode.barrier({ sessionId, upgradeId, open }) }
@@ -232,8 +232,8 @@ class AttachExchange {
     this.reconciledWire = this.owner.wire
     this.committing = true
     this.session = ctrl.sessionId
-    const inFlight = this.inFlight
-    this.inFlight = reconcileInFlight()
+    // From here on no RECONCILE out names its channels: what `closeUnacknowledged` sends goes as the wire takes it.
+    const inFlight = this.takeInFlight() ?? reconcileInFlight()
     const serverHas = this.settleAnswers(ctrl, inFlight)
     // Channels registered after this RECONCILE was built wait for the next one.
     const hasNewChannels = this.channels.hasUndeclared
@@ -326,8 +326,9 @@ class AttachExchange {
   /** An awaited channel's own RECONCILED entry: `lastSeq` if the server attached it, null if not. False where it
    *  answers no channel the server awaited, or waits for the RECONCILED in flight. */
   handleAttachResult(ix: number, lastSeq: number | null): boolean {
-    if (this.inFlight.ixes.has(ix)) {
-      this.inFlight.attachResults.set(ix, lastSeq)
+    const inFlight = this.reconciledWait?.inFlight
+    if (inFlight?.ixes.has(ix)) {
+      inFlight.attachResults.set(ix, lastSeq)
       return false
     }
     const record = this.channels.get(ix)
@@ -362,16 +363,28 @@ class AttachExchange {
   // ── The await-RECONCILED window ──
 
   /** Opens the wait for a new RECONCILE's RECONCILED and arms its deadline, which, where `receipted`, runs till the
-   *  receipt from what the server takes. A follow-up RECONCILE for late registrations opens it again, restarting it. */
-  private enterReconciling(receipted: boolean): void {
-    this.inFlight = reconcileInFlight()
+   *  receipt from what the server takes. A follow-up RECONCILE for late registrations opens it again, restarting it.
+   *  Returns what the RECONCILE asks, which it fills as it is built. */
+  private enterReconciling(receipted: boolean): ReconcileInFlight {
     if (this.reconciledWait !== null) clearTimeout(this.reconciledWait.timer)
+    const inFlight = reconcileInFlight()
     this.reconciledWait = {
       receipt: receipted ? 'awaited' : 'none',
       timeoutMs: RECONCILE_TIMEOUT_MS,
       timer: this.reconcileDeadlineIn(RECONCILE_TIMEOUT_MS),
       carrierOut: false,
+      inFlight,
     }
+    return inFlight
+  }
+
+  /** What the RECONCILE out asked, which its RECONCILED answers: the wait keeps its deadline, no longer the ask. */
+  private takeInFlight(): ReconcileInFlight | null {
+    const wait = this.reconciledWait
+    if (wait === null) return null
+    const { inFlight } = wait
+    wait.inFlight = null
+    return inFlight
   }
 
   /** The RECONCILE's deadline runs from now: the server answered the request that carried it. */
@@ -444,12 +457,12 @@ class AttachExchange {
   // ── The RECONCILE ──
 
   private buildReconcileFrame(): OutboundFrame {
-    this.enterReconciling(this.owner.transport.type === CHANNEL_TRANSPORT.WS)
+    const inFlight = this.enterReconciling(this.owner.transport.type === CHANNEL_TRANSPORT.WS)
     const { uplink } = this.owner.transport
     // The wire that has the session holds what the RECONCILEs before named: one there names what changed since.
     const changes = this.session !== null && this.reconciledWire === this.owner.wire
     const records = changes ? this.channels.changed() : this.channels.values()
-    const open = this.declareOpenEntries(records, {
+    const open = this.declareOpenEntries(records, inFlight, {
       skipUndeclared: false,
       uplink,
     })
@@ -470,6 +483,7 @@ class AttachExchange {
 
   private declareOpenEntries(
     records: Iterable<ChannelRecord>,
+    inFlight: ReconcileInFlight,
     {
       skipUndeclared,
       uplink,
@@ -490,7 +504,7 @@ class AttachExchange {
       const isInitial = this.channels.isInitial(record)
       if (skipUndeclared && isInitial && !record.awaited) continue
       this.channels.markDeclared(record)
-      this.inFlight.ixes.set(ix, isInitial)
+      inFlight.ixes.set(ix, isInitial)
       const payloadEntry: ReconcileOpenEntry = {
         id: record.channel.id,
         ix,
@@ -498,7 +512,7 @@ class AttachExchange {
       }
       if (isInitial) payloadEntry.initial = true
       const state = record.channel._attach.state(uplink)
-      if (state.probe !== undefined) this.inFlight.probes.set(ix, state.probe)
+      if (state.probe !== undefined) inFlight.probes.set(ix, state.probe)
       Object.assign(payloadEntry, state)
       if (state.want) wanting.add(ix)
       open.push(payloadEntry)
@@ -517,7 +531,9 @@ class AttachExchange {
   private drainBufferedFramesForReconcile(): OutboundFrame[] {
     if (!this.owner.transport.carriesReconcileInOpen) return []
     // A channel the server awaits is left out: its replay waits for its ATTACH_RESULT.
-    return this.gate.drainForReconcile(this.inFlight.carriedFrom)
+    const inFlight = this.reconciledWait?.inFlight
+    assert(inFlight)
+    return this.gate.drainForReconcile(inFlight.carriedFrom)
   }
 
   /** Whether a replay holds a frame the page sent. */
