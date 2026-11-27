@@ -60,16 +60,26 @@ function sendToUnread() {
   }
 }
 
-/** Returns a channel and keeps `blob` unread past the answer; the page's `'answer'` gets 512 KiB back, and its `'read'`
- *  reads `blob` then. */
-async function onKeptUpload(blob: Blob) {
-  const channel = new Channel<(msg: 'answer' | 'read') => string, never>()
+async function onKeptUpload(first: File, second: File, third: File) {
+  const reader = first.stream().getReader()
+  try {
+    const { value } = await reader.read()
+    if (!value?.length || value.length >= first.size) throw new Error('expected a partial read of the first file')
+    await reader.cancel()
+  } finally {
+    reader.releaseLock()
+  }
+  const channel = new Channel<(msg: 'answer' | 'second' | 'third') => string, never>()
   channel.listen(async (msg) => {
     if (msg === 'answer') return 'x'.repeat(512 * 1024)
-    return blob.text().then(
-      (text) => `read ${text.length} bytes`,
-      (err: Error) => err.message,
-    )
+    try {
+      const bytes = new Uint8Array(await (msg === 'second' ? second : third).arrayBuffer())
+      return bytes.length === 768 * 1024 && bytes.every((byte, i) => byte === i % 251)
+        ? 'bytes match'
+        : `read ${bytes.length} bytes`
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err)
+    }
   })
   return channel.client
 }

@@ -55,7 +55,7 @@ type SmallPendingState = {
   } | null
   broadcastKeys: { publish: string; firstClosed: string; secondReceived: string[]; secondClosed: boolean } | null
   unreadSends: { opened: true } | null
-  keptUpload: { next: string; answer: string; read: string } | null
+  keptUpload: { next: string; answer: string; second: string; third: string } | null
 }
 
 /** The channel page's state. */
@@ -374,19 +374,21 @@ function testSmallPending() {
     )
   })
 
-  // On 2 MiB, the server keeps at most 1.75 MiB of the upload, then refuses the rest of it: the 512 KiB answer needs the
-  // room what it kept of it took.
-  test("channel: a call that returns a channel and keeps its 4 MiB upload past maxMemory: the next call is answered, the server lets go of what it kept of the upload, and the upload's late read fails saying why", async () => {
+  test('channel: a retained upload drops the cancelled first file and the refused tail, keeping the second file and room for an answer', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-kept-upload')
     await autoRetry(
       async () => {
-        const { next, answer, read } = defined((await stateOf()).keptUpload, 'keptUpload')
-        expect(next).toBe('hello')
-        expect(answer).toBe(`${512 * 1024} bytes`)
-        expect(read).toContain(
-          `The telefunction returned before it read this File (${4 * 1024 * 1024} bytes), and the server keeps no more of a File left unread than config.channel.maxMemory and config.channel.maxPendingBytes allow: the rest was dropped.`,
-        )
+        const result = defined((await stateOf()).keptUpload, 'keptUpload')
+        expect({
+          ...result,
+          third: result.third.includes('the rest was dropped.') ? 'refused' : result.third,
+        }).deep.equal({
+          next: 'hello',
+          answer: `${512 * 1024} bytes`,
+          second: 'bytes match',
+          third: 'refused',
+        })
       },
       { timeout: 30_000 },
     )

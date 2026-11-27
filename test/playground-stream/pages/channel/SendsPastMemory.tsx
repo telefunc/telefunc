@@ -12,7 +12,7 @@ type SendsPastMemoryState = {
     | { error: string }
     | null
   unreadSends: { opened: true } | null
-  keptUpload: { next: string; answer: string; read: string } | null
+  keptUpload: { next: string; answer: string; second: string; third: string } | null
 }
 
 const initialSendsPastMemoryState: SendsPastMemoryState = {
@@ -142,20 +142,25 @@ function UnreadSends({ show }: { show: Show }) {
   )
 }
 
-// A call that returns a channel and keeps its 4 MiB Blob unread, then the next call, then an answer of 512 KiB, then
-// the Blob's read.
 function KeptUpload({ show }: { show: Show }) {
   async function testKeptUpload() {
     show({ keptUpload: null })
-    const channel = await openChannel(() => onKeptUpload(new Blob([new Uint8Array(4 * 1024 * 1024).fill(120)])))
+    const channel = await openChannel(() =>
+      onKeptUpload(
+        new File([new Uint8Array(1536 * 1024).fill(1)], 'cancelled.bin'),
+        new File([new Uint8Array(768 * 1024).map((_, i) => i % 251)], 'kept.bin'),
+        new File([new Uint8Array(1536 * 1024).fill(3)], 'refused.bin'),
+      ),
+    )
     const next = await onHello()
     const answer = await channel.send('answer', { ack: true }).then(
       (text) => `${text.length} bytes`,
       (err: Error) => err.name,
     )
-    const read = await channel.send('read', { ack: true }).catch((err: Error) => err.name)
+    const second = await channel.send('second', { ack: true }).catch((err: Error) => err.name)
+    const third = await channel.send('third', { ack: true }).catch((err: Error) => err.name)
     channel.close()
-    show({ keptUpload: { next, answer, read } })
+    show({ keptUpload: { next, answer, second, third } })
   }
 
   return (
@@ -165,7 +170,7 @@ function KeptUpload({ show }: { show: Show }) {
       onClick={testKeptUpload}
       className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
     >
-      Call Keeps A 4 MiB Upload Past Its Answer
+      Cancel The First File And Keep The Other Uploads
     </button>
   )
 }
