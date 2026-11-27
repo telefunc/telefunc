@@ -301,9 +301,9 @@ function refuseEndedEnvelope(runContext: RunContext): { isMalformedRequest: true
  *  hold the connection as long as it sends, as they do without Telefunc. A failure that is the app's own error is a bug;
  *  a client that left ends it quietly. `watchClient`: from now on, the client's leaving ends the read. */
 async function readOffBody(reader: BodyReader, signal: AbortSignal, watchClient: () => void): Promise<void> {
-  // A client that left (on Node 22.0, the Node adapter's `AbortSignal.any()` signal says so a microtask after its
-  // source) fails the read under way, which settles first to keep its own failure; an answered call's read may wait on
-  // the client, so it isn't awaited.
+  // A client that left (on Node 22.0, the Node adapter's `AbortSignal.any()` signal says so only once its source's
+  // `abort` listeners ran, so the wait lets that dispatch finish) fails the read under way, which settles first to keep
+  // its own failure; an answered call's read may wait on the client, so it isn't awaited.
   if (!signal.aborted) await node22AbortSignalLag()
   if (signal.aborted) await reader.readSettled()
   watchClient()

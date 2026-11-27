@@ -1,9 +1,10 @@
 /// <reference types="@cloudflare/workers-types" />
 
 // Workarounds of a Durable Object's WebSocket under crossws 0.4.6's Cloudflare adapter:
-// - Before compatibility date 2026-04-07, workerd leaves a client's close unanswered until the Durable Object closes
-//   the socket too: without the echo, the page's close handshake never completes. Remove once Telefunc requires a
-//   compatibility date of 2026-04-07 or later.
+// - workerd leaves a client's close to a Durable Object's `ctx.acceptWebSocket()` socket unanswered until the Durable
+//   Object closes the socket too, at compatibility date 2026-04-07 and with `web_socket_auto_reply_to_close` as well
+//   (only a plain Worker's `server.accept()` socket answers by itself): without the echo, the page's close handshake
+//   never completes. Remove once workerd answers a client's close to a `ctx.acceptWebSocket()` socket by itself.
 // - crossws has no Durable Object handler for a socket's error: without the translation, the error reaches none of
 //   Telefunc's hooks and doesn't end the socket's wire. Remove once Telefunc's own WebSocket adapter replaces crossws.
 export { echoClientClose, closeOnDurableError }
