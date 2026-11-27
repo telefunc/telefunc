@@ -195,9 +195,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private readonly upgrade: Upgrade
   /** The page's transports include a WebSocket. */
   private readonly allowsWebSocket: boolean
-  /** Whether a WebSocket opened on this connection, and how many WebSockets ended unopened in a row since. */
-  private openedWebSocket = false
-  private unopenedInARow = 0
+  /** How many WebSockets ended unopened in a row, a wire that opens breaking the row: null till a WebSocket opened on
+   *  this connection. */
+  private unopenedInARow: number | null = null
   /** The transports the server allows, from the last settled RECONCILED: an upgrade may start once it came, whether
    *  before or after the SSE wire opened. */
   private serverTransports: ReconciledPayload['transports'] | null = null
@@ -408,8 +408,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   onTransportOpen(transport: ClientChannelTransport, startedAt: number): void {
     if (transport !== this.transport) return
-    if (transport.type === CHANNEL_TRANSPORT.WS) this.openedWebSocket = true
-    this.unopenedInARow = 0
+    if (transport.type === CHANNEL_TRANSPORT.WS || this.unopenedInARow !== null) this.unopenedInARow = 0
     // The handshake's sample is the opened socket's own: one that hung beside it adds nothing. SSE's RECONCILED may
     // have come first, and taken it.
     if (this.underWay !== null) this.underWay.openStartedAt = startedAt
@@ -603,7 +602,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.stopCut()
     this.upgrade.abortAttempt()
     // One that never opened takes the page to SSE, unless a WebSocket opened before: then only a second in a row does.
-    if (unopened && (++this.unopenedInARow > 1 || !this.openedWebSocket)) this.leaveWsWhereSse()
+    if (unopened && (this.unopenedInARow === null || ++this.unopenedInARow > 1)) this.leaveWsWhereSse()
     const why = refused === undefined ? (lost ?? refusal) : `The server refused what the page sent with ${refused}`
     this.handleTransportLoss(
       why === undefined ? null : new NetworkError(why, true),
@@ -640,7 +639,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   /** Where the page's transports list SSE, the next attempt goes over it, and upgrades once a WebSocket opens. */
   private leaveWsWhereSse(): void {
     if (!this.connectionOptions.transports.includes(CHANNEL_TRANSPORT.SSE)) return
-    this.unopenedInARow = 0
+    if (this.unopenedInARow !== null) this.unopenedInARow = 0
     this.transport.dispose()
     this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
   }
@@ -726,7 +725,6 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 
   private adoptTransport(transport: UpgradeTarget): void {
-    this.openedWebSocket = true
     this.unopenedInARow = 0
     this.transport = transport
     this.wire++
