@@ -7,8 +7,10 @@ import { getGlobalObject } from './getGlobalObject.js'
 import {
   addressOf,
   ClusterNodesFailed,
+  commandTimeoutOf,
   isCluster,
   isReplyError,
+  isTimedOut,
   isUnsent,
   lastClusterReply,
   type RedisClient,
@@ -138,6 +140,13 @@ function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unkn
     })
   }
   const message = last ?? (isReplyError(error) ? error.message : undefined)
+  if (message === undefined && isTimedOut(error)) {
+    return new BackendError({
+      code: 'unreachable',
+      outcome: outcome(false),
+      message: `Redis at ${where} didn't answer a command of Telefunc's Redis backend within ${commandTimeoutOf(redis)} ms: a later call may succeed once it answers`,
+    })
+  }
   if (message === undefined) {
     const code = connectionCode(error)
     return new BackendError({

@@ -16,7 +16,9 @@ afterEach(() => {
 })
 
 /** A client that connects only on a command, which these tests never send. */
-function client(options: { username?: string; password?: string; tls?: object; port?: number } = {}): Redis {
+function client(
+  options: { username?: string; password?: string; tls?: object; port?: number; commandTimeout?: number } = {},
+): Redis {
   const redis = new Redis({ lazyConnect: true, host: '127.0.0.1', port: 6390, ...options })
   clients.push(redis)
   return redis
@@ -220,6 +222,83 @@ describe('a command sent without a script, read or write as ioredis tells it', (
 
   it("HKEYS, a read: its lost reply says it didn't run", async () => {
     expect(await replyLost(RAW_COMMANDS.hkeys)).toMatchObject({ code: 'unreachable', outcome: 'not-run' })
+  })
+})
+
+/** A server that answers the handshake (CLIENT SETINFO, then INFO as a ready server) and holds the reply to the first
+ *  other command, and so to every command after it. */
+async function holdingServer(): Promise<{ port: number; server: Server }> {
+  const server = createServer((socket) => {
+    socket.on('error', () => {})
+    let holding = false
+    socket.on('data', (data) => {
+      for (const [, name] of data.toString('latin1').matchAll(/\*\d+\r\n\$\d+\r\n(\w+)\r\n/g)) {
+        const command = name?.toLowerCase()
+        holding ||= command !== 'client' && command !== 'info'
+        if (!holding) socket.write(command === 'info' ? '$9\r\nloading:0\r\n' : '+OK\r\n')
+      }
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('the holding server has no port')
+  return { port: address.port, server }
+}
+
+const settled = (call: Promise<unknown>) =>
+  call.then(
+    () => 'answered',
+    (error: unknown) => error,
+  )
+
+describe('a command whose reply Redis holds', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('fails after 15 s, the command queued behind it too: a write may have run, a read changed nothing', async () => {
+    const { port, server } = await holdingServer()
+    const connection = installed(client({ port }))
+    await connection.client.connect()
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const write = settled(connection.send(RAW_COMMANDS.unlink, 'tf:0:k'))
+    const read = settled(connection.send(RAW_COMMANDS.hkeys, 'tf:0:h'))
+    await vi.advanceTimersByTimeAsync(14_999)
+    const early = await Promise.race([write, read, Promise.resolve('pending')])
+    await vi.advanceTimersByTimeAsync(1)
+    const told = { write: await write, read: await read }
+    server.close()
+
+    expect(early).toBe('pending')
+    const message = `Redis at 127.0.0.1:${port} didn't answer a command of Telefunc's Redis backend within 15000 ms: a later call may succeed once it answers`
+    expect(told).toMatchObject({
+      write: { name: 'BackendError', code: 'unreachable', outcome: 'may-have-run', message },
+      read: { name: 'BackendError', code: 'unreachable', outcome: 'not-run', message },
+    })
+  })
+
+  it("waits as long as the commandTimeout of the app's client says", async () => {
+    const { port, server } = await holdingServer()
+    const connection = installed(client({ port, commandTimeout: 200 }))
+    const failure = await settled(connection.send(RAW_COMMANDS.hkeys, 'tf:0:h'))
+    server.close()
+
+    expect(failure).toMatchObject({
+      code: 'unreachable',
+      outcome: 'not-run',
+      message: expect.stringContaining(' 200 ms'),
+    })
+  })
+
+  it("a Cluster's nodes wait 15 s, or as long as the redisOptions of the app's Cluster say", () => {
+    const of = (redisOptions: { commandTimeout?: number }) => {
+      const cluster = new Cluster([{ host: '127.0.0.1', port: 7001 }], { lazyConnect: true, redisOptions })
+      clients.push(cluster)
+      const commands = installed(cluster).client
+      clients.push(commands)
+      return commands instanceof Cluster ? commands.options.redisOptions?.commandTimeout : 'not a Cluster'
+    }
+    expect([of({}), of({ commandTimeout: 300 })]).toEqual([15_000, 300])
   })
 })
 

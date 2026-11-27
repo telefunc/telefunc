@@ -1,7 +1,7 @@
 // The client library's facts: the command client and subscriber socket the backend builds from an app's client, the
 // backend's requests as ioredis commands of its own, a client's deployment and address, which raw commands write by
-// ioredis's own command table, its wording for a command it never wrote or redirected until it gave up. What a store's
-// reply means is redisFailure.ts's.
+// ioredis's own command table, its wording for a command it never wrote, timed out, or redirected until it gave up. What
+// a store's reply means is redisFailure.ts's.
 export {
   StoreRequest,
   sendRequest,
@@ -18,6 +18,8 @@ export {
   addressOf,
   isReplyError,
   isUnsent,
+  isTimedOut,
+  commandTimeoutOf,
   lastClusterReply,
   slotOf,
   formerMaster,
@@ -268,6 +270,16 @@ function isUnsent(error: unknown): boolean {
   return error instanceof Error && UNSENT.test(error.message)
 }
 
+/** ioredis's rejection of a command whose reply didn't come within its client's `commandTimeout`. */
+function isTimedOut(error: unknown): boolean {
+  return error instanceof Error && error.message === 'Command timed out'
+}
+
+/** How long a command of `redis` waits for its reply, a Cluster's by its nodes' options; undefined: without end. */
+function commandTimeoutOf(redis: RedisClient): number | undefined {
+  return isCluster(redis) ? redis.options.redisOptions?.commandTimeout : redis.options.commandTimeout
+}
+
 /** ioredis's rejection of a Cluster command once its redirections ran out, holding the reply that ended it. ioredis
  *  counts the app's `maxRedirections` down on every reply that fails a try, before it reads the reply, so at 0 the
  *  first reply ends the command, whatever it is (ioredis 5.10.1, `Cluster.handleError()`). */
@@ -291,9 +303,12 @@ function isReplyError(error: unknown): error is Error {
 /** ioredis's own default. */
 const SLOTS_REFRESH_MS = 5_000
 
+/** How long a command of the backend waits for its reply where the app's client sets no `commandTimeout`. */
+const COMMAND_TIMEOUT_MS = 15_000
+
 /** A clone of the app's client for the backend's commands: it never resends a command (at-most-once), never holds one
- *  it can't write yet (`nextReady()` waits for it to be ready instead), and reads masters only (Room reads are strongly
- *  consistent). */
+ *  it can't write yet (`nextReady()` waits for it to be ready instead), fails one whose reply doesn't come in time, and
+ *  reads masters only (Room reads are strongly consistent). */
 function createCommandClient(redis: RedisClient): RedisClient {
   // A Cluster copies redisOptions.keyPrefix to its own options, so this reads either form.
   if (redis.options.keyPrefix) {
@@ -309,6 +324,7 @@ function createCommandClient(redis: RedisClient): RedisClient {
         'primary: leave out `role`',
     )
   }
+  const commandTimeout = commandTimeoutOf(redis) ?? COMMAND_TIMEOUT_MS
   const commands = isCluster(redis)
     ? redis.duplicate([], {
         scaleReads: 'master',
@@ -321,12 +337,18 @@ function createCommandClient(redis: RedisClient): RedisClient {
         // Autopipelining batches a Cluster command by the node of its first argument, which for a script with a
         // variable key count is the count, and refuses a batch whose keys span masters.
         enableAutoPipelining: false,
-        redisOptions: { ...redis.options.redisOptions, maxRetriesPerRequest: 0, reconnectOnError: null },
+        redisOptions: {
+          ...redis.options.redisOptions,
+          maxRetriesPerRequest: 0,
+          reconnectOnError: null,
+          commandTimeout,
+        },
       })
     : redis.duplicate({
         maxRetriesPerRequest: 0,
         reconnectOnError: null,
         enableOfflineQueue: false,
+        commandTimeout,
         // Autopipelining holds a command until the next tick and writes it in a batch, which alone reaches the socket:
         // each of the backend's commands is written when it is sent, as on its Cluster client.
         enableAutoPipelining: false,

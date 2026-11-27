@@ -196,6 +196,31 @@ describe('a start read Redis answers with an error', () => {
   }
 })
 
+describe('a start read whose reply Redis holds', () => {
+  it('holds the subscriptions made meanwhile only until its command times out, then is read again', async () => {
+    const subscribed: string[] = []
+    const { subscriptions, listen } = setup(async (...channels) => void subscribed.push(...channels))
+    const held = createDeferred<Starts>()
+    let reads = 0
+    const text = listen(TEXT, () => (++reads === 1 ? held.promise : Promise.resolve(none())))
+    await expect.poll(() => reads).toBe(1)
+    const binary = listen(BINARY)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const meanwhile = { subscribed: [...subscribed], binary: binary.state() }
+    // As ioredis rejects a command once its client's commandTimeout passed.
+    held.reject(new Error('Command timed out'))
+
+    await Promise.all(subscriptions.establishingOn([TEXT, BINARY]))
+    expect({ meanwhile, subscribed, text: text.state(), binary: binary.state(), reads }).toEqual({
+      meanwhile: { subscribed: [TEXT], binary: 'establishing' },
+      subscribed: [TEXT, BINARY],
+      text: 'ready',
+      binary: 'ready',
+      reads: 2,
+    })
+  })
+})
+
 describe('a resume', () => {
   const lane = (place: number) => ({ authority: 'a', starts: new Map([['', { place, id: BigInt(place) }]]) })
 
