@@ -110,11 +110,6 @@
       "browser": "./dist/client/__internal.js",
       "types": "./dist/node/server/__internal.d.ts",
       "default": "./dist/node/server/__internal.js"
-    },
-    "./__internal/broadcasts": {
-      "browser": "./dist/client/__internal/broadcasts.js",
-      "types": "./dist/node/server/__internal/broadcasts.d.ts",
-      "default": "./dist/node/server/__internal/broadcasts.js"
     }
   },
   "type": "module",

@@ -34,10 +34,9 @@ async function loadFeatures(features: Feature[], call: WaitingCall): Promise<Fea
 /** A loaded feature's code: an extension's value creates its channel or broadcast with what the extension loaded. */
 function loadedFeature<F extends 'channels' | 'broadcasts'>(feature: F): NonNullable<Features[F]> {
   const loaded = globalObject.loaded[feature]
-  const isChannel = feature === 'channels'
   assertUsage(
     loaded,
-    `A Telefunc extension's value creates a ${isChannel ? 'channel' : 'broadcast'}, yet the page hasn't loaded Telefunc's code for it: the extension's client code should \`import 'telefunc/__internal${isChannel ? '' : '/broadcasts'}'\`.`,
+    `A Telefunc extension's value creates a ${feature === 'channels' ? 'channel' : 'broadcast'}, yet the page hasn't loaded Telefunc's code for it: the extension's client code should \`import 'telefunc/__internal'\`.`,
   )
   return loaded
 }

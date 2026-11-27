@@ -573,6 +573,7 @@ test.each(['createChannel', 'sendStream'] as const)(
   async (method) => {
     const { call, config } = await page()
     gates.channels.open()
+    gates.broadcasts.open()
     // The extension's client code: its values create channels.
     await import('../../../client/__internal.js')
     imported = []
@@ -760,12 +761,13 @@ test('a response carrying an inline stream and a channel loads both, then revive
   expect(imported.sort()).toEqual(['channels', 'streams'])
 })
 
-test('an extension response can create a broadcast and a channel', async () => {
+test('an extension that imports telefunc/__internal creates a broadcast and a channel from its response, loading no other code', async () => {
   const { call, config } = await page()
   gates.channels.open()
   gates.broadcasts.open()
   // The extension's client code: its values create channels and broadcasts.
-  await import('../../../client/__internal/broadcasts.js')
+  await import('../../../client/__internal.js')
+  imported = []
   const created: string[] = []
   config.extensions.push({
     name: 'probe',
@@ -789,38 +791,6 @@ test('an extension response can create a broadcast and a channel', async () => {
   respond = text(tag('!TelefuncProbe:', { channelId: 'p1' }))
   expect(await call([])).toHaveProperty('subscribe', expect.any(Function))
   expect(created).toEqual(['p1'])
-  expect(imported).toEqual(['channels', 'broadcasts'])
-})
-
-test('an extension response whose values create channels loads no other code', async () => {
-  const { call, config } = await page()
-  gates.channels.open()
-  gates.broadcasts.open()
-  // The extension's client code: its values create channels.
-  await import('../../../client/__internal.js')
-  expect(imported).toEqual(['channels'])
-  imported = []
-  failing.add('broadcasts')
-  config.extensions.push({
-    name: 'subject',
-    responseTypes: [
-      {
-        prefix: '!TelefuncSubject:',
-        revive(metadata: { channelId: string }, context) {
-          const channel = context.createChannel({ channelId: metadata.channelId })
-          return {
-            value: { channel },
-            async close() {
-              await channel.close()
-            },
-            abort: () => channel.abort(),
-          }
-        },
-      },
-    ],
-  })
-  respond = text(tag('!TelefuncSubject:', { channelId: 's1' }))
-  expect(await call([])).toHaveProperty('channel.id', 's1')
   expect(imported).toEqual([])
 })
 
