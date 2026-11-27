@@ -467,6 +467,7 @@ function testWire(isDev: boolean) {
   })
 
   if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse') {
+    testWireProxyAnswers()
     test("channel: a message sent with an SSE wire's first batch, which the server held until the connection dropped, arrives once and before the next", async () => {
       await navigate(`${getServerUrl()}/channel`)
       await holdNextSseWire()
@@ -564,6 +565,67 @@ function testWire(isDev: boolean) {
   }
 }
 
+// What a proxy in front of the server answers the page's SSE requests with.
+function testWireProxyAnswers() {
+  const telefuncRequests = '**/_telefunc**'
+
+  test('channel: an SSE reopen a proxy answers with 503 and Retry-After: 2 goes again no sooner than 2 s later, and the channel delivers', async () => {
+    const channelId = await openEnd()
+    let refusedAt = 0
+    const opensAfter: number[] = []
+    await page.route(telefuncRequests, async (route) => {
+      if (route.request().headers().accept !== 'text/event-stream') return route.fallback()
+      if (!refusedAt) {
+        refusedAt = Date.now()
+        return route.fulfill({ status: 503, headers: { 'Retry-After': '2' }, contentType: 'text/html', body: 'Busy' })
+      }
+      opensAfter.push(Date.now() - refusedAt)
+      return route.fallback()
+    })
+    try {
+      await cutWire()
+      await autoRetry(() => expect(opensAfter.length).not.toBe(0), { timeout: 20_000 })
+      expect(opensAfter[0]! >= 2_000).toBe(true)
+      await runServerAction(`wireEnd_${channelId}_close`)
+      await autoRetry(async () => {
+        const { end } = await getResult<WireState>('#wire-state')
+        expect(end!.received).deep.equal([...sentBefore, 'onClose:none'])
+      })
+      expectLog('the server responded with a status of 503', { filter: (log) => log.logSource === 'Browser Error' })
+    } finally {
+      await page.unroute(telefuncRequests)
+    }
+  })
+
+  test('channel: behind a proxy that answers SSE POSTs over 64 KiB with 413, 256 messages of 16 KiB each way all arrive once and in order', async () => {
+    let refused = 0
+    await page.route(telefuncRequests, async (route) => {
+      const request = route.request()
+      const isPost = request.method() === 'POST' && request.headers().accept !== 'text/event-stream'
+      if (!isPost || (request.postDataBuffer()?.byteLength ?? 0) <= 64 * 1024) return route.fallback()
+      refused++
+      return route.fulfill({ status: 413, contentType: 'text/html', body: 'Payload Too Large' })
+    })
+    try {
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click('#wire-resume')
+      const all: Tally = { text: 256, binary: 256, inOrder: true }
+      await autoRetry(
+        async () => {
+          const { resume } = await getResult<WireState>('#wire-state')
+          expect(resume?.received).deep.equal(all)
+          expect(JSON.parse((await getCleanupState())[`wireResume_${resume!.channelId}`]!)).deep.equal(all)
+        },
+        { timeout: 30_000 },
+      )
+      expect(refused).not.toBe(0)
+      expectLog('the server responded with a status of 413', { filter: (log) => log.logSource === 'Browser Error' })
+    } finally {
+      await page.unroute(telefuncRequests)
+    }
+  })
+}
+
 async function openEnd(): Promise<string> {
   await navigate(`${getServerUrl()}/channel`)
   await page.click('#wire-end-open')
@@ -638,6 +700,21 @@ function testWireShortReconnect() {
       expect((await getResult<{ name: string }>('#download-result')).name).toBe('eager.txt')
     })
   }
+
+  test('channel: a channel the page closes as its connection goes for good ends on the page with ChannelCloseUnknownError', async () => {
+    await openEnd()
+    await goAway()
+    await page.click('#wire-end-close')
+    await autoRetry(
+      async () => {
+        const { end } = await getResult<WireState>('#wire-state')
+        expect(end?.close).toBe('ChannelCloseUnknownError')
+        expect(end?.received).deep.equal(['onClose:ChannelCloseUnknownError'])
+      },
+      { timeout: 60_000 },
+    )
+    await page.context().setOffline(false)
+  })
 
   test('file download: a page that goes away for good while the server waits to send it more ends the download, and the server keeps running', async () => {
     let sent: string | undefined
