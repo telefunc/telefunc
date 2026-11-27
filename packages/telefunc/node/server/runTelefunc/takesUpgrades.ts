@@ -16,7 +16,7 @@ const noUpgrades: TakesUpgrades = () => false
 const upgradesTakenHere: TakesUpgrades = () => true
 
 /** Telefunc's take of a Node server, kept for the server's life: the `upgrade` listener Telefunc put on it and, where
- *  Node reads one, the `shouldUpgradeCallback` it put in front of the server's own (`own`), as the server can't tell
+ *  Node reads one, the `shouldUpgradeCallback` it put in front of the server's own (`wrapped`), as the server can't tell
  *  which of its functions are Telefunc's. `holdsRegistry`: the server is in 0.3.1's registry for Telefunc's listener.
  *  A removal of the listener that Telefunc's `removeListener` listener didn't see leaves it there, so 0.3.1's next
  *  install skips the server, until this copy's next `installWebSocket()` takes it again. */
@@ -26,8 +26,7 @@ type TakenServer = {
     shouldUpgradeCallback?: unknown
   }
   listener: (...args: never[]) => void
-  callback: ((req: IncomingMessage) => boolean) | undefined
-  own: ((req: IncomingMessage) => unknown) | undefined
+  wrapped: { callback: (req: IncomingMessage) => boolean; own: (req: IncomingMessage) => unknown } | null
   holdsRegistry: boolean
 }
 
@@ -48,7 +47,7 @@ function upgradesOfServer(server: object): TakesUpgrades {
 function telefuncsUpgradesOn(server: object): 'nothing' | 'listener' | 'listener and callback' {
   const taken = upgradeServers.get(server)
   if (taken === undefined || taken.server.listenerCount('upgrade', taken.listener) === 0) return 'nothing'
-  if (taken.callback !== undefined && taken.server.shouldUpgradeCallback !== taken.callback) return 'listener'
+  if (taken.wrapped !== null && taken.server.shouldUpgradeCallback !== taken.wrapped.callback) return 'listener'
   return 'listener and callback'
 }
 

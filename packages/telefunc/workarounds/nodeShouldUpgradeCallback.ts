@@ -40,12 +40,12 @@ function upgradeOthersOnlyForTheirListeners(
     }
   }
   server.shouldUpgradeCallback = callback
-  taken.callback = callback
-  taken.own = own
+  taken.wrapped = { callback, own }
 }
 
 /** Puts the server's own callback back where Telefunc's is still the server's: one the app set since stays. */
 function putBackOwnCallback(server: HttpServer, taken: TakenServer): void {
-  if (taken.own === undefined || !hasProp(server, 'shouldUpgradeCallback', 'function')) return
-  if (server.shouldUpgradeCallback === taken.callback) server.shouldUpgradeCallback = taken.own
+  const { wrapped } = taken
+  if (wrapped === null || !hasProp(server, 'shouldUpgradeCallback', 'function')) return
+  if (server.shouldUpgradeCallback === wrapped.callback) server.shouldUpgradeCallback = wrapped.own
 }

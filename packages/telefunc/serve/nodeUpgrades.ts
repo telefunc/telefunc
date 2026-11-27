@@ -120,8 +120,7 @@ function takeUpgrades(httpServer: HttpServer): void {
   const taken: TakenServer = {
     server: httpServer,
     listener: onUpgrade,
-    callback: undefined,
-    own: undefined,
+    wrapped: null,
     holdsRegistry: true,
   }
   registeredServers.add(httpServer)
