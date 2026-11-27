@@ -1,7 +1,7 @@
 export { SessionRegistry }
 export type { ChannelHandle, Session }
 
-import type { MuxChannel } from './ServerChannel.js'
+import type { ServerChannel } from './ServerChannel.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import type { WireEntry } from './ChannelMux.js'
 import type { SessionCause } from '../endCause.js'
@@ -9,7 +9,7 @@ import { DeadlineTimer } from '../DeadlineTimer.js'
 import { catchUpDroppedTimer } from '../../../workarounds/workerdDroppedTimers.js'
 
 /** A channel as one session holds it: its index there and the peer it sends through, none once its wire went. */
-type ChannelHandle = { channel: MuxChannel; ix: number; peer: IndexedPeer | null }
+type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer | null }
 
 /** A page's session, under one id for its life: its channels by index, and the one wire that holds it, which alone
  *  speaks for its channels. */

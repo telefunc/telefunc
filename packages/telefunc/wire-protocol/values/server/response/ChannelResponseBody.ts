@@ -52,7 +52,7 @@ function pumpProducerToChannel(
   runContext: ChannelPumpRunContext,
   onComplete: () => void,
 ): void {
-  getChannelMux().registerChannel(channel, runContext.requestContext.page)
+  getChannelMux().registerChannel(channel as unknown as ServerChannel<unknown, unknown>, runContext.requestContext.page)
 
   const telefuncId = {
     telefunctionName: runContext.telefunctionName,

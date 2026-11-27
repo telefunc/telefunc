@@ -1,5 +1,5 @@
 export { ATTACHABLE_NOW, Channel, ServerChannel }
-export type { CallPage, MuxChannel, ResponseChannel }
+export type { CallPage }
 
 const SERVER_CHANNEL_BRAND = Symbol.for('telefunc.ServerChannel')
 
@@ -140,34 +140,6 @@ type CallPage = {
 const ATTACHABLE_NOW: CallPage = { lastSign: () => Number.NEGATIVE_INFINITY, neverCame: () => {} }
 
 type ChannelOptions = { ack?: boolean; id?: string }
-
-/** A channel as the mux and its wires hold it, whatever data it carries. */
-type MuxChannel = Pick<
-  ServerChannel,
-  | 'id'
-  | 'heldBytes'
-  | '_phase'
-  | '_callRequest'
-  | '_lastClientSeq'
-  | '_replayBuffer'
-  | '_registerChannel'
-  | '_applyCallWant'
-  | '_confirmWant'
-  | '_attachPeer'
-  | '_dispatchFrame'
-  | '_acknowledge'
-  | '_onPageAttach'
-  | '_onPageMoving'
-  | '_onPageClosed'
-  | '_onPeerDisconnect'
-  | '_onPeerGone'
-  | '_onPeerRecoveryFailure'
-  | '_onServerEnd'
-  | '_release'
->
-
-/** A channel as a response carries it, whatever data it carries. */
-type ResponseChannel = MuxChannel & Pick<ServerChannel, '_validators' | '_setResponseAbort' | 'onClose'>
 
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements Channel<ClientToServer, ServerToClient>, ChannelLifecycleOwner, BufferedSender, MemoryHolder

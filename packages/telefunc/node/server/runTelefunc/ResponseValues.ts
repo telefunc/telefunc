@@ -3,7 +3,7 @@ export type { ResponseValuesRun, SerializeResult, TelefuncId }
 
 import { assertUsage } from '../../../utils/assert.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
-import { ServerChannel, type ResponseChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
+import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
 import { buildShieldValidators, type ShieldValidators, type ValueShields, type ShieldLogConfig } from '../shield.js'
 import { buildInlineResponseBody } from '../../../wire-protocol/values/server/response/StreamingResponseBody.js'
 import { pumpProducerToChannel } from '../../../wire-protocol/values/server/response/ChannelResponseBody.js'
@@ -45,7 +45,7 @@ type ResponseValuesRun = TelefuncId & {
 
 /** A channel the response carries, or one a returned stream is pumped through. */
 type Staged =
-  | { channel: ResponseChannel; producer?: undefined }
+  | { channel: ServerChannel<any, any>; producer?: undefined }
   | { channel: ServerChannel<never, never>; producer: StreamingProducer }
 
 /** What one response carries beside its text: the channels and streams its values were replaced with. They're staged
@@ -140,7 +140,7 @@ class ResponseValues {
     return channel
   }
 
-  private readonly registerChannel = (channel: ResponseChannel): void => {
+  private readonly registerChannel = (channel: ServerChannel<any, any>): void => {
     this.stage({ channel })
   }
 

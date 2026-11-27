@@ -63,7 +63,7 @@ import { UpgradeStages, type UpgradeStagesOwner } from './UpgradeStages.js'
 import { SessionRegistry, type ChannelHandle, type Session } from './SessionRegistry.js'
 import { AwaitedChannels, expireAwaited, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
 import { RegistrationWaits } from './RegistrationWaits.js'
-import type { CallPage, MuxChannel } from './ServerChannel.js'
+import type { CallPage, ServerChannel } from './ServerChannel.js'
 
 /** A transport-owned wire handle. The mux never looks inside one — it only compares them by
  *  identity and hands them back to the transport that created it. */
@@ -172,7 +172,7 @@ type WireState = {
   recvBacklog: RecvBacklog
   awaited: AwaitedChannels
   /** Channels attaching in this turn, before its session holds them: what they send counts in the headroom too. */
-  attaching: Set<MuxChannel>
+  attaching: Set<ServerChannel>
 }
 
 type WireEntry = {
@@ -201,7 +201,7 @@ function getChannelMux(): ChannelMux {
  *  through `onWireOpen` and name it by identity from then on; a deployment with several instances relies on sticky
  *  sessions at its load balancer. */
 class ChannelMux implements UpgradeStagesOwner {
-  private readonly channels = new Map<string, MuxChannel>()
+  private readonly channels = new Map<string, ServerChannel>()
   /** The channels a reconcile named before they registered, which `registerChannel` attaches. */
   private readonly registrationWaits = new RegistrationWaits()
   private readonly sessions = new SessionRegistry({
@@ -244,7 +244,7 @@ class ChannelMux implements UpgradeStagesOwner {
   /** Callers must not invoke `channel._registerChannel()` directly. `page`: the page the channel's connect window
    *  waits for, which shows it is on its way while it sends the call's body (`ATTACHABLE_NOW` where nothing is on its
    *  way). */
-  registerChannel(channel: MuxChannel, page: CallPage): void {
+  registerChannel(channel: ServerChannel<any, any>, page: CallPage): void {
     // Registered before any waiter attaches it: its `onOpen` may end it, and it tells this mux when it does.
     channel._registerChannel(page, this)
     this.channels.set(channel.id, channel)
@@ -277,7 +277,10 @@ class ChannelMux implements UpgradeStagesOwner {
   }
 
   /** An ended channel its page may still need (`keep`) stays attachable; the mux forgets any other. */
-  onChannelEnded(channel: MuxChannel, { keep, pageAttached }: { keep: boolean; pageAttached: boolean }): void {
+  onChannelEnded(
+    channel: ServerChannel<any, any>,
+    { keep, pageAttached }: { keep: boolean; pageAttached: boolean },
+  ): void {
     // Kept until its page needs nothing more from it, leaves, or stays away for `reconnectTimeout`.
     if (keep) this.ended.keep(channel, pageAttached ? null : this.options.reconnectTimeout)
     else this.unregisterChannel(channel.id)
@@ -300,7 +303,7 @@ class ChannelMux implements UpgradeStagesOwner {
   ): void {
     const recvBacklog = { bytes: 0, frames: 0 }
     const deliveries = new Deliveries()
-    const attaching = new Set<MuxChannel>()
+    const attaching = new Set<ServerChannel>()
     const entry: WireEntry = {
       wire,
       state: {
@@ -1073,7 +1076,7 @@ class ChannelMux implements UpgradeStagesOwner {
 
   /** Runs in `registerChannel`, between two reconciles. Waiters attach in the order they began; the latest one keeps
    *  the channel. */
-  private attachAwaited(awaited: AwaitedChannel, channel: MuxChannel): void {
+  private attachAwaited(awaited: AwaitedChannel, channel: ServerChannel): void {
     // Its page sent it a frame the server can't take while it was awaited: it ends with that cause, unattached.
     if (awaited.refused !== null) return channel._onServerEnd(awaited.refused)
     const { entry } = awaited
@@ -1137,7 +1140,7 @@ class ChannelMux implements UpgradeStagesOwner {
   /** Attaches `channel` to the wire. With `replay`, first sends what the page missed. Null once the channel keeps
    *  nothing for a page (its replay was released). */
   private attachChannel(
-    channel: MuxChannel,
+    channel: ServerChannel,
     open: ReconcileOpenEntry,
     { sender, request }: WireEntry,
     replay: boolean,
