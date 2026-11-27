@@ -762,6 +762,7 @@ function leftBehindError(index: number): Error {
 }
 
 const DONE: IteratorReturnResult<undefined> = { done: true, value: undefined }
+const ENDED = { failed: false } as const
 
 /** A Node `Readable`'s chunks: what `read()` gives at each `'readable'`, to `'end'`, or failing at `'error'` or at a
  *  close before the end. It listens from its construction on, so the stream asks its source for data before the first
@@ -775,14 +776,14 @@ class ReadableChunks implements ChunkSource {
     resolve: (result: IteratorResult<Uint8Array<ArrayBuffer>>) => void
     reject: (error: unknown) => void
   } | null = null
-  private ended: boolean
-  private failed: { error: unknown } | null = null
+  /** How the stream ended: at its end, or failing (a failure after its end wins); null while it goes on. */
+  private over: { failed: false } | { failed: true; error: unknown } | null = null
 
   constructor(stream: Readable) {
     this.stream = stream
-    this.ended = stream.readableEnded
-    if (stream.errored) this.failed = { error: stream.errored }
-    else if (stream.destroyed && !this.ended) this.failed = { error: prematureClose() }
+    if (stream.errored) this.over = { failed: true, error: stream.errored }
+    else if (stream.readableEnded) this.over = ENDED
+    else if (stream.destroyed) this.over = { failed: true, error: prematureClose() }
     stream.on('readable', this.wake)
     stream.on('end', this.end)
     stream.on('error', this.fail)
@@ -793,8 +794,8 @@ class ReadableChunks implements ChunkSource {
     assert(this.waiting === null)
     const value: Uint8Array<ArrayBuffer> | null = this.stream.destroyed ? null : this.stream.read()
     if (value !== null) return Promise.resolve({ value, done: false })
-    if (this.failed) return Promise.reject(this.failed.error)
-    if (this.ended) return Promise.resolve(DONE)
+    if (this.over?.failed) return Promise.reject(this.over.error)
+    if (this.over) return Promise.resolve(DONE)
     return new Promise((resolve, reject) => (this.waiting = { resolve, reject }))
   }
 
@@ -815,19 +816,19 @@ class ReadableChunks implements ChunkSource {
   }
 
   private readonly end = (): void => {
-    this.ended = true
+    this.over ??= ENDED
     this.settle(DONE)
   }
 
   private readonly fail = (error: unknown): void => {
-    this.failed ??= { error }
+    if (!this.over?.failed) this.over = { failed: true, error }
     const waiting = this.waiting
     this.waiting = null
-    waiting?.reject(this.failed.error)
+    waiting?.reject(this.over.error)
   }
 
   private readonly close = (): void => {
-    if (!this.ended && this.failed === null) this.fail(prematureClose())
+    if (this.over === null) this.fail(prematureClose())
   }
 
   private settle(result: IteratorResult<Uint8Array<ArrayBuffer>>): void {
