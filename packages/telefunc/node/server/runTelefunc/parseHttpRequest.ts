@@ -213,8 +213,7 @@ async function readBody(
     }
     const reader = new BodyReader(source, clientLeft, queueMemory)
     reader.onEnd = runContext.onBodyRead
-    // A browser delivers the answer only once it has sent the whole body: where a returned value holds the request on,
-    // the rest of the body is read now, and kept for the call's files within what the channels' memory allows.
+    // On Deno, the hold keeps the response open until the upload is over (workarounds/denoUploadResponseHold.ts).
     const hold = holdUploadResponse(request, runContext.clientGone, reader.restRead)
     runContext.requestContext.responseHold = hold
     const clientGone = hold?.clientGone ?? runContext.clientGone
@@ -237,6 +236,8 @@ async function readBody(
     // While the call runs, the file reads end as the client leaves, once a read of the body under way took its failure.
     const leftDuringCall = () => void giveUpOnceReadSettled(reader)
     clientGone.addEventListener('abort', leftDuringCall, { once: true })
+    // A browser delivers the answer only once it has sent the whole body: where a returned value holds the request on,
+    // the rest of the body is read now, and kept for the call's files within what the channels' memory allows.
     runContext.requestContext.onAnswered(() => {
       reader.keepRest()
       watchClient()

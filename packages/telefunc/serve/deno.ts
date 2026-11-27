@@ -47,10 +47,9 @@ function telefunc(): TelefuncServe {
         return ws.handleUpgrade(request, info) as Response | Promise<Response>
       }
 
-      // Deno.serve aborts `request.signal` once its client leaves while the response is open, and also, unless Deno runs
-      // with `--unstable-no-legacy-abort`, at every response's end: the response ends only once the call's body is over,
-      // where the signal stops counting (`runTelefunc`), so that abort is never taken for the client leaving. A read
-      // under way may fail only once the response ends.
+      // Deno.serve aborts `request.signal` once its client leaves while the response is open, and, in its legacy abort
+      // mode, at every response's end: workarounds/denoUploadResponseHold.ts holds a call's response until its upload
+      // is over.
       const httpResponse = await serveRuntimeRequest(context ? { request, context } : { request }, {
         clientLeft: (err) => isDenoConnectionError(err, globalThis),
         clientGone: request.signal,
