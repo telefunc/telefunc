@@ -9,6 +9,7 @@ import { getTelefuncChannelOptions } from '../wire-protocol/channel/server/ws.js
 import { CHANNEL_TRANSPORT, WIRE_MAX_RAW_FRAME_BYTES } from '../wire-protocol/constants.js'
 import { getTelefuncRequestUrl, toResponse } from './shared.js'
 import { bunSockets } from '../workarounds/crosswsBun.js'
+import { bunClientLeft } from '../workarounds/bunLateUploadAbort.js'
 
 type BunWs = ReturnType<typeof crossws>
 type BunServer = Parameters<BunWs['handleUpgrade']>[1]
@@ -55,13 +56,8 @@ function telefunc(): TelefuncServe {
         if (!config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) return new Response(null, { status: 400 })
         return ws.handleUpgrade(request, server) as Response | Promise<Response>
       }
-      // Bun.serve aborts the signal of a request it made once its client disconnects, before the body's read fails. Once
-      // the request is answered it leaves the signal be, and fails the read with an `AbortError` ("The connection was
-      // closed.").
-      const clientLeft = (err: unknown) =>
-        request.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')
       const httpResponse = await serveRuntimeRequest(context ? { request, context } : { request }, {
-        clientLeft,
+        clientLeft: bunClientLeft(request),
         clientGone: request.signal,
         takesUpgrades: upgradesTakenHere,
         // Bun cuts a request quiet for `idleTimeout` (10 s by default): a body that stops short, and also a slow call, a
