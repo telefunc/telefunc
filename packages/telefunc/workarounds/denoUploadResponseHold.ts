@@ -7,28 +7,23 @@ export type { ResponseHold }
 
 import { hasProp } from '../utils/hasProp.js'
 
-/** Keeps the response open until `over`; `unheld` lets go of the client's signal once it is. */
-type ResponseHold = { over: Promise<void>; unheld: () => void }
+/** Keeps the response open until `over`; `clientGone` aborts only for the client's leaving, and `unheld` lets go of the
+ *  request's signal once the hold is over. */
+type ResponseHold = { over: Promise<void>; clientGone: AbortSignal; unheld: () => void }
 
 /** On `Deno.serve`, where `clientGone` is its request's signal: the hold that keeps the response open until the upload
- *  is read (`restRead`) or its client left, and the signal that aborts only for the client's leaving. Elsewhere, no hold
- *  and `clientGone` itself; a Node adapter's socket signal stays valid after the response, under Deno's `node:http` too. */
-function holdUploadResponse(
-  request: Request,
-  clientGone: AbortSignal,
-  restRead: Promise<void>,
-): { hold: ResponseHold | null; clientGone: AbortSignal } {
-  if (!hasProp(globalThis, 'Deno', 'object') || clientGone !== request.signal) return { hold: null, clientGone }
+ *  is read (`restRead`) or its client left. Elsewhere, no hold: `clientGone` itself stays valid after the response, as a
+ *  Node adapter's socket signal does, under Deno's `node:http` too. */
+function holdUploadResponse(request: Request, clientGone: AbortSignal, restRead: Promise<void>): ResponseHold | null {
+  if (!hasProp(globalThis, 'Deno', 'object') || clientGone !== request.signal) return null
   const gone = new AbortController()
   const abort = () => gone.abort(clientGone.reason)
   if (clientGone.aborted) abort()
   else clientGone.addEventListener('abort', abort, { once: true })
   return {
-    hold: {
-      over: Promise.race([restRead, aborted(gone.signal)]),
-      unheld: () => clientGone.removeEventListener('abort', abort),
-    },
+    over: Promise.race([restRead, aborted(gone.signal)]),
     clientGone: gone.signal,
+    unheld: () => clientGone.removeEventListener('abort', abort),
   }
 }
 

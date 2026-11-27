@@ -211,8 +211,9 @@ async function readBody(
     reader.onEnd = runContext.onBodyRead
     // A browser delivers the answer only once it has sent the whole body: where a returned value holds the request on,
     // the rest of the body is read now, and kept for the call's files within what the channels' memory allows.
-    const { hold, clientGone } = holdUploadResponse(request, runContext.clientGone, reader.restRead)
+    const hold = holdUploadResponse(request, runContext.clientGone, reader.restRead)
     runContext.requestContext.responseHold = hold
+    const clientGone = hold?.clientGone ?? runContext.clientGone
     // A page attaches to a channel the call returns once its upload is over: until then, each byte of it says the page
     // is on its way. An upload that stops, at its end or as its client goes silent, leaves its last byte as the sign;
     // one that stopped short for a whole connect window is given up on, with its files.
