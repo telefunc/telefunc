@@ -113,6 +113,10 @@ type ConnectionState =
 
 type Recovery = { tries: number; deadline: number; lost: Error | null; timer: ReturnType<typeof setTimeout> }
 
+/** The idle timer, from when no channel is open and nothing is queued. `confirming`: it expired, and its PING asked the
+ *  server for what the closed channels sent (`disposeOnceDrained`). */
+type IdleTimer = { timer: ReturnType<typeof setTimeout>; confirming: boolean }
+
 /** The attempt under way, from its start till its RECONCILED or its loss. */
 type Attempt = {
   /** When it started: its allowance runs from here. */
@@ -172,9 +176,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   /** Half of the least batch POST a 413 refused. The connection's, not a transport's: an upgrade to WebSocket and the
    *  fallback after it make new transports, behind the same proxy. */
   private postLimit = Infinity
-  private ttl: ReturnType<typeof setTimeout> | null = null
-  /** The expired idle timer whose PING asked the server for what the closed channels sent (`disposeOnceDrained`). */
-  private confirming: ReturnType<typeof setTimeout> | null = null
+  private idle: IdleTimer | null = null
   get closed(): boolean {
     return this.state.tag === 'closed'
   }
@@ -366,10 +368,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.channels.size < MAX_CHANNELS_PER_CONNECTION,
       `Too many channels on one connection (${MAX_CHANNELS_PER_CONNECTION} max) — open another with \`connectionKey\``,
     )
-    if (this.ttl) {
-      clearTimeout(this.ttl)
-      this.ttl = this.confirming = null
-    }
+    this.stopIdle()
     this.channels.add(this.nextIndex++, channel, new ReplayBuffer(CHANNEL_CLIENT_REPLAY_BUFFER_BYTES), lossyBroadcast)
     if (this.creditWindow !== null) channel._attach.capWindows(this.creditWindow)
 
@@ -537,7 +536,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.readAt = performance.now()
     this.ownFramesRefusedOn = null
     this.liveness.onPong(ended)
-    if (this.confirming !== null) this.startTtlIfIdle()
+    if (this.idle?.confirming) this.startTtlIfIdle()
   }
 
   onTransportReconciledPiece(transport: ClientChannelTransport): void {
@@ -847,10 +846,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     // The wire is dying: the queued RECONCILE is not sent, since the reconnect's RECONCILE lists every channel.
     this.exchange.cancelRegisterReconcile()
     this.exchange.forgetWire()
-    if (this.ttl) {
-      clearTimeout(this.ttl)
-      this.ttl = this.confirming = null
-    }
+    this.stopIdle()
 
     const now = performance.now()
     // At once with the recovery's timer, its end wins: every channel is told its cause.
@@ -972,29 +968,35 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   /** Starts the idle timer on a live wire with no channel open and nothing queued; the transport drains first. */
   private startTtlIfIdle(): void {
     // The expired timer whose PING asked for the closed channels' frames holds till the server has them all.
-    if (this.ttl !== null && this.ttl === this.confirming && this.channels.delivered) return this.dispose()
-    if (!this.connected || this.ttl || !this.gate.idle || !this.channels.idle) {
+    if (this.idle?.confirming && this.channels.delivered) return this.dispose()
+    if (!this.connected || this.idle || !this.gate.idle || !this.channels.idle) {
       return
     }
-    const ttl = setTimeout(() => void this.disposeOnceDrained(ttl), this.idleTimeoutMs)
-    this.ttl = ttl
+    const idle: IdleTimer = {
+      timer: setTimeout(() => void this.disposeOnceDrained(idle), this.idleTimeoutMs),
+      confirming: false,
+    }
+    this.idle = idle
   }
 
   /** Waits for queued frames to go. If the server still owes confirmation, keep the expired timer and ask with a PING. */
-  private async disposeOnceDrained(ttl: ReturnType<typeof setTimeout>): Promise<void> {
+  private async disposeOnceDrained(idle: IdleTimer): Promise<void> {
     await this.transport.drained()
-    if (this.ttl !== ttl || !this.channels.idle) return
+    if (this.idle !== idle || !this.channels.idle) return
     if (this.channels.delivered) return this.dispose()
-    this.confirming = ttl
+    idle.confirming = true
     this.liveness.pingNow(this.transport)
+  }
+
+  private stopIdle(): void {
+    if (this.idle === null) return
+    clearTimeout(this.idle.timer)
+    this.idle = null
   }
 
   private dispose(): void {
     if (this.closed) return
-    if (this.ttl) {
-      clearTimeout(this.ttl)
-      this.ttl = this.confirming = null
-    }
+    this.stopIdle()
     this.exchange.cancelRegisterReconcile()
     // Tear down any in-flight phase before transitioning to `closed`.
     this.clearReconnectTimer()
