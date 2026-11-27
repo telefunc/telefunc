@@ -31,6 +31,7 @@ import { getTelefuncRequestUrl } from './shared.js'
 import { REQUEST_KIND, getRequestKind, namesWireVersion } from '../wire-protocol/wire/requestKind.js'
 import { STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
 import { REQUEST_KIND_REFUSAL, WIRE_VERSION_REFUSAL, refusalContentType } from '../wire-protocol/refusal.js'
+import { closeOnDurableError, echoClientClose } from '../workarounds/crosswsCloudflare.js'
 
 // A subscription finds its Durable Object through AsyncLocalStorage, which a compatibility flag enables. A Worker without
 // it still serves telefunctions and channels; a Broadcast subscribed on the server asks for the flag (broadcast.ts). The
@@ -159,19 +160,14 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
-      // Before compatibility date 2026-04-07 a client's close waits for this answer; close() refuses 1005 and 1006.
-      if (code === 1005) ws.close()
-      else if (wasClean) ws.close(code, reason)
+      echoClientClose(ws, code, reason, wasClean)
       return broadcast.runInObject(this.instanceName, () =>
         crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean),
       )
     }
 
-    /** crossws has no handler for a socket's error, so its wire ends here. */
     webSocketError(ws: WebSocket) {
-      return broadcast.runInObject(this.instanceName, () =>
-        crosswsAdapter.handleDurableClose(this, ws, 1006, 'error', false),
-      )
+      return broadcast.runInObject(this.instanceName, () => closeOnDurableError(crosswsAdapter, this, ws))
     }
 
     telefuncBroadcastPublish(request: BroadcastPublishRequest) {
