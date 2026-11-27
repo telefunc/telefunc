@@ -15,12 +15,13 @@ config.channel = {
   pingInterval: 5_000,       // Client ping interval (ms)
   connectTtl: 15_000,        // Wait for client to connect to new channel (ms)
   allowedOrigins: [],        // Origins of other sites' pages that may open a WebSocket
+  maxMemory: '1g',           // Memory all channels may hold queued (bytes or '512m')
 }
 ```
 
 > This is the **server-side** `config.channel` — a separate object from the **client-side** <Link href="/transport"><code>config.channel.transports</code></Link> (`telefunc/client`).
 
-> `config.channel.maxMemory` is what all channels together may hold for their clients, in bytes or as a size such as `'512m'`. It defaults to a quarter of the memory the process reports (1 GiB fallback, 64 MiB on Cloudflare). Channels share this budget as they need it; as it fills, channels holding more than their share are limited first. Each channel also has its own limit, 320 MiB by default. See <Link href="/channel#errors" /> for what a channel past it gets.
+> `maxMemory` is the most all channels together may hold queued on the server: messages and broadcasts not yet delivered to a client, messages your listeners are still handling, and the uploaded files a telefunction that returned a channel or a stream hadn't read yet. It defaults to a quarter of the memory the process reports (1 GiB fallback, 64 MiB on Cloudflare). Channels share it as they need it; as it fills, channels holding more than their share are limited first. One channel holds at most 320 MiB of it. See <Link href="/channel#errors" /> for what a channel past its limit gets.
 
 > **What to tune**: the defaults suit typical stream use cases; tune these only if you run into one of the issues below:
 > - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).

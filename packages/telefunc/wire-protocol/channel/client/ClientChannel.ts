@@ -260,7 +260,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return unsubscribeOf(this.binaryListeners.add(callback, options))
   }
 
-  /** What it ended with, as its `closed` rejects. */
+  /** What it ended with, or `ChannelClosedError` for a graceful close (used to reject `opened` and waiting sends). */
   protected endError(): Error {
     return this.lifecycle.closeError ?? new ChannelClosedError()
   }

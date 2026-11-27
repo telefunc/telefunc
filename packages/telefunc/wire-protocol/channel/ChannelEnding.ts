@@ -25,8 +25,8 @@ interface EndingPort {
   send(frame: EndingFrame): void
   /** It takes no more sends, as it begins or follows a close: called once, before its first frame of the close. */
   stop(): void
-  /** Runs the `onClose()` cleanup with `err`, `undefined` for a graceful close; the end calls `cleanupSettled()` once
-   *  the promises it returned settled. At the end it isn't awaited. */
+  /** Runs the `onClose()` cleanup with `err`, `undefined` for a graceful close (which `onClose` receives as `null`); the
+   *  end calls `cleanupSettled()` once the promises it returned settled. At the end it isn't awaited. */
   startCleanup(err: Error | undefined): void
   /** The channel ended: with `err`, or gracefully. Called once. */
   end(err: Error | undefined): void

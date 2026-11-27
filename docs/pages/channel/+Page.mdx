@@ -245,7 +245,7 @@ channel.send({ type: 'ping' }) // no await needed
 
 ## `Broadcast`
 
-`Broadcast` is a keyed pub/sub **bus**: a message published to a `key` reaches every subscriber of that `key` — server-side subscribers (via `Broadcast.subscribe()`) and clients bridged into the `key` (via <Link href="#new-broadcastchannel">`new BroadcastChannel()`</Link>). Publishers and subscribers are decoupled; all they share is the `key` string. It's the fan-out layer that `new BroadcastChannel()` is built on.
+`Broadcast` is a keyed pub/sub **bus**: a message published to a `key` goes out to the subscribers of that `key` — server-side subscribers (via `Broadcast.subscribe()`) and clients bridged into the `key` (via <Link href="#new-broadcastchannel">`new BroadcastChannel()`</Link>). Publishers and subscribers are decoupled; all they share is the `key` string. It's the fan-out layer that `new BroadcastChannel()` is built on.
 
 The static methods run purely on the server — no client, no handle, no lifecycle — and take the `key` as their first argument:
 
@@ -282,7 +282,7 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 > It creates a `Channel` to the one client that received it, and bridges that client onto a `Broadcast` key.
 >
-> Return it from a telefunction and the receiving client can `publish()` / `subscribe()` on the key — every message reaches every member of the group (both client-side and server-side).
+> Return it from a telefunction and the receiving client can `publish()` / `subscribe()` on the key — the server fans each message out to the members subscribed to the key, client-side and server-side. For a client that falls behind, see `lossy` and <Link href="#errors" /> below.
 
 
 <Warning>
@@ -377,7 +377,7 @@ broadcast.subscribe((n) => showToast(n))
 | `publish(data)` | Publish to every subscriber of the key. Returns a receipt. |
 | `subscribe(cb)` | Receive `(data, info)`. Returns an unsubscribe function, whose `opened` promise resolves once the subscription is in effect, or once you remove it while the channel is open. |
 | `publishBinary(data)` | Publish raw binary to every subscriber. Returns a receipt. |
-| `subscribeBinary(cb)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function. |
+| `subscribeBinary(cb)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function with the same `opened` promise as `subscribe(cb)`'s. |
 | `messages({ signal })` | Receive text and binary messages, each with its `info`, in a `for await` loop. |
 | `onOpen(cb)` | Called when the channel opens. |
 | `onClose(cb)` | Called when the channel closes. |
@@ -401,7 +401,7 @@ The difference is what a message is addressed to: a channel message is addressed
 
 A channel is a conversation, like a phone call: two fixed ends (the server and the one client that received the channel), private to them, ending when either side hangs up.
 
-A broadcast is an announcement, like a radio frequency: whoever tunes in to the `key` receives everything published to it, members come and go, and the `key` belongs to no one.
+A broadcast is an announcement, like a radio frequency: whoever tunes in to the `key` hears what is published to it, members come and go, and the `key` belongs to no one.
 
 Only the two ends of a channel can use it, while anything that knows a broadcast's `key` can join it. A channel ends when either side closes it, while a broadcast outlives any single member.
 

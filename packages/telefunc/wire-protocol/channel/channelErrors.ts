@@ -3,8 +3,9 @@ export { ChannelClosedError, ChannelOverflowError, ChannelCloseUnknownError, Cha
 import { NetworkError } from '../../shared/NetworkError.js'
 import { markErrorClass } from '../../shared/markErrorClass.js'
 
-/** Thrown synchronously by `send()` when the channel is already closed.
- *  Also used to reject pending ack promises when the channel shuts down. */
+/** The channel is closed: `send()` on it throws this synchronously, and acknowledged sends still pending reject with it
+ *  as it shuts down. A channel the server ends closes with it too: a refused frame, a broadcast subscription that didn't
+ *  take effect, a close that timed out. */
 class ChannelClosedError extends Error {
   constructor(message = 'Channel is closed', options?: { cause?: unknown }) {
     super(message, options)
@@ -12,7 +13,8 @@ class ChannelClosedError extends Error {
   }
 }
 
-/** Used when a buffered channel send is dropped in order to keep memory usage hard-capped. */
+/** Telefunc can't hold more for the channel: a refused `send()`, `{ ack: true }` reply or `publish()` rejects with it and
+ *  the channel stays open; an overloaded inbound channel or a broadcast subscriber too far behind closes with it. */
 class ChannelOverflowError extends Error {
   constructor(message = 'Channel send buffer overflow') {
     super(message)
