@@ -40,8 +40,6 @@ interface MuxChannel {
   readonly isClosed: boolean
   /** The largest frame the server accepts from this channel on a WebSocket. */
   readonly _maxFrameBytes: number
-  /** A lossy broadcast: every value the server sends it is lossy. */
-  readonly _lossyBroadcast: boolean
   /** The channel is open on `uplink`'s wire; called again with the same `uplink`, that wire lost nothing. */
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void
   /** Entry point for every per-channel wire frame (data + per-channel ctrl). The
@@ -79,7 +77,7 @@ interface MuxConnection {
   sendCloseAck(channel: MuxChannel): void
   sendCloseDone(channel: MuxChannel): void
   sendCloseTimedOut(channel: MuxChannel): void
-  sendByteLimit(channel: MuxChannel, limit: number, urgency: Urgency): void
+  sendByteLimit(channel: MuxChannel, limit: number, urgency: Urgency, receivedAt?: number): void
   sendMessageLimit(channel: MuxChannel, limit: number, urgency: Urgency): void
   sendBdpPing(channel: MuxChannel, probe: number): void
   sendBdpPingAck(channel: MuxChannel, ack: BdpPingAck): void
@@ -296,8 +294,8 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     )
   }
 
-  sendByteLimit(channel: MuxChannel, limit: number, urgency: Urgency): void {
-    this.sendQueue.sendUnsequenced(channel, urgency, ({ ix, lastSeq }) => encode.window(ix, limit, lastSeq))
+  sendByteLimit(channel: MuxChannel, limit: number, urgency: Urgency, receivedAt?: number): void {
+    this.sendQueue.sendUnsequenced(channel, urgency, ({ ix, lastSeq }) => encode.window(ix, limit, lastSeq), receivedAt)
   }
 
   sendMessageLimit(channel: MuxChannel, limit: number, urgency: Urgency): void {

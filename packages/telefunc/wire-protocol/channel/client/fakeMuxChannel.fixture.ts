@@ -25,7 +25,6 @@ function fakeMuxChannel(
     id: crypto.randomUUID(),
     isClosed: false,
     _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
-    _lossyBroadcast: false,
     _onTransportOpen() {},
     _dispatchFrame() {},
     _onEnded() {},

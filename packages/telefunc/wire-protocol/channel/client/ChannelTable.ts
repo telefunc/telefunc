@@ -6,7 +6,6 @@ import type { MuxChannel } from './ClientConnection.js'
 import { assert } from '../../../utils/assert.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
 import type { SequencedFrame } from '../../wire/frame.js'
-import { TAG } from '../../wire/tags.js'
 
 /** `closed`: unregistered, and kept till released, as the RECONCILE releasing it, or a new wire's leaving it out, ends
  *  it on the server. */
@@ -33,8 +32,6 @@ type ChannelRecord = {
   readonly replay: ReplayBuffer
   /** The newest seq the server sent on it. */
   lastSeq: number
-  /** When the newest seq arrived, if it is a lossy value. */
-  receivedAt: number | undefined
   /** An initial channel a RECONCILED left out, till its ATTACH_RESULT: what it queues waits, so its replay goes first. */
   awaited: boolean
   /** The last time a request carrying what it sent was refused: on `wire`, through `throughSeq`. */
@@ -124,9 +121,6 @@ class ChannelTable {
     // A seq already seen: a replay resends what arrived.
     if (seq <= prev) return null
     record.lastSeq = seq
-    const lossy =
-      record.channel._lossyBroadcast || ((frame.tag === TAG.TEXT || frame.tag === TAG.BINARY) && frame.lossy)
-    record.receivedAt = lossy ? performance.now() : undefined
     return seq
   }
 
@@ -149,7 +143,6 @@ class ChannelTable {
       state: { tag: 'pending' },
       replay,
       lastSeq: 0,
-      receivedAt: undefined,
       awaited: false,
       refused: null,
     }

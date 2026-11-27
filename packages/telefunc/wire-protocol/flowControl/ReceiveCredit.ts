@@ -52,6 +52,8 @@ class ReceiveCredit {
   /** Bytes of the frames credit doesn't count that arrived since the byte limit last went out. */
   private uncountedBytes = 0
   private confirmTimer: ReturnType<typeof setTimeout> | null = null
+  /** When the newest seq arrived, if it is a lossy value: the byte limit reports how long this side held it. */
+  private receivedAt: number | undefined = undefined
   /** A frame arrived since the byte limit last went out, which acknowledges what arrived. */
   private arrived = false
   /** The owner held enough when the byte limit last went out, so that limit granted nothing new. */
@@ -199,8 +201,15 @@ class ReceiveCredit {
     this.arrived = true
   }
 
-  /** A `WINDOW` confirms what arrived soon: a lossy sender tells by that whether its page keeps up. */
+  /** A sequenced frame arrived, which is the newest seq till the next. */
+  onSequencedArrival(): void {
+    this.receivedAt = undefined
+  }
+
+  /** A lossy value arrived: a `WINDOW` confirms it soon, with how long this side held it, and a lossy sender tells by
+   *  that whether its page keeps up. */
   confirmSoon(): void {
+    this.receivedAt = performance.now()
     this.confirmTimer ??= unrefTimer(setTimeout(this.confirm, WIRE_PIECES_ACK_GAP_MS))
   }
 
@@ -261,7 +270,7 @@ class ReceiveCredit {
     if (sent !== 'acknowledgement' && this.consumedMessages > this.advertisedMessages) {
       this.advertiseMessages('acknowledgement')
     }
-    this.owner.sendByteLimit(limit >>> 0, sent)
+    this.owner.sendByteLimit(limit >>> 0, sent, this.receivedAt)
   }
 
   /** An `acknowledgement` rides the next message, so it is never urgent. */

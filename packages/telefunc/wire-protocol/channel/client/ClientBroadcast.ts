@@ -31,7 +31,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private newestReceipt: Promise<ChannelPublishAck> | null = null
 
   constructor(options: ClientBroadcastOptions) {
-    super({ ...options, lossyBroadcast: options.lossy })
+    super(options)
     this.lossy = options.lossy === true
     // Nothing waits on a publish's credit, so the page grants the largest window from the start.
     this.receiveCredit.widenByteWindow()
@@ -156,6 +156,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     bytes: number,
   ): void {
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
+    if (this.lossy) this.receiveCredit.confirmSoon()
     for (const [i, { listener }] of listeners.entries()) {
       if (!listener) continue
       try {
@@ -166,6 +167,5 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
       }
     }
     this.receiveCredit.onPublishConsumed(bytes)
-    if (this.lossy) this.receiveCredit.confirmSoon()
   }
 }
