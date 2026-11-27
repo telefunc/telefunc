@@ -311,9 +311,12 @@ async function onRedisChannelDenied() {
 async function onPublishAcrossSeqBoundary() {
   if (!redis) throw new Error('The playground runs without Redis')
   const key = `room:seq-boundary:${crypto.randomUUID()}`
-  // The transport's counter for the key, under its default prefix.
-  const seqKey = `tf:seq:{${key}}`
-  await redis.set(seqKey, 2 ** 32 - 2)
+  // The transport's order record for the key, under its default prefix and the client's database: its seq, then each
+  // kind's count and last publish's id, none yet (zero).
+  const orderKey = `tf:${redis.options.db ?? 0}:seq:{${encodeURIComponent(key)}}`
+  const record = Buffer.alloc(40)
+  record.writeDoubleLE(2 ** 32 - 2, 0)
+  await redis.set(orderKey, record)
   const received: { text: string; seq: number }[] = []
   const unsubscribe = Broadcast.subscribe<string>(key, (text, { seq }) => {
     received.push({ text, seq })
@@ -326,7 +329,7 @@ async function onPublishAcrossSeqBoundary() {
     return { published, received }
   } finally {
     unsubscribe()
-    await redis.del(seqKey)
+    await redis.del(orderKey)
   }
 }
 
