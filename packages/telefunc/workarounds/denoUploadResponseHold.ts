@@ -1,10 +1,10 @@
 // Workaround: `Deno.serve`, unless Deno runs with `--unstable-no-legacy-abort`, aborts `request.signal` at the
 // response's end, and that signal is then the only sign its client left. Without the hold, a call that answers before
 // its upload is over takes its client for gone at the answer: its File reads fail and its unread upload is dropped
-// (serve/deno.clientLeft.spec.ts, 12 legacy-mode rows). The hold goes to every Deno request that passes its own
-// `request.signal`, a `node:http` framework's `Request` too, whose signal stays live after the response; a raw
-// `node:http` `serve({ readable })` passes its socket's signal, and is never held. Remove once Deno's legacy abort is
-// gone.
+// (serve/deno.clientLeft.spec.ts, 12 legacy-mode rows). The hold goes to every Deno binary request with a body that
+// passes its own `request.signal`, a `node:http` framework's `Request` too, whose signal stays live after the response;
+// a raw `node:http` `serve({ readable })` passes its socket's signal, and is never held. Remove once Deno's legacy abort
+// is gone.
 export { holdUploadResponse, heldResponseBody, unholdOnceOver }
 export type { ResponseHold }
 

@@ -122,9 +122,10 @@ type ChannelConfigUser = {
    */
   pingInterval?: number
   /**
-   * The most all channels on this server hold for their clients, in bytes or as `'4g'`, `'512m'`, and with them the Files
-   * a call that returned a channel or a stream hadn't read yet. It's a ceiling: nothing is set aside, and one channel, or
-   * one call's Files, holds at most 320 MiB of it by default.
+   * The most all channels on this server hold queued for their clients, in bytes or as `'4g'`, `'512m'`, and with them
+   * the Files a call that returned a channel or a stream hadn't read yet. It's a ceiling on what is admitted, not memory
+   * set aside up front: part of it is kept as headroom for sends that wait, each wire may carry one frame of the largest
+   * size past it, and one channel, or one call's Files, holds at most 320 MiB of it by default.
    *
    * https://telefunc.com/channel-config
    *

@@ -432,7 +432,8 @@ Channels and broadcasts signal failure through these errors:
 | `NetworkError` (`isChannel: true`) | Connection lost beyond `reconnectTimeout`, replay evicted while offline, or, on the server, the user left the page | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
 | `ChannelOverflowError` | A `send()` was refused — the server already holds too much for that client | **Open** | Only the refused `send()` rejects; `await` your sends to apply backpressure |
-| `ChannelOverflowError` | A reliable broadcast subscriber fell behind, or inbound sends exceeded the server's budget | Closed | Call the telefunction again to rejoin, read faster, or pass `lossy: true` to a `BroadcastChannel` |
+| `ChannelOverflowError` | A reliable broadcast subscriber fell behind | Closed | Call the telefunction again to rejoin, read faster, or pass `lossy: true` to a `BroadcastChannel` |
+| `ChannelOverflowError` | The client's sends that ask for a reply outran the server's budget | Closed | `await` your sends, or send more slowly |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `null`).
 

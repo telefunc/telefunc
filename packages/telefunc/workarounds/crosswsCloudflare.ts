@@ -2,7 +2,8 @@
 
 // Workarounds of a Durable Object's WebSocket under crossws 0.4.6's Cloudflare adapter:
 // - workerd leaves a client's close to a Durable Object's `ctx.acceptWebSocket()` socket unanswered until the Durable
-//   Object closes the socket too, at compatibility date 2026-04-07 and with `web_socket_auto_reply_to_close` as well
+//   Object closes the socket too, at compatibility date 2026-04-07 and with `web_socket_auto_reply_to_close`
+//   (https://developers.cloudflare.com/workers/configuration/compatibility-flags/#websocket-auto-reply-to-close) as well
 //   (only a plain Worker's `server.accept()` socket answers by itself): without the echo, the page's close handshake
 //   never completes. Remove once workerd answers a client's close to a `ctx.acceptWebSocket()` socket by itself.
 // - crossws has no Durable Object handler for a socket's error: without the translation, the error reaches none of
