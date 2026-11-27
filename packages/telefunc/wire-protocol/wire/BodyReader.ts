@@ -103,22 +103,13 @@ class BodyReader {
   private reading: Promise<IteratorResult<Uint8Array<ArrayBuffer>>> | null = null
   /** The read-off of the rest of the body, once it began: from then on it alone reads the source. */
   private readOff: Promise<void> | null = null
-  private readOffDone = false
-  /** Where the reader counts what it keeps of the body for the file reads: what the read-off keeps (`keeping`), and what
-   *  a file's reads read ahead for an earlier file the app began and left without a reader. */
+  /** Where the reader counts what it keeps of the body for the file reads: what the read-off keeps (`kept`), and what a
+   *  file's reads read ahead for an earlier file the app began and left without a reader. */
   private readonly memory: () => QueueMemory
   /** What the read-off keeps for the file reads, from the call's answer or end on (`keepRest`), while a file is left to
-   *  read: the chunks it read, in order, each held on `keeping` until a file read takes it. Null where it drops what it
-   *  reads. */
-  private keeping: QueueMemory | null = null
-  private kept: Uint8Array<ArrayBuffer>[] = []
-  /** Whether `keeping` refused a chunk: that chunk and every one after it were dropped. */
-  private dropped = false
-  /** What a file read that waits for the read-off's next chunk awaits. */
-  private keptMore: Deferred<void> | null = null
+   *  read. Null where it drops what it reads. */
+  private kept: Kept | null = null
   private readonly readOffEnd = createDeferred<void>()
-  /** Settles once the read-off has read the body to its end, or its client left: the client's upload is over. */
-  readonly restRead: Promise<void> = this.readOffEnd.promise
   /** Whether a read's failure is the client leaving, or null where nothing says, on the evidence of the server that
    *  received the request, passed by the caller. */
   private clientLeft: (err: unknown) => boolean | null
@@ -126,6 +117,11 @@ class BodyReader {
   onChunk?: () => void
   /** Called once the source ends, read to its end. */
   onEnd?: () => void
+
+  /** Settles once the read-off has read the body to its end, or its client left: the client's upload is over. */
+  get restRead(): Promise<void> {
+    return this.readOffEnd.promise
+  }
 
   constructor(
     source: ReadableStream<Uint8Array<ArrayBuffer>> | Readable,
@@ -199,7 +195,8 @@ class BodyReader {
    *  reaches them fails, saying why. What is kept goes once no file is left to read. */
   keepRest(): void {
     if (this.readOff !== null || this.filesEndedBy !== null) return
-    if (this.unread.size > 0) this.keeping = this.memory()
+    if (this.unread.size > 0)
+      this.kept = { memory: this.memory(), chunks: [], refused: false, readAll: false, more: null }
     this.readOff = this.readRest()
     // A failure, the app's own error, goes to `endCall` or `discardRest`, which await the same read-off.
     this.readOff.catch(() => {})
@@ -218,53 +215,51 @@ class BodyReader {
   private async readRest(): Promise<void> {
     try {
       if (this.reading !== null) await this.reading.catch(() => {})
-      if (this.keeping === null) this.buffer = EMPTY
+      if (this.kept === null) this.buffer = EMPTY
       if (this.stop) return
       for (let chunk = await this.readChunk(); chunk !== null; chunk = await this.readChunk()) this.keep(chunk)
     } finally {
-      this.readOffDone = true
-      this.wakeKept()
+      if (this.kept !== null) {
+        this.kept.readAll = true
+        wakeKept(this.kept)
+      }
       this.readOffEnd.resolve()
     }
   }
 
   private keep(chunk: Uint8Array<ArrayBuffer>): void {
-    if (this.keeping === null || this.dropped) return
-    if (this.keeping.tryHold(chunk.length)) this.kept.push(chunk)
-    else this.dropped = true
-    this.wakeKept()
+    const kept = this.kept
+    if (kept === null || kept.refused) return
+    if (kept.memory.tryHold(chunk.length)) kept.chunks.push(chunk)
+    else kept.refused = true
+    wakeKept(kept)
   }
 
   /** The read-off's next chunk, for `by`'s read: null where it drops what it reads, as at the body's end; at the end of
    *  what it read, the source's, as `readChunk` says it. */
   private async takeKept(by: FileRead | null): Promise<Uint8Array<ArrayBuffer> | null> {
     for (;;) {
-      if (this.keeping === null) return null
-      const chunk = this.kept.shift()
+      const kept = this.kept
+      if (kept === null) return null
+      const chunk = kept.chunks.shift()
       if (chunk !== undefined) {
-        this.keeping.letGo(chunk.length)
+        kept.memory.letGo(chunk.length)
         return chunk
       }
-      if (this.dropped) throw this.droppedError(by)
-      if (this.readOffDone) return this.readChunk()
-      this.keptMore ??= createDeferred()
-      await this.keptMore.promise
+      if (kept.refused) throw this.droppedError(by)
+      if (kept.readAll) return this.readChunk()
+      kept.more ??= createDeferred()
+      await kept.more.promise
     }
   }
 
   /** Lets go of what the read-off keeps: no file is left to read it. From then on it drops what it reads. */
   private dropKept(): void {
-    this.keeping?.release()
-    this.keeping = null
-    this.kept = []
-    this.wakeKept()
-  }
-
-  private wakeKept(): void {
-    const keptMore = this.keptMore
-    if (keptMore === null) return
-    this.keptMore = null
-    keptMore.resolve()
+    const kept = this.kept
+    if (kept === null) return
+    kept.memory.release()
+    this.kept = null
+    wakeKept(kept)
   }
 
   /** A file read reached what the read-off dropped. Only a file read takes kept chunks: the call's metadata is read
@@ -763,6 +758,25 @@ class FileRead {
     this.markOver()
     this.controller?.error(error)
   }
+}
+
+/** What the read-off keeps for the file reads: the chunks it read, in order, each held on `memory` until a file read
+ *  takes it; whether `memory` refused one (`refused`: that chunk and every one after it were dropped); whether the
+ *  read-off read the rest of the body (`readAll`); and what a file read that waits for its next chunk awaits (`more`). */
+type Kept = {
+  readonly memory: QueueMemory
+  readonly chunks: Uint8Array<ArrayBuffer>[]
+  refused: boolean
+  readAll: boolean
+  more: Deferred<void> | null
+}
+
+/** Wakes the file read that waits for the read-off's next chunk. */
+function wakeKept(kept: Kept): void {
+  const more = kept.more
+  if (more === null) return
+  kept.more = null
+  more.resolve()
 }
 
 /** A file the app began and left without a reader, whose rest a later file's read read for it past what its memory
