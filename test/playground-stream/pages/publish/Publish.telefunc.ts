@@ -224,17 +224,19 @@ async function onBroadcastWhileEstablishing(count: number, bytes: number) {
   return { outcomes, seen }
 }
 
-/** The store refuses the first subscribe on this key (a test asks it to, see `failBackend()`). */
-/** The store refuses this key's first subscribe (a test asks it to, see `failBackend()`). */
+/** The store refuses this key's first subscribe (a test asks it to, see `failBackend()`): `opened` rejects, and
+ *  `closed` resolves with the error the channel ended with, the store's refusal as its cause. */
 async function onSubscribeRefused() {
   const channel = new BroadcastChannel<{ n: number }>({ key: `room:subscribe-refused:${crypto.randomUUID()}` })
   const subscribed = channel.subscribe(() => {})
-  const outcome = (settled: Promise<unknown>) =>
-    settled.then(
+  const [opened, closed] = await Promise.all([
+    subscribed.opened.then(
       () => 'resolved',
       () => 'rejected',
-    )
-  return { ready: await outcome(subscribed.opened), closed: await outcome(channel.closed) }
+    ),
+    channel.closed,
+  ])
+  return { opened, closed: closed === null ? 'clean' : String(closed.cause) }
 }
 
 /** The store delivers the first message on this key before it acknowledges the subscription (a test asks it to, see

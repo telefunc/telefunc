@@ -579,13 +579,16 @@ function testPublish(isDev: boolean, inDocker = false) {
 
 /** Tests that need the failing backend (failing-backend.ts), which a server without Redis installs. */
 function testPublishFailingBackend() {
-  test("broadcast: a subscribe the store refuses is reported once, and ends its server-side channel, so the subscriber's `ready` rejects", async () => {
+  test("broadcast: a subscribe the store refuses is reported once, and ends its server-side channel, so the subscriber's `opened` rejects and its `closed` resolves with the refusal", async () => {
     await navigate(`${getServerUrl()}/publish`)
     await failBackend({ op: 'subscribe', key: 'room:subscribe-refused:' })
     await page.click('#test-subscribe-refused')
 
     await autoRetry(async () => {
-      expect(await getResult('#publish-result')).deep.equal({ ready: 'rejected', closed: 'rejected' })
+      expect(await getResult('#publish-result')).deep.equal({
+        opened: 'rejected',
+        closed: 'Error: failing-backend: subscribe refused',
+      })
     })
     expectLog('Backend subscription closed: text:room%3Asubscribe-refused%3A', {
       filter: (log) => log.logSource === 'stderr',
