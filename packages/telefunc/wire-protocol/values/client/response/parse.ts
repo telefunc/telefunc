@@ -65,7 +65,7 @@ async function parseResponse(
     }
 
     // Text response: plain or channel-pump streaming (each streaming value owns its own channel).
-    const body = await response.text()
+    const body = response.body ? await readText(response.body, callContext) : ''
     return await reviveResponse(body, callContext, connection, null)
   } catch (err) {
     for (const close of callContext.requestCloseHandlers) void closeOnFailure(close)
@@ -90,6 +90,8 @@ async function parseStreamedResponse(
     streamReader = streams.createBodyReader(body.getReader(), isSse, callContext)
     const metaLen = await streamReader.readU32()
     const metaBytes = await streamReader.readExact(metaLen)
+    // An abort during the reads let go of the body: what they returned is no metadata.
+    throwIfAborted(callContext)
     const metaText = new TextDecoder().decode(metaBytes)
     return await reviveResponse(metaText, callContext, connection, streamReader)
   } catch (err) {
@@ -97,6 +99,35 @@ async function parseStreamedResponse(
     // An errored body rejects its cancel: ignoring that keeps the call's original failure, the body's or the import's.
     else body.cancel().catch(() => {})
     throw err
+  }
+}
+
+/** A text body, read as `response.text()` reads it, but that the call's abort cancels: an app's `config.fetch` may
+ *  return a body the call's signal doesn't end. */
+async function readText(body: ReadableStream<Uint8Array>, callContext: CallContext): Promise<string> {
+  const { signal } = callContext.abortController
+  const reader = body.getReader()
+  const cancel = () => {
+    reader.cancel().catch(() => {})
+  }
+  signal.addEventListener('abort', cancel, { once: true })
+  if (signal.aborted) cancel()
+  const decoder = new TextDecoder()
+  let text = ''
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      throwIfAborted(callContext)
+      if (done) return text + decoder.decode()
+      text += decoder.decode(value, { stream: true })
+    }
+  } catch (err) {
+    // A body that the abort errored, as a fetch's own does, ends the call as aborted.
+    throwIfAborted(callContext)
+    throw err
+  } finally {
+    signal.removeEventListener('abort', cancel)
+    reader.releaseLock()
   }
 }
 

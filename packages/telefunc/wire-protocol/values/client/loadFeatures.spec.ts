@@ -272,6 +272,39 @@ test.each([false, true])(
   },
 )
 
+test.each([false, true])(
+  "a call aborted as its app's fetch reads out the response's first bytes, streams' code loaded, rejects with Abort (SSE: %s)",
+  async (sse) => {
+    const { call, withContext } = await page()
+    await warmStreams(call)
+    const controller = new AbortController()
+    let ownCancels = 0
+    const metadata = textEncoder.encode(JSON.stringify({ ret: { gen: GENERATOR } }))
+    const bytes = concat(encodeU32(metadata.length), metadata, encodeIndexedFrame(0, textEncoder.encode('42')))
+    // Pulled at the reader's first read.
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(sink) {
+          sink.enqueue(sse ? textEncoder.encode(`data: ${uint8ArrayToBase64url(bytes)}\n\n`) : bytes)
+          controller.abort()
+        },
+        cancel() {
+          ownCancels++
+        },
+      },
+      { highWaterMark: 0 },
+    )
+    const response = new Response(body, {
+      headers: { 'content-type': sse ? 'text/event-stream' : 'application/octet-stream' },
+    })
+    respond = () => response
+    const settled = await settledWithin(withContext(call, { signal: controller.signal })([]), 200)
+    expect(isAbort(settled), String(settled)).toBe(true)
+    expect(ownCancels).toBe(1)
+    expect(response.body?.locked).toBe(false)
+  },
+)
+
 test.each(['a streamed response', 'a text response', 'a claimed upload'] as const)(
   'a call aborted once its chunk loaded, before it resumes, rejects without using it (%s)',
   async (kind) => {
@@ -310,36 +343,38 @@ test('a call aborted while its text response waits for its chunk rejects at once
   expect(told).toBe(1)
 })
 
-test("a call aborted while its text response's body arrives, channels' code loaded, opens no channel", async () => {
+test("a call aborted while its text response's body stalls, channels' code loaded, cancels it once and opens no channel", async () => {
   const { config, call, withContext } = await page()
   gates.channels.open()
   respond = text(CHANNEL)
   await call([])
   const used: string[] = []
   config.fetch = recordingFetch('page', used)
-  let sink: ReadableStreamDefaultController<Uint8Array> | undefined
   let pulled = false
+  let ownCancels = 0
+  // The body of an app's `config.fetch` that the call's signal doesn't end.
   const body = new ReadableStream<Uint8Array>(
     {
-      start(controller) {
-        sink = controller
-      },
       pull() {
         pulled = true
+        return new Promise(() => {})
+      },
+      cancel() {
+        ownCancels++
       },
     },
     { highWaterMark: 0 },
   )
-  respond = () => new Response(body)
+  const response = new Response(body, { headers: { 'content-type': 'text/plain' } })
+  respond = () => response
   const controller = new AbortController()
   const connectionKey = crypto.randomUUID()
   const pending = withContext(call, { signal: controller.signal, channel: { connectionKey } })([])
   await vi.waitFor(() => expect(pulled).toBe(true))
   controller.abort()
-  assert(sink)
-  sink.enqueue(textEncoder.encode(JSON.stringify({ ret: tag('!TelefuncChannel:', { channelId: 'c2' }) })))
-  sink.close()
   expect(isAbort(await settledWithin(pending, 200))).toBe(true)
+  expect(ownCancels).toBe(1)
+  expect(response.body?.locked).toBe(false)
   await new Promise((resolve) => setTimeout(resolve, 20))
   expect(used).toEqual(['page:call'])
 })
