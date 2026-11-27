@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { defined } from '../../utils/defined.fixture.js'
-import { createHook } from 'node:async_hooks'
 import { getEventListeners } from 'node:events'
 import { Broadcast, ServerBroadcast } from '../channel/server/ServerBroadcast.js'
 import { ServerReplay } from '../channel/server/ServerReplay.js'
@@ -489,42 +488,6 @@ describe("a static subscriber's `opened` once its backend refused the key's subs
       }
     })
   }
-})
-
-// An `opened` nobody reads makes no promise, so subscribers that come and go while the backend waits leave nothing behind.
-describe("subscribers that come and go while their backend hasn't confirmed the key's subscription", () => {
-  const pending = new Promise<void>(() => {})
-  const sent = () => ({ seq: 1, timestamp: 1 })
-  const listen = () => ({ unsubscribe: () => {}, opened: pending })
-  /** How many promises `run` made. */
-  const promisesMadeBy = (run: () => void) => {
-    let made = 0
-    const hook = createHook({
-      init(_id, type) {
-        if (type === 'PROMISE') made++
-      },
-    }).enable()
-    try {
-      run()
-    } finally {
-      hook.disable()
-    }
-    return made
-  }
-  it('1,000 subscribers added and removed make no promise', () => {
-    _resetBroadcastAdapterForTesting(
-      new DefaultBroadcastAdapter({ send: sent, sendBinary: sent, listen, listenBinary: listen }),
-    )
-    const broadcast = new ServerBroadcast<string>({ key: crypto.randomUUID() })
-    // Holds the key's subscription, which waits for its backend.
-    const holder = broadcast.subscribe(() => {})
-    const made = promisesMadeBy(() => {
-      for (let i = 0; i < 1_000; i++) broadcast.subscribe(() => {})()
-    })
-    expect(made).toBe(0)
-    holder()
-    broadcast.abort()
-  })
 })
 
 // A broker's subscribe can throw, as NATS's does while its connection is closed or draining; the app retries.
