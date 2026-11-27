@@ -27,15 +27,23 @@ const CLIENT_INFO_GRANT = '+client|setinfo'
  *  Valkey. */
 const knowsClientInfo = (store: Store) => store.name !== 'Redis 7.0.0'
 
-/** The rule's words after `ACL SETUSER telefunc`, as the page writes them, with the password the rows log in with. */
+/** The rule's words after `redis-cli ACL SETUSER telefunc`, as the shell hands the page's command to `redis-cli`, with
+ *  the password the rows log in with. */
 function documentedRule(): string[] {
+  const command = 'redis-cli ACL SETUSER telefunc '
   const page = readFileSync(fileURLToPath(new URL('../../../docs/pages/redis/+Page.mdx', import.meta.url)), 'utf8')
-  const line = page.split('\n').find((text) => text.startsWith('ACL SETUSER telefunc '))
-  if (line === undefined) throw new Error('the Redis page gives no `ACL SETUSER telefunc` rule')
+  const line = page.split('\n').find((text) => text.startsWith(command))
+  if (line === undefined) throw new Error('the Redis page gives no `redis-cli ACL SETUSER telefunc` rule')
   return line
+    .slice(command.length)
     .split(' ')
-    .slice(3)
+    .map(shellWord)
     .map((word) => (word === '>your-password' ? '>pw' : word))
+}
+
+/** A word of the page's command as the shell reads it: single-quoted, or with its `\` escapes. No word holds a space. */
+function shellWord(word: string): string {
+  return /^'.*'$/.test(word) ? word.slice(1, -1) : word.replace(/\\(.)/g, '$1')
 }
 
 /** What `run` resolves with, or what it throws or rejects with. */
