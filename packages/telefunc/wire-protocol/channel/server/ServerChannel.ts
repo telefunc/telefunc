@@ -190,8 +190,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return hasProp(value, SERVER_CHANNEL_BRAND)
   }
 
-  /** @internal `closing` once `close`, `abort` or the page's CLOSE starts the close; `ended` once `shutdown` ran. */
-  /** Open; closing, once it takes no more sends; ended. `ChannelEnding` owns it. */
+  /** @internal Open; closing once it takes no more sends (`close`, `abort` or the page's CLOSE began it); ended.
+   *  `ChannelEnding` owns it. */
   get _phase(): 'open' | 'closing' | 'ended' {
     if (this.lifecycle.ended) return 'ended'
     return this.lifecycle.stopped ? 'closing' : 'open'
