@@ -200,7 +200,7 @@ export async function onUpload(file: File) => void) {
 
 ## Limitations
 
-File bytes flow directly from the HTTP stream to your code with zero internal buffering. This makes uploads memory-efficient — but there are two trade-offs:
+When you read file arguments in order during the call, file bytes flow directly from the HTTP stream to your code with zero internal buffering. If you keep a file past the call's return, its unread bytes are buffered within <Link href="/channel-config"><code>config.channel.maxMemory</code></Link> until you read the file or it is dropped.
 
 ### One-shot reads
 
