@@ -264,13 +264,9 @@ const telefunc = new Telefunc({
 
 See also: <Link href="/Telefunc" />.
 
-## Hibernation
+## Reconnection
 
-> **[Hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/#why-use-hibernation) while channels are open isn't supported.**
->
-> Channel state is in-memory JavaScript. If the Durable Object hibernates, that state is gone. Telefunc keeps the Durable Object alive while channels are open.
-
-Open channels keep the Durable Object active. Set `reconnectTimeout` to choose how long channels stay open after a connection drops.
+Set `reconnectTimeout` to choose how long channels stay open after a connection drops.
 
 ```ts
 import { config } from 'telefunc'
