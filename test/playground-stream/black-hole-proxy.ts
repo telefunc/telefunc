@@ -16,6 +16,9 @@ type BlackHoleProxy = {
   heldWebSockets(): number
   /** Null until the server closes the muted WebSocket, then how many WebSockets the page opened after it meanwhile. */
   openedBeforeMutedClosed(): number | null
+  /** From now on what the page sends on each new connection reaches the server `ms` after its first byte, as a server
+   *  slow to take connections answers them late. */
+  delayFirstByte(ms: number): void
   /** From now on each direction carries `bytesPerSecond` (download, upload) through its own queue of `queueBytes`, as a slow link does, each byte `delayMs` late; a direction whose queue is full stops reading its senders. */
   pace(link: {
     downBytesPerSecond: number
@@ -45,6 +48,7 @@ async function startBlackHoleProxy(target: string): Promise<BlackHoleProxy> {
   let held = 0
   let webSockets = 0
   let openedBeforeMutedClosed: number | null = null
+  let firstByteDelayMs = 0
   let down: PacedDirection | null = null
   let up: PacedDirection | null = null
   const proxy = net.createServer((page) => {
@@ -54,7 +58,20 @@ async function startBlackHoleProxy(target: string): Promise<BlackHoleProxy> {
     server.setNoDelay(true)
     const link: Link = { page, server, webSocket: false, dead: false, muted: null }
     links.add(link)
+    let lateMs = firstByteDelayMs
+    let late: Buffer[] | null = null
     page.on('data', (chunk: Buffer) => {
+      if (late) return void late.push(chunk)
+      if (lateMs === 0) return fromPage(chunk)
+      late = [chunk]
+      setTimeout(() => {
+        const held = late!
+        late = null
+        if (!server.destroyed) for (const each of held) fromPage(each)
+      }, lateMs)
+      lateMs = 0
+    })
+    const fromPage = (chunk: Buffer) => {
       if (link.dead) return
       if (link.muted) return forwardMutedUplink(link, chunk)
       const head = chunk.toString('latin1', 0, 2048)
@@ -74,7 +91,7 @@ async function startBlackHoleProxy(target: string): Promise<BlackHoleProxy> {
       }
       if (up) up.enqueue(page, server, chunk)
       else server.write(chunk)
-    })
+    }
     let answered = false
     server.on('data', (chunk: Buffer) => {
       if (link.dead || (link.muted && answered)) return
@@ -120,6 +137,9 @@ async function startBlackHoleProxy(target: string): Promise<BlackHoleProxy> {
     },
     heldWebSockets: () => held,
     openedBeforeMutedClosed: () => openedBeforeMutedClosed,
+    delayFirstByte(ms) {
+      firstByteDelayMs = ms
+    },
     pace({ downBytesPerSecond, upBytesPerSecond, queueBytes, burstMs = 5, delayMs = 0 }) {
       down = new PacedDirection(downBytesPerSecond, queueBytes, burstMs, delayMs)
       up = new PacedDirection(upBytesPerSecond, queueBytes, burstMs, delayMs)

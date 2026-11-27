@@ -27,7 +27,7 @@ import {
 } from '../../e2e-utils'
 import { cardOf } from './upload-refusal-e2e-test'
 import { burstOf, burstWhileOffline, memoryPeakOf } from './burst-e2e'
-import { sendRefusedWarning, sessionEndedByUnreadable, withNetworkConditions } from '../../../utils'
+import { newCDPSession, sendRefusedWarning, sessionEndedByUnreadable, withNetworkConditions } from '../../../utils'
 import { parseChannelTransports } from '../../channelTransports'
 
 type Tally = { text: number; binary: number; inOrder: boolean }
@@ -466,6 +466,9 @@ function testWire(isDev: boolean) {
     )
   })
 
+  if (!isDev && ['sse', 'ws'].includes(parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join()))
+    testWireFrozenPage()
+
   if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse') {
     testWireProxyAnswers()
     test("channel: a message sent with an SSE wire's first batch, which the server held until the connection dropped, arrives once and before the next", async () => {
@@ -623,6 +626,35 @@ function testWireProxyAnswers() {
     } finally {
       await page.unroute(telefuncRequests)
     }
+  })
+}
+
+/** A page the browser freezes for 30 s, inside the server's `reconnectTimeout` (60 s), while its message waits for a
+ *  wire: the server takes the wire for dead meanwhile, and the page goes on once it runs again. */
+function testWireFrozenPage() {
+  test('channel: a page frozen for 30 s while its message waits for a wire goes on once it runs again, and the message arrives', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#wire-upload-open')
+    const tallyOf = async () => {
+      const { upload } = await getResult<WireState>('#wire-state')
+      return JSON.parse(
+        (await getCleanupState())[`wireUpload_${defined(upload, 'the upload card').channelId}`] ?? 'null',
+      )
+    }
+    await autoRetry(async () => expect(await tallyOf()).deep.equal({ text: 1, binary: 0, inOrder: true }))
+    const cdp = await newCDPSession()
+    try {
+      await cutWire()
+      await page.click('#wire-upload-send')
+      await cdp.send('Page.setWebLifecycleState', { state: 'frozen' })
+      await sleep(30_000)
+      await cdp.send('Page.setWebLifecycleState', { state: 'active' })
+    } finally {
+      await cdp.detach()
+    }
+    await autoRetry(async () => expect(await tallyOf()).deep.equal({ text: 2, binary: 0, inOrder: true }), {
+      timeout: 20_000,
+    })
   })
 }
 
