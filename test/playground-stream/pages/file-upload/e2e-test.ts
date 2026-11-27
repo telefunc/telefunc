@@ -333,15 +333,16 @@ function testFileUpload(isDev = false, inDocker = false) {
     expect(read.text).toContain('read 1000 bytes')
   })
 
-  // Bun's and Deno's servers (their lanes serve a production build, so the refusal prints nothing).
-  if (serverRuntime() !== 'node')
-    test('file upload: a binary call whose body ends before its envelope is complete is refused as malformed (400)', async () => {
-      const statuses: number[] = []
-      for (const body of ['', new Uint8Array([0, 0]), new Uint8Array([0, 0, 3, 232, 123])]) {
-        statuses.push((await post('bin', body)).status)
-      }
-      expect(statuses).deep.equal([400, 400, 400])
-    })
+  test('file upload: a binary call whose body ends before its envelope is complete is refused as malformed (400)', async () => {
+    const statuses: number[] = []
+    for (const body of ['', new Uint8Array([0, 0]), new Uint8Array([0, 0, 3, 232, 123])]) {
+      statuses.push((await post('bin', body)).status)
+    }
+    expect(statuses).deep.equal([400, 400, 400])
+    if (isDev) {
+      expectLog('Malformed request in development', { filter: (log) => log.logSource === 'stderr' })
+    }
+  })
 
   // On Node's HTTP/1.1 server, which keeps the connection for the next call.
   if (process.env.NO_HTTPS && serverRuntime() === 'node')
