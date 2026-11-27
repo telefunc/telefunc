@@ -62,18 +62,15 @@ const { handshakes } = getGlobalObject('serve/nodeUpgrades.ts', {
   handshakes: new WeakMap<IncomingMessage, Handshake>(),
 })
 
-/** Telefunc's `shouldUpgradeCallback` (Node 22.21, 24.9 and later) upgrades its handshake and leaves every other
- *  request to the server's own, which sees a `listenerCount` without Telefunc's listener. Until the build's entry
- *  loaded, its `telefuncUrl` isn't known: the callback takes every handshake, and the `upgrade` listener judges it after
- *  the load. */
+/** Telefunc's `shouldUpgradeCallback` (Node 22.21, 24.9 and later) upgrades its WebSocket handshake and leaves every
+ *  other request to the server's own, which sees a `listenerCount` without Telefunc's listener. Until the build's entry
+ *  loaded, its `telefuncUrl` isn't known: the callback takes every WebSocket handshake, and the `upgrade` listener
+ *  judges it after the load. */
 function upgradeOthersOnlyForTheirListeners(server: HttpServer, taken: TakenServer): void {
   if (!hasProp(server, 'shouldUpgradeCallback', 'function')) return
   const own = server.shouldUpgradeCallback
   const callback = (req: IncomingMessage) => {
-    if (isServerProductionEntryPending()) return true
-    const handshake = readHandshake(req)
-    handshakes.set(req, handshake)
-    if (handshake.url?.pathname === handshake.config.telefuncUrl) return true
+    if (upgradesItself(req)) return true
     const before = Object.getOwnPropertyDescriptor(server, 'listenerCount')
     const count = server.listenerCount
     const withoutTelefunc = (...args: [event: string | symbol, listener?: (...args: never[]) => void]) => {
@@ -94,6 +91,15 @@ function upgradeOthersOnlyForTheirListeners(server: HttpServer, taken: TakenServ
   server.shouldUpgradeCallback = callback
   taken.callback = callback
   taken.own = own
+}
+
+/** Whether Telefunc upgrades `req`: a WebSocket handshake at its `telefuncUrl`, or any while the build's entry loads. */
+function upgradesItself(req: IncomingMessage): boolean {
+  if (req.headers.upgrade?.toLowerCase() !== 'websocket') return false
+  if (isServerProductionEntryPending()) return true
+  const handshake = readHandshake(req)
+  handshakes.set(req, handshake)
+  return handshake.url?.pathname === handshake.config.telefuncUrl
 }
 
 /** Puts the server's own callback back where Telefunc's is still the server's: one the app set since stays. */
