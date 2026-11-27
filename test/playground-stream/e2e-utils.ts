@@ -30,10 +30,11 @@ export {
   canCutWire,
   REDIS_TOOK_REFUSED_KEY,
   defined,
+  withRoute,
 }
 
 import { page, getServerUrl, expectLog } from '@brillout/test-e2e'
-import type { Response, WebSocket } from 'playwright-chromium'
+import type { Page, Response, WebSocket } from 'playwright-chromium'
 import { execSync } from 'node:child_process'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -303,6 +304,22 @@ function isTransientNetworkError(err: unknown): boolean {
 function defined<T>(value: T | null | undefined, what: string): T {
   if (value === null || value === undefined) throw new Error(`Expected ${what}`)
   return value
+}
+
+/** Answers the page's requests matching `match` with `handler` while `run` runs. Routes on the underlying Playwright
+ *  page rather than `@brillout/test-e2e`'s `page` Proxy, whose `unroute()` leaves the route installed. */
+async function withRoute(
+  match: Parameters<Page['route']>[0],
+  handler: Parameters<Page['route']>[1],
+  run: () => Promise<void>,
+): Promise<void> {
+  const routed = page.mainFrame().page()
+  await routed.route(match, handler)
+  try {
+    await run()
+  } finally {
+    await routed.unroute(match, handler)
+  }
 }
 
 async function getResult<T = any>(selector: string): Promise<T> {

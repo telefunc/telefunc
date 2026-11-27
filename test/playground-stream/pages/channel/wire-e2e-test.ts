@@ -24,6 +24,7 @@ import {
   releaseHeldSsePosts,
   sleep,
   defined,
+  withRoute,
 } from '../../e2e-utils'
 import { cardOf } from './upload-refusal-e2e-test'
 import { burstOf, burstWhileOffline, memoryPeakOf } from './burst-e2e'
@@ -576,56 +577,58 @@ function testWireProxyAnswers() {
     const channelId = await openEnd()
     let refusedAt = 0
     const opensAfter: number[] = []
-    await page.route(telefuncRequests, async (route) => {
-      if (route.request().headers().accept !== 'text/event-stream') return route.fallback()
-      if (!refusedAt) {
-        refusedAt = Date.now()
-        return route.fulfill({ status: 503, headers: { 'Retry-After': '2' }, contentType: 'text/html', body: 'Busy' })
-      }
-      opensAfter.push(Date.now() - refusedAt)
-      return route.fallback()
-    })
-    try {
-      await cutWire()
-      await autoRetry(() => expect(opensAfter.length).not.toBe(0), { timeout: 20_000 })
-      expect(opensAfter[0]! >= 2_000).toBe(true)
-      await runServerAction(`wireEnd_${channelId}_close`)
-      await autoRetry(async () => {
-        const { end } = await getResult<WireState>('#wire-state')
-        expect(end!.received).deep.equal([...sentBefore, 'onClose:none'])
-      })
-      expectLog('the server responded with a status of 503', { filter: (log) => log.logSource === 'Browser Error' })
-    } finally {
-      await page.unroute(telefuncRequests)
-    }
+    await withRoute(
+      telefuncRequests,
+      async (route) => {
+        if (route.request().headers().accept !== 'text/event-stream') return route.fallback()
+        if (!refusedAt) {
+          refusedAt = Date.now()
+          return route.fulfill({ status: 503, headers: { 'Retry-After': '2' }, contentType: 'text/html', body: 'Busy' })
+        }
+        opensAfter.push(Date.now() - refusedAt)
+        return route.fallback()
+      },
+      async () => {
+        await cutWire()
+        await autoRetry(() => expect(opensAfter.length).not.toBe(0), { timeout: 20_000 })
+        expect(opensAfter[0]! >= 2_000).toBe(true)
+        await runServerAction(`wireEnd_${channelId}_close`)
+        await autoRetry(async () => {
+          const { end } = await getResult<WireState>('#wire-state')
+          expect(end!.received).deep.equal([...sentBefore, 'onClose:none'])
+        })
+        expectLog('the server responded with a status of 503', { filter: (log) => log.logSource === 'Browser Error' })
+      },
+    )
   })
 
   test('channel: behind a proxy that answers SSE POSTs over 64 KiB with 413, 256 messages of 16 KiB each way all arrive once and in order', async () => {
     let refused = 0
-    await page.route(telefuncRequests, async (route) => {
-      const request = route.request()
-      const isPost = request.method() === 'POST' && request.headers().accept !== 'text/event-stream'
-      if (!isPost || (request.postDataBuffer()?.byteLength ?? 0) <= 64 * 1024) return route.fallback()
-      refused++
-      return route.fulfill({ status: 413, contentType: 'text/html', body: 'Payload Too Large' })
-    })
-    try {
-      await navigate(`${getServerUrl()}/channel`)
-      await page.click('#wire-resume')
-      const all: Tally = { text: 256, binary: 256, inOrder: true }
-      await autoRetry(
-        async () => {
-          const { resume } = await getResult<WireState>('#wire-state')
-          expect(resume?.received).deep.equal(all)
-          expect(JSON.parse((await getCleanupState())[`wireResume_${resume!.channelId}`]!)).deep.equal(all)
-        },
-        { timeout: 30_000 },
-      )
-      expect(refused).not.toBe(0)
-      expectLog('the server responded with a status of 413', { filter: (log) => log.logSource === 'Browser Error' })
-    } finally {
-      await page.unroute(telefuncRequests)
-    }
+    await withRoute(
+      telefuncRequests,
+      async (route) => {
+        const request = route.request()
+        const isPost = request.method() === 'POST' && request.headers().accept !== 'text/event-stream'
+        if (!isPost || (request.postDataBuffer()?.byteLength ?? 0) <= 64 * 1024) return route.fallback()
+        refused++
+        return route.fulfill({ status: 413, contentType: 'text/html', body: 'Payload Too Large' })
+      },
+      async () => {
+        await navigate(`${getServerUrl()}/channel`)
+        await page.click('#wire-resume')
+        const all: Tally = { text: 256, binary: 256, inOrder: true }
+        await autoRetry(
+          async () => {
+            const { resume } = await getResult<WireState>('#wire-state')
+            expect(resume?.received).deep.equal(all)
+            expect(JSON.parse((await getCleanupState())[`wireResume_${resume!.channelId}`]!)).deep.equal(all)
+          },
+          { timeout: 30_000 },
+        )
+        expect(refused).not.toBe(0)
+        expectLog('the server responded with a status of 413', { filter: (log) => log.logSource === 'Browser Error' })
+      },
+    )
   })
 }
 

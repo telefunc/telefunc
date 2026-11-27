@@ -15,6 +15,7 @@ import {
   cutWire,
   closeAllConnections,
   serverRuntime,
+  withRoute,
 } from '../../e2e-utils'
 import { newCDPSession, sendRefusedWarning, withNetworkConditions } from '../../../utils'
 import { parseChannelTransports } from '../../channelTransports'
@@ -148,7 +149,7 @@ function testChannel(isDev: boolean, inDocker = false) {
   testChannelApi()
   testAbortUnsendable()
   if (channelTransports[0] === 'sse') testSseOpenAnsweredWithHtml()
-  if (channelTransports[0] === 'sse') testSseRefusals(isDev)
+  if (channelTransports[0] === 'sse') testSseRefusals(isDev, inDocker)
 
   // ── Basic connection ─────────────────────────────────────────────────
 
@@ -1594,10 +1595,6 @@ function testChannel(isDev: boolean, inDocker = false) {
     expect(await bugs()).deep.equal(bugsBefore)
     expectLog('the server responded with a status of 400', { filter: (log) => log.logSource === 'Browser Error' })
   })
-
-  testAbortUnsendable()
-
-  if (channelTransports[0] === 'sse') testSseOpenAnsweredWithHtml()
 }
 
 /** A first SSE open answered with a page of HTML, as an app's SPA fallback answers it. */
@@ -1617,22 +1614,6 @@ function testSseOpenAnsweredWithHtml() {
       },
     )
   })
-}
-
-/** Answers the page's requests to URLs `match` takes with `handler` while `run` runs. On the page itself, not on
- *  `@brillout/test-e2e`'s `page`: that one is a Proxy whose `unroute()` would leave the route in place. */
-async function withRoute(
-  match: (url: URL) => boolean,
-  handler: Parameters<Page['route']>[1],
-  run: () => Promise<void>,
-): Promise<void> {
-  const routed = page.mainFrame().page()
-  await routed.route(match, handler)
-  try {
-    await run()
-  } finally {
-    await routed.unroute(match, handler)
-  }
 }
 
 /** A request of the page's SSE wire: `opens` for the POST that opens its event stream, `posts` for the others. */
@@ -1660,7 +1641,7 @@ async function serverFaults(): Promise<string[]> {
 }
 
 /** What the page does with refusals of its SSE requests, and with a server that closes its connections. */
-function testSseRefusals(isDev: boolean) {
+function testSseRefusals(isDev: boolean, inDocker = false) {
   test("channel: a 409 that isn't Telefunc's to a batch POST is a loss the channel goes on after, and Telefunc's own 409 ends it as a server that was updated", async () => {
     await navigate(`${getServerUrl()}/channel`)
     const id = await openCounted(['sse'])
@@ -1717,10 +1698,15 @@ function testSseRefusals(isDev: boolean) {
       for (const refusal of refusals)
         expect(refusal).toBe('400 text/vnd.telefunc.refusal; kind=route; reason="Malformed Telefunc Request"')
     })
+    if (isDev) {
+      expectLog('The `x-telefunc-request` header of the HTTP request is missing', {
+        filter: (log) => log.logSource === 'stderr',
+      })
+    }
   })
 
-  // Only the Node server's `closeAllConnections()` (+server.ts), which `pnpm dev` doesn't serve.
-  if (!isDev && serverRuntime() === 'node')
+  // Only the Node server's `closeAllConnections()` (+server.ts), which `pnpm dev` and Caddy-fronted Docker don't serve directly.
+  if (!isDev && !inDocker && serverRuntime() === 'node')
     test('channel: a server that closes all its connections while a page is connected over SSE prints nothing and leaves nothing uncaught, and the page reconnects', async () => {
       await navigate(`${getServerUrl()}/channel`)
       const id = await openCounted(['sse'])
