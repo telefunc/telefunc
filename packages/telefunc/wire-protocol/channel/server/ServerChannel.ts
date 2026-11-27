@@ -126,8 +126,8 @@ type LossyBehind = { tag: typeof TAG.TEXT | typeof TAG.BINARY; data: EntryData; 
 /** A send that waits for room, with the lossy send behind it, and how its promise settles if the channel ends first. */
 type WaitingSend = { wait: RoomWait<LossyBehind>; reject: (err: Error) => void }
 
-/** The page that is to attach to a channel its call returned, as the channel's connect window waits for it: a browser
- *  attaches only once it has sent the call's whole body. */
+/** The page that is to attach to a channel its call returned, as the channel's `connectTtl` window waits for it: each
+ *  chunk of the call's upload still arriving restarts the window, so a slow upload isn't taken for a page that left. */
 type CallPage = {
   /** When the page last showed it is on its way (a `performance.now()` time): each byte of the call's upload is such a
    *  sign. The window counts from the later of it and the channel's registration. */
