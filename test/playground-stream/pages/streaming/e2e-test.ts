@@ -1,7 +1,15 @@
 export { testStreaming, testStreamingRequestContext }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl, skip } from '@brillout/test-e2e'
-import { resetCleanupState, getCleanupState, forceServerGc, serverHeapUsed, navigate, getResult } from '../../e2e-utils'
+import {
+  resetCleanupState,
+  getCleanupState,
+  forceServerGc,
+  serverHeapUsed,
+  navigate,
+  getResult,
+  expectServerError,
+} from '../../e2e-utils'
 import { parseChannelTransports } from '../../channelTransports'
 
 const stallWarning = 'read all of the streams a call returned concurrently'
@@ -21,7 +29,7 @@ function testStreamingRequestContext() {
   })
 }
 
-function testStreaming() {
+function testStreaming(inDocker = false) {
   test('streaming: ReadableStream return', async () => {
     await navigate(`${getServerUrl()}/streaming`)
 
@@ -540,8 +548,6 @@ function testStreaming() {
     await autoRetry(async () => {
       expect((await getCleanupState()).streamThenCircularCancelled).toBe('true')
     })
-    expectLog('Cannot serialize value returned by telefunction onStreamThenCircular()', {
-      filter: (log) => log.logSource === 'stderr',
-    })
+    expectServerError('Cannot serialize value returned by telefunction onStreamThenCircular()', inDocker)
   })
 }
