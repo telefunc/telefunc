@@ -3,7 +3,7 @@ export type { AttachExchangeOwner, ReconcileBatch }
 
 import type { ChannelRecord, ChannelTable } from './ChannelTable.js'
 import type { ClientChannelTransport, MuxChannel, OutboundFrame } from './ClientConnection.js'
-import type { SendGate } from './SendGate.js'
+import type { SendQueue } from './SendQueue.js'
 import type { ProbeSession } from './Upgrade.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import { MAX_U32, type ReconcileOpenEntry, type ReconcilePayload, type ReconciledPayload } from '../../wire/payloads.js'
@@ -75,7 +75,7 @@ interface AttachExchangeOwner {
 type AttachExchangeOptions = {
   owner: AttachExchangeOwner
   channels: ChannelTable
-  gate: SendGate
+  sendQueue: SendQueue
 }
 
 /** The page's side of attaching its channels to the server: each RECONCILE names them, its RECONCILED says which the
@@ -83,7 +83,7 @@ type AttachExchangeOptions = {
 class AttachExchange {
   private readonly owner: AttachExchangeOwner
   private readonly channels: ChannelTable
-  private readonly gate: SendGate
+  private readonly sendQueue: SendQueue
   /** Set while a RECONCILE is out and its RECONCILED hasn't come. On SSE it is set while connecting too: the open
    *  POST's body carries the first RECONCILE. Only `enterReconciling` and `exitReconciling` write it, so its deadline
    *  never outlives it. */
@@ -105,10 +105,10 @@ class AttachExchange {
   /** From a RECONCILED until what it releases is handed to the transport (`batchHanded`). */
   private committing = false
 
-  constructor({ owner, channels, gate }: AttachExchangeOptions) {
+  constructor({ owner, channels, sendQueue }: AttachExchangeOptions) {
     this.owner = owner
     this.channels = channels
-    this.gate = gate
+    this.sendQueue = sendQueue
   }
 
   get reconciling(): boolean {
@@ -247,7 +247,7 @@ class AttachExchange {
       const record = this.channels.get(ix)
       return record !== undefined && !this.channels.isUndeclared(ix) && !record.awaited
     }
-    const queued = this.gate.drain(attached)
+    const queued = this.sendQueue.drain(attached)
     // The data of channels the server hasn't confirmed since a loss goes after the others', the one dated last first,
     // each channel's own order kept (the server orders each channel alone, and the sort is stable): what may not get
     // through doesn't hold up what may.
@@ -309,7 +309,7 @@ class AttachExchange {
       const lastSeq = serverHas.get(ix)
       if (lastSeq === undefined) {
         // One the server no longer has needs nothing more from the page, if closed; else it closes unacknowledged.
-        if (record.state.tag === 'closed') this.gate.release(record)
+        if (record.state.tag === 'closed') this.sendQueue.release(record)
         else omitted.push(ix)
         continue
       }
@@ -344,7 +344,7 @@ class AttachExchange {
     // As `applyReconciled` does: its replay, then what it queued, in order with what other channels queued meanwhile.
     const { transport } = this.owner
     for (const { frame } of this.replayTo(record, lastSeq)) transport.sendFrame(frame)
-    this.gate.sendRunnable()
+    this.sendQueue.sendRunnable()
     if (opened && record.state.tag === 'open') {
       record.channel._onTransportOpen(transport.batched, transport.uplink, transport.downlink)
     }
@@ -355,7 +355,7 @@ class AttachExchange {
     for (const ix of ixes) {
       const record = this.channels.get(ix)
       if (!record) continue
-      this.gate.release(record)
+      this.sendQueue.release(record)
       record.channel._onConnectionLost(new NetworkError('Channel not acknowledged by server after reconnect', true))
     }
   }
@@ -494,7 +494,7 @@ class AttachExchange {
       const { ix } = record
       // The server has all a delivered one sent it, or ended it: leaving it out lets it go there too.
       if (record.state.tag === 'closed' && record.state.delivered) {
-        this.gate.release(record)
+        this.sendQueue.release(record)
         continue
       }
       const isInitial = this.channels.isInitial(record)
@@ -514,7 +514,7 @@ class AttachExchange {
       open.push(payloadEntry)
     }
     // The declared wants supersede the WANT frames queued before them.
-    if (wanting.size > 0) this.gate.dropWantFrames(wanting)
+    if (wanting.size > 0) this.sendQueue.dropWantFrames(wanting)
     return open
   }
 
@@ -529,7 +529,7 @@ class AttachExchange {
     // A channel the server awaits is left out: its replay waits for its ATTACH_RESULT.
     const inFlight = this.reconciledWait?.inFlight
     assert(inFlight)
-    return this.gate.drainForReconcile(inFlight.carriedFrom)
+    return this.sendQueue.drainForReconcile(inFlight.carriedFrom)
   }
 
   /** Whether a replay holds a frame the page sent. */
@@ -561,7 +561,7 @@ class AttachExchange {
 
   /** Ends the channel on both ends, dropping its queue; the ERROR isn't replayed, as the next reconcile sends one. */
   private loseChannel({ ix, replay, channel }: ChannelRecord): OutboundFrame {
-    this.gate.dropQueue(ix)
+    this.sendQueue.dropQueue(ix)
     const frame = encode.error(ix, ERROR_REASON.LOST, replay.nextSeq())
     channel._onEnded(END_CAUSE.lost.error())
     return { kind: 'control', frame }

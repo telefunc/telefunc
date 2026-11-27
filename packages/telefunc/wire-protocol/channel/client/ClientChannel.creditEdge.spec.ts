@@ -171,15 +171,15 @@ test('a lossy send after which the channel is out of credit goes at once', async
   expect(postsSince(from, since)).toEqual([{ after: 0, opensWire: false, dataFrames: [32_775] }])
 })
 
-test('a lossy replacement that leaves the channel out of credit, made while the gate holds its frame for a reconnect, goes as the gate releases it', async () => {
+test('a lossy replacement that leaves the channel out of credit, made while the send queue holds its frame for a reconnect, goes as the send queue releases it', async () => {
   const channel = await openChannel()
   server.endStream()
   await vi.advanceTimersByTimeAsync(1)
   const from = server.posts.length
   const since = performance.now()
   void channel.send('small', { lossy: true })
-  // It takes the place of the one before, which waits with it in the gate for the reconnect, and counts the bytes it
-  // adds. It carries no mark: what the gate releases goes on its own deadline, 10 ms after the wire reopened.
+  // It takes the place of the one before, which waits with it in the send queue for the reconnect, and counts the bytes it
+  // adds. It carries no mark: what the send queue releases goes on its own deadline, 10 ms after the wire reopened.
   void channel.sendBinary(new Uint8Array(32_768), { lossy: true })
   await vi.advanceTimersByTimeAsync(5_000)
   const reopened = server.posts.slice(from).find(({ opensWire }) => opensWire)

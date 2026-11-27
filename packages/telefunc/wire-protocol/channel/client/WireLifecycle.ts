@@ -29,7 +29,7 @@ import type { ChannelFrame, DecodedFrame, PongEntry } from '../../wire/frame.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 
 import { ChannelTable, type ChannelRecord } from './ChannelTable.js'
-import { SendGate, type SendGateOwner } from './SendGate.js'
+import { SendQueue, type SendQueueOwner } from './SendQueue.js'
 import { Liveness, type LivenessOwner } from './Liveness.js'
 import { Upgrade, type JoinRelease, type UpgradeOwner, type UpgradeSource, type UpgradeTarget } from './Upgrade.js'
 import { AttachExchange, type AttachExchangeOwner, type ReconcileBatch } from './AttachExchange.js'
@@ -146,7 +146,7 @@ type WireLifecycleOptions = {
 
 /** The wire a connection's channels ride, from its first open to its idle close: the transports, the reconnects and the
  *  upgrade, the liveness and the attach exchange, and the frames the wire delivers to the channels. */
-class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, UpgradeOwner, AttachExchangeOwner {
+class WireLifecycle implements TransportOwner, SendQueueOwner, LivenessOwner, UpgradeOwner, AttachExchangeOwner {
   private readonly owner: WireLifecycleOwner
   private readonly telefuncUrl: string
   private readonly connectionOptions: ClientConnectionOptions
@@ -189,9 +189,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   wire = 0
   private nextIndex = 0
   readonly channels = new ChannelTable()
-  readonly gate = new SendGate({ owner: this, channels: this.channels })
-  private readonly liveness = new Liveness({ owner: this, channels: this.channels, gate: this.gate })
-  private readonly exchange = new AttachExchange({ owner: this, channels: this.channels, gate: this.gate })
+  readonly sendQueue = new SendQueue({ owner: this, channels: this.channels })
+  private readonly liveness = new Liveness({ owner: this, channels: this.channels, sendQueue: this.sendQueue })
+  private readonly exchange = new AttachExchange({ owner: this, channels: this.channels, sendQueue: this.sendQueue })
   private readonly upgrade: Upgrade
   /** The page's transports include a WebSocket. */
   private readonly allowsWebSocket: boolean
@@ -360,7 +360,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     if (this.channels.size === MAX_CHANNELS_PER_CONNECTION) {
       for (const record of this.channels.values()) {
         if (record.state.tag !== 'closed' || !record.state.delivered) continue
-        this.gate.release(record)
+        this.sendQueue.release(record)
         break
       }
     }
@@ -383,7 +383,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   onTransportHeadroom(transport: ClientChannelTransport): void {
     if (transport !== this.transport || (!this.sendsOpen && !this.liveWire)) return
-    this.gate.sendRunnable()
+    this.sendQueue.sendRunnable()
     this.startTtlIfIdle()
   }
 
@@ -618,7 +618,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private endRefusedChannel({ channel, cause }: { channel: number; cause: number }): void {
     const record = this.channels.get(channel)
     if (record === undefined) return
-    this.gate.release(record)
+    this.sendQueue.release(record)
     this.exchange.scheduleRegisterReconcile()
     record.channel._onEnded(channelErrorFor(cause, this.reconnectTimeoutMs))
   }
@@ -671,7 +671,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     // Released, which a RECONCILE tells the server, ending it there: one on this wire, or the next wire's.
     if (refusedAgain.size > 0) this.exchange.scheduleRegisterReconcile()
     for (const record of refusedAgain) {
-      this.gate.release(record)
+      this.sendQueue.release(record)
       record.channel._onEnded(
         new NetworkError(
           `Channel closed: what the page sent on it was refused with ${answer}, again after a reconnect. Something between the page and the server refuses it, such as a proxy's limit on the size of a request.`,
@@ -830,7 +830,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 
   private drainBufferedFramesToWire(): void {
-    for (const frame of this.gate.drainSendable()) this.transport.sendFrame(frame)
+    for (const frame of this.sendQueue.drainSendable()) this.transport.sendFrame(frame)
     this.startTtlIfIdle()
   }
 
@@ -860,7 +860,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     if (rejected && tries === 0) return this.giveUp()
     // A closed channel whose frames the server all has needs nothing from another wire.
     for (const record of this.channels.values()) {
-      if (record.state.tag === 'closed' && record.state.delivered) this.gate.release(record)
+      if (record.state.tag === 'closed' && record.state.delivered) this.sendQueue.release(record)
       else record.replay.dateStall(now)
     }
     this.endStalled(now, lost ?? new NetworkError('Connection dropped', true))
@@ -920,7 +920,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     for (const record of [...this.channels.values()]) {
       const { stall } = record.replay
       if (stall === null || this.readAt <= stall.since || now - stall.since <= this.reconnectTimeoutMs) continue
-      this.gate.release(record)
+      this.sendQueue.release(record)
       record.channel._onEnded(
         new NetworkError(
           `Channel closed: the server hasn't confirmed what the page sent on it for over ${Math.round(this.reconnectTimeoutMs / 1000)} s of reconnects. The last try: ${lost.message}`,
@@ -969,7 +969,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private startTtlIfIdle(): void {
     // The expired timer whose PING asked for the closed channels' frames holds till the server has them all.
     if (this.idle?.confirming && this.channels.delivered) return this.dispose()
-    if (!this.connected || this.idle || !this.gate.idle || !this.channels.idle) {
+    if (!this.connected || this.idle || !this.sendQueue.idle || !this.channels.idle) {
       return
     }
     const idle: IdleTimer = {
@@ -1007,7 +1007,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.transport.detachHeartbeat()
     this.transport.dispose()
     this.channels.clear()
-    this.gate.clear()
+    this.sendQueue.clear()
     this.exchange.forgetWire()
     this.owner.onDisposed()
   }
@@ -1049,9 +1049,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.unregister(record.channel)
     assert(record.state.tag === 'closed')
     this.channels.serverEnded(record, record.state)
-    this.gate.dropQueue(record.ix)
+    this.sendQueue.dropQueue(record.ix)
     // What its frames held back may go.
-    this.gate.sendRunnable()
+    this.sendQueue.sendRunnable()
   }
 
   private closeAll(err: Error): void {

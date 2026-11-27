@@ -1,5 +1,5 @@
 // The order the page's sends reach the wire in, across its channels, around a RECONCILE: the REAL AttachExchange,
-// SendGate and ChannelTable, on a wire that records what it is handed. The server applies one connection's frames in
+// SendQueue and ChannelTable, on a wire that records what it is handed. The server applies one connection's frames in
 // the order they arrive, so the page's order is the one its app sees.
 
 import { describe, expect, test } from 'vitest'
@@ -8,7 +8,7 @@ import { AttachExchange } from './AttachExchange.js'
 import { ChannelTable, type ChannelRecord } from './ChannelTable.js'
 import type { ClientChannelTransport, OutboundFrame } from './ClientConnection.js'
 import { ReplayBuffer } from './ReplayBuffer.js'
-import { SendGate } from './SendGate.js'
+import { SendQueue } from './SendQueue.js'
 import { decode, encode } from '../../wire/frame.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import { TAG } from '../../wire/tags.js'
@@ -25,7 +25,7 @@ function label({ frame }: OutboundFrame): string {
   return `tag ${decoded.tag}`
 }
 
-/** A connection's exchange and gate on one wire. `carriesReconcileInOpen`: SSE's, whose RECONCILE carries the frames
+/** A connection's exchange and send queue on one wire. `carriesReconcileInOpen`: SSE's, whose RECONCILE carries the frames
  *  held behind it; else a WebSocket's, whose held frames wait for its RECONCILED. */
 function connect(carriesReconcileInOpen: boolean) {
   const wire: string[] = []
@@ -73,8 +73,8 @@ function connect(carriesReconcileInOpen: boolean) {
     reconnecting: false,
     maxFrameBytesOf: () => WIRE_MAX_RAW_FRAME_BYTES,
   }
-  const gate = new SendGate({ owner, channels })
-  const exchange = new AttachExchange({ owner, channels, gate })
+  const sendQueue = new SendQueue({ owner, channels })
+  const exchange = new AttachExchange({ owner, channels, sendQueue })
 
   return {
     wire,
@@ -89,7 +89,7 @@ function connect(carriesReconcileInOpen: boolean) {
     },
     send(record: ChannelRecord, text: string) {
       const seq = record.replay.nextSeq()
-      gate.send(record, seq, encode.text(record.ix, text, seq), 'data')
+      sendQueue.send(record, seq, encode.text(record.ix, text, seq), 'data')
     },
     /** The server's ATTACH_RESULT for channel `ix`, which it awaited. */
     attachResult(ix: number) {

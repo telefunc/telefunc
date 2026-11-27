@@ -1,5 +1,5 @@
-export { SendGate }
-export type { FrameAt, SendGateOwner }
+export { SendQueue }
+export type { FrameAt, SendQueueOwner }
 
 import { assertUsage } from '../../../utils/assert.js'
 import type { ChannelRecord, ChannelTable } from './ChannelTable.js'
@@ -25,8 +25,8 @@ function limitKey({ frame, channelIx }: BufferedFrame): number | null {
   return frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW ? channelIx * 256 + frame[0] : null
 }
 
-/** The connection, whose transport takes what the gate lets go. */
-interface SendGateOwner {
+/** The connection, whose transport takes what the send queue lets go. */
+interface SendQueueOwner {
   /** False while a RECONCILE or an upgrade holds sends back. */
   readonly sendsOpen: boolean
   /** While a RECONCILE is out, the wire still takes new frames of the channels its session has (see `takesLive`). */
@@ -40,15 +40,15 @@ interface SendGateOwner {
   maxFrameBytesOf(channel: MuxChannel): number
 }
 
-type SendGateOptions = {
-  owner: SendGateOwner
+type SendQueueOptions = {
+  owner: SendQueueOwner
   channels: ChannelTable
 }
 
 /** What the page's channels send: at once while sends are open, or while a RECONCILE is out the wire takes the
  *  channel's frames and nothing ahead holds them back, and the transport has headroom; else queued, in order. */
-class SendGate {
-  private readonly owner: SendGateOwner
+class SendQueue {
+  private readonly owner: SendQueueOwner
   private readonly channels: ChannelTable
   /** Frames held in order while sends are held back, or till the server attaches their channel (ATTACH_RESULT). */
   private sendBuffer: BufferedFrame[] = []
@@ -63,7 +63,7 @@ class SendGate {
   /** The sequenced frames handed to the transport, across the connection's channels: the order a replay keeps. */
   private handed = 0
 
-  constructor({ owner, channels }: SendGateOptions) {
+  constructor({ owner, channels }: SendQueueOptions) {
     this.owner = owner
     this.channels = channels
   }
