@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { sqliteStorage } from '../../test/cloudflareSql.js'
+import { hasNodeSqlite, sqliteStorage } from '../../test/cloudflareSql.js'
 import {
   grantHolder,
   initLeaseSchema,
@@ -27,7 +27,7 @@ function authority() {
 
 // Each write of a holder carries its grant and a sequence number in the order the holder sent them; the authority gets
 // them in any order, and applies a write only if it is after the latest it applied.
-describe("an authority's leases", () => {
+describe.runIf(hasNodeSqlite)("an authority's leases", () => {
   it('refuse a register that arrives after the removal sent after it', () => {
     const { register, remove, live } = authority()
     expect(remove('l1', 2)).toBe('removed')

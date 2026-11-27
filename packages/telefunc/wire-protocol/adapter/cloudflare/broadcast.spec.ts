@@ -26,7 +26,7 @@ import { integerColumn } from './sqlStorage.js'
 import type { TelefuncExtensionNamespace } from './extensions.js'
 import type { BroadcastRoute } from '../../backend/driver.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
-import { sqliteStorage } from '../../test/cloudflareSql.js'
+import { hasNodeSqlite, sqliteStorage } from '../../test/cloudflareSql.js'
 import { CloudflareBackend } from './CloudflareBackend.js'
 import { cloudflareSession, servesRequest, withCloudflareSession, type CloudflareSession } from './session.js'
 import { disposeBackend, installBackend } from '../../backend/install.js'
@@ -282,6 +282,29 @@ describe('cloudflare broadcast routing', () => {
     expect(() => assertLocationFallbackIsScaled(undefined, 'weur')).not.toThrow()
   })
 
+  it('forwarded publish delivers to DO names listed in the request', async () => {
+    const deliveredTo: string[] = []
+    const broadcast = createBroadcast(
+      createBasicBinding({
+        onDeliver(id) {
+          deliveredTo.push(id.name)
+          return Promise.resolve(0)
+        },
+      }),
+    )
+
+    await broadcast.forwardToBucket(new OrderedStubs(), {
+      routes: [{ key: 'room:test', kind: 'text' }],
+      payload: '{"text":"hello"}',
+      info: { seq: 1, timestamp: Date.now() },
+      members: ['telefunc-shard-weur-0', 'telefunc-shard-weur-1'],
+    })
+
+    expect(deliveredTo.sort()).toEqual(['telefunc-shard-weur-0', 'telefunc-shard-weur-1'])
+  })
+})
+
+describe.runIf(hasNodeSqlite)("cloudflare broadcast through a key's authority", () => {
   it('authority forwards once to each populated bucket coordinator', async () => {
     const authorityState = createAuthorityState()
     const calls: BroadcastCalls = new OrderedStubs()
@@ -335,27 +358,6 @@ describe('cloudflare broadcast routing', () => {
     await attempt.unsubscribe()
     await publish('"second"')
     expect(coordinators).toEqual(['telefunc:broadcast:weur:0'])
-  })
-
-  it('forwarded publish delivers to DO names listed in the request', async () => {
-    const deliveredTo: string[] = []
-    const broadcast = createBroadcast(
-      createBasicBinding({
-        onDeliver(id) {
-          deliveredTo.push(id.name)
-          return Promise.resolve(0)
-        },
-      }),
-    )
-
-    await broadcast.forwardToBucket(new OrderedStubs(), {
-      routes: [{ key: 'room:test', kind: 'text' }],
-      payload: '{"text":"hello"}',
-      info: { seq: 1, timestamp: Date.now() },
-      members: ['telefunc-shard-weur-0', 'telefunc-shard-weur-1'],
-    })
-
-    expect(deliveredTo.sort()).toEqual(['telefunc-shard-weur-0', 'telefunc-shard-weur-1'])
   })
 
   it("a publish its bucket's coordinator couldn't hand to a member rejects with that member's error as its cause", async () => {
@@ -480,7 +482,7 @@ describe('cloudflare broadcast routing', () => {
 // What a subscriber's `ready` says, on a Worker without AsyncLocalStorage: the REAL ServerBroadcast on the REAL
 // CloudflareBackend and CloudflareBroadcast, each session's member registering its presence with the key's authority,
 // whose RPC this test answers from a real authority state, refusing or holding it where a case asks.
-describe("a subscriber's `ready` on Cloudflare", () => {
+describe.runIf(hasNodeSqlite)("a subscriber's `ready` on Cloudflare", () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.restoreAllMocks()

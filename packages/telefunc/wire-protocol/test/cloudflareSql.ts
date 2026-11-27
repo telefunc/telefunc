@@ -1,12 +1,17 @@
-export { sqliteStorage }
+export { hasNodeSqlite, sqliteStorage }
 
-import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from 'node:sqlite'
+import type { SQLInputValue, SQLOutputValue } from 'node:sqlite'
 import type { DurableStorage, SqlBinding, SqlCursor, SqlRow, SqlValue } from '../adapter/cloudflare/sqlStorage.js'
+
+// node:sqlite came in Node 22.5, and the lowest Node that `engines` allows is 22.0: its specs run where it is.
+const nodeSqlite: typeof import('node:sqlite') | null = await import('node:sqlite').catch(() => null)
+const hasNodeSqlite = nodeSqlite !== null
 
 /** A Durable Object's SQLite storage over node:sqlite, as far as Telefunc uses it: a blob is bound and read as
  *  Cloudflare's storage does, as an ArrayBuffer. Records the plan of each read. */
 function sqliteStorage(): { storage: DurableStorage & { getAlarm(): Promise<number | null> }; plans: string[] } {
-  const db = new DatabaseSync(':memory:')
+  if (!nodeSqlite) throw new Error(`node:sqlite needs Node 22.5 or later, and this is Node ${process.versions.node}`)
+  const db = new nodeSqlite.DatabaseSync(':memory:')
   const plans: string[] = []
   const sql = {
     exec(query: string, ...values: SqlBinding[]): SqlCursor {

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { TelefuncExtensionNamespace } from 'telefunc/__internal'
 import { encodeLaneKey } from '../backend/laneKey.js'
 import type { OperationArgs } from '../server/store/roomOperations.js'
-import { sqliteStorage } from '../../../telefunc/wire-protocol/test/cloudflareSql.js'
+import { hasNodeSqlite, sqliteStorage } from '../../../telefunc/wire-protocol/test/cloudflareSql.js'
 import { RoomAuthority, type OperationWire } from './RoomAuthority.js'
 
 afterEach(() => vi.useRealTimers())
@@ -53,7 +53,7 @@ const inbox = {
 const answered = <Value>(wire: OperationWire<Value> | 'regrant') =>
   wire === 'regrant' ? wire : wire.kind === 'done' ? wire.value : wire.kind
 
-describe("RoomAuthority: a member's join, sent again", () => {
+describe.runIf(hasNodeSqlite)("RoomAuthority: a member's join, sent again", () => {
   // A session waits 70 s for a join's answer: the room's 60 s for an earlier commit's hand-on, then a call's own 10 s.
   it('is answered as the join was while it comes within the join’s 70 s, and admits nothing once they passed', async () => {
     vi.useFakeTimers()

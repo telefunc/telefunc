@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 import { describe, expect, expectTypeOf, it } from 'vitest'
-import { sqliteStorage } from '../../test/cloudflareSql.js'
+import { hasNodeSqlite, sqliteStorage } from '../../test/cloudflareSql.js'
 import {
   blobColumn,
   integerColumn,
@@ -16,7 +16,7 @@ describe("a Durable Object's SQLite storage", () => {
     expectTypeOf<DurableObjectState['storage']['sql']>().toExtend<SqlStore>()
   })
 
-  it('reads a column as the type it holds, a blob as an ArrayBuffer', () => {
+  it.runIf(hasNodeSqlite)('reads a column as the type it holds, a blob as an ArrayBuffer', () => {
     const { sql } = sqliteStorage().storage
     sql.exec('CREATE TABLE t (n INTEGER, s TEXT, b BLOB, z INTEGER)')
     sql.exec('INSERT INTO t VALUES (?, ?, ?, ?)', 7, 'seven', new Uint8Array([7]), null)
@@ -29,7 +29,7 @@ describe("a Durable Object's SQLite storage", () => {
     }).toEqual({ n: 7, s: 'seven', b: [7], z: null })
   })
 
-  it('refuses a column that holds another type, or nothing, naming the column', () => {
+  it.runIf(hasNodeSqlite)('refuses a column that holds another type, or nothing, naming the column', () => {
     const { sql } = sqliteStorage().storage
     sql.exec('CREATE TABLE t (n INTEGER, s TEXT)')
     sql.exec('INSERT INTO t VALUES (?, ?)', null, '7')
