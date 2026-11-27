@@ -25,22 +25,6 @@ declare module 'crossws' {
 
 type HttpServer = Server | Http2SecureServer
 
-// Each upgrade's socket, by the request its upgrade hook gets.
-const sockets = new WeakMap<Request, Duplex>()
-// Made with the first upgrade listener, so an app that takes no upgrades makes no adapter.
-let ws: ReturnType<typeof crossws> | undefined
-
-/** Made outside `takeUpgrades()`, whose scope holds a server: the process keeps the adapter and its hooks. */
-function webSocketAdapter(): ReturnType<typeof crossws> {
-  ws ??= crossws(
-    getTelefuncChannelOptions({
-      ...carryUpgradeRequest((request) => ({ socket: sockets.get(request) })),
-      send: sendInTaskWrite,
-    }),
-  )
-  return ws
-}
-
 /** What Telefunc reads of a request with `Upgrade`, once: its URL, where it can be read, and the config. */
 type Handshake = { url: URL | null; config: ReturnType<typeof getServerConfig> }
 
@@ -48,15 +32,34 @@ function readHandshake(req: IncomingMessage): Handshake {
   return { url: readRequestUrl(req.url ?? ''), config: getServerConfig() }
 }
 
-const { handshakes } = getGlobalObject('serve/nodeUpgrades.ts', {
+const globalObject = getGlobalObject<{
   /** What Telefunc's `shouldUpgradeCallback` read of a request, for its `upgrade` listener. */
-  handshakes: new WeakMap<IncomingMessage, Handshake>(),
+  handshakes: WeakMap<IncomingMessage, Handshake>
+  /** Each upgrade's socket, by the request its upgrade hook gets. */
+  sockets: WeakMap<Request, Duplex>
+  /** Made with the first upgrade listener, so an app that takes no upgrades makes no adapter. */
+  ws: ReturnType<typeof crossws> | null
+}>('serve/nodeUpgrades.ts', {
+  handshakes: new WeakMap(),
+  sockets: new WeakMap(),
+  ws: null,
 })
+
+/** Made outside `takeUpgrades()`, whose scope holds a server: the process keeps the adapter and its hooks. */
+function webSocketAdapter(): ReturnType<typeof crossws> {
+  globalObject.ws ??= crossws(
+    getTelefuncChannelOptions({
+      ...carryUpgradeRequest((request) => ({ socket: globalObject.sockets.get(request) })),
+      send: sendInTaskWrite,
+    }),
+  )
+  return globalObject.ws
+}
 
 /** Whether `req` is Telefunc's handshake, read once for the `upgrade` listener. */
 function isTelefuncHandshake(req: IncomingMessage): boolean {
   const handshake = readHandshake(req)
-  handshakes.set(req, handshake)
+  globalObject.handshakes.set(req, handshake)
   return handshake.url?.pathname === handshake.config.telefuncUrl
 }
 
@@ -91,7 +94,7 @@ function takeUpgrades(httpServer: HttpServer): void {
   const adapter = webSocketAdapter()
 
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-    const { url, config } = handshakes.get(req) ?? readHandshake(req)
+    const { url, config } = globalObject.handshakes.get(req) ?? readHandshake(req)
     if (url?.pathname !== config.telefuncUrl) {
       // Upgraded by a Node before 22.21 and 24.9, or by the server's own callback: with no other listener, a 404.
       if (httpServer.listenerCount('upgrade') === 1) {
@@ -110,7 +113,7 @@ function takeUpgrades(httpServer: HttpServer): void {
     for (const [name, value] of Object.entries(req.headers))
       for (const one of [value ?? []].flat()) headers.append(name, one)
     const request = new Request(url, { headers })
-    sockets.set(request, socket)
+    globalObject.sockets.set(request, socket)
     adapter.handleUpgrade(req, socket, head, request)
   }
   const taken: TakenServer = { server: httpServer, listener: onUpgrade, wrapped: null }
