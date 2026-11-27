@@ -1230,7 +1230,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _finalize(err: Error | undefined): void {
     const pageGone = this.endsPageGone
     // What of it still waits for the wire of a page that is gone, its sends too, would reach no one.
-    if (pageGone && this.peer) this.peer.sender.queue.dropWaitingFrom(this.peer.index, 'start')
+    if (pageGone && this.peer) this.peer.sender.dropWaitingFrom(this.peer.index, 'start')
     this.lossySends?.dispose()
     const pageAttached = this.peer !== null
     this.peer = null

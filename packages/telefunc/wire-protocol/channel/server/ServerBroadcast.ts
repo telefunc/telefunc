@@ -423,7 +423,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     const gap = this.dropBeforeAttachFromGap(toBytes) || replay.dropFromGap(toBytes, this.unhanded()) > 0
     const peer = this.peer ?? this.endedOn
     if (gap) {
-      peer?.sender.queue.dropWaitingFrom(peer.index, 'publish')
+      peer?.sender.dropWaitingFrom(peer.index, 'publish')
       this.dropPendingFrames()
     }
     if (toBytes === 0 && !ended) this.overflow(NOT_EVEN_NEWEST, owner)

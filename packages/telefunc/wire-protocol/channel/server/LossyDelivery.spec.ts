@@ -15,7 +15,10 @@ function lossyPage() {
   const replay = new ServerReplay(holder)
   const sender: PeerSender = {
     sendPublish() {},
-    queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {}, dropUngiven: () => 0 },
+    waitingPublishes: () => 0,
+    dropWaitingPublishes() {},
+    dropWaitingFrom() {},
+    dropUngiven: () => 0,
     behindAfter: (roundTrip) => 600 + roundTrip,
     send() {},
     carry() {},
