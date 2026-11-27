@@ -338,7 +338,7 @@ class BodyReader {
   /** One chunk of `file`: a piece read ahead for it, or once it holds the position, the buffer's or the source's. */
   private readonly pullFile = async (file: FileRead): Promise<void> => {
     if (file.over) return
-    file.started = true
+    file.start()
     const turn =
       !file.hasAhead && this.holder === null && this.next === file.index
         ? this.hold(file)
@@ -641,14 +641,12 @@ class BodyReader {
   }
 }
 
-/** A file's stream, as the reader serves it. `over`: it reads no more, ended, cancelled or failed (`markOver`), which
- *  `onOver` is told. */
+/** A file's stream, as the reader serves it: unread, read (its stream was pulled), or over, as it reads no more, ended,
+ *  cancelled or failed (`markOver`), which `onOver` is told. */
 class FileRead {
   readonly index: number
   readonly stream: ReadableStream<Uint8Array<ArrayBuffer>>
-  over = false
-  /** Whether the app read it: its stream was pulled. */
-  started = false
+  private phase: 'unread' | 'started' | 'over' = 'unread'
   /** The pieces of it later files' reads read ahead for it (`readAheadFor`), oldest first, and whether the newest is its
    *  last. The oldest is the one piece the reader keeps for any file; each behind it is held on `aheadMemory`. */
   private ahead = new Fifo<Uint8Array<ArrayBuffer>>()
@@ -693,6 +691,20 @@ class FileRead {
     })
   }
 
+  get over(): boolean {
+    return this.phase === 'over'
+  }
+
+  /** Whether the app read it: its stream was pulled. */
+  get started(): boolean {
+    return this.phase === 'started'
+  }
+
+  /** Its stream was pulled. */
+  start(): void {
+    if (this.phase === 'unread') this.phase = 'started'
+  }
+
   enqueue(chunk: Uint8Array<ArrayBuffer>): void {
     this.controller?.enqueue(chunk)
   }
@@ -735,7 +747,7 @@ class FileRead {
 
   markOver(): void {
     if (this.over) return
-    this.over = true
+    this.phase = 'over'
     this.dropAhead()
     this.onOver(this)
   }
