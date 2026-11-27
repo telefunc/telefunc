@@ -1,6 +1,5 @@
-// The telefunctions of the serve/ specs of request bodies (node.requestBody, node.uploadBody, node.keepAlive and
-// node.heldUpload), which Telefunc loads from `config.telefuncFiles` with Node's own `import()`, as an app's: they tell
-// the spec through `process` events.
+// The telefunctions of serve/node.heldUpload.bound.spec.ts, which Telefunc loads from `config.telefuncFiles` with
+// Node's own `import()`, as an app's: they tell the spec through `process` events.
 
 export async function hello() {
   return 'hello'

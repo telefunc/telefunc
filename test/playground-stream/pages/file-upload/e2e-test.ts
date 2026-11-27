@@ -2,6 +2,8 @@ export { testFileUpload }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult, serverRuntime, sleep } from '../../e2e-utils'
+import { Agent, request } from 'node:http'
+import { request as requestOverTls } from 'node:https'
 
 // Calls sent as the Telefunc client sends a binary call (`x-telefunc-request: bin`, then
 // `[u32 metadata length][metadata][the files' bytes]`), for what no page does: a File read after its call.
@@ -22,6 +24,35 @@ function binaryCall(name: string, size: number): Uint8Array<ArrayBuffer> {
   body.set(metadata, 4)
   body.fill(120, 4 + metadata.length)
   return body
+}
+
+/** Sends `bodies` one after the other on one HTTP/1.1 keep-alive connection, without waiting for an answer in between. */
+async function postOnOneConnection(bodies: { kind: 'bin' | 'txt'; body: Uint8Array }[]) {
+  const agent = new Agent({ keepAlive: true, maxSockets: 1 })
+  try {
+    return await Promise.all(
+      bodies.map(
+        ({ kind, body }) =>
+          new Promise<{ status: number; text: string; socket: unknown }>((resolve, reject) => {
+            const req = request(`${getServerUrl()}/_telefunc`, {
+              method: 'POST',
+              agent,
+              headers: { 'x-telefunc-request': kind, 'content-length': body.byteLength },
+            })
+            req.on('response', (response) => {
+              let text = ''
+              response.setEncoding('utf8')
+              response.on('data', (chunk: string) => (text += chunk))
+              response.on('end', () => resolve({ status: response.statusCode!, text, socket: req.socket }))
+            })
+            req.on('error', reject)
+            req.end(body)
+          }),
+      ),
+    )
+  } finally {
+    agent.destroy()
+  }
 }
 
 /** `cookie` sends a call to the server instance that set it, behind the Docker lanes' sticky load balancer. */
@@ -302,8 +333,7 @@ function testFileUpload() {
     expect(read.text).toContain('read 1000 bytes')
   })
 
-  // Bun's and Deno's servers (their lanes serve a production build, so the refusal prints nothing); Node's adapters have
-  // their rows in packages/telefunc/serve/node.uploadBody.spec.ts.
+  // Bun's and Deno's servers (their lanes serve a production build, so the refusal prints nothing).
   if (serverRuntime() !== 'node')
     test('file upload: a binary call whose body ends before its envelope is complete is refused as malformed (400)', async () => {
       const statuses: number[] = []
@@ -312,4 +342,46 @@ function testFileUpload() {
       }
       expect(statuses).deep.equal([400, 400, 400])
     })
+
+  // On Node's HTTP/1.1 server, which keeps the connection for the next call.
+  if (process.env.NO_HTTPS && serverRuntime() === 'node')
+    test('file upload: on an HTTP/1.1 keep-alive connection, a call that leaves its 4 MiB File unread does not hold up the next call', async () => {
+      const [ignored, greeted] = await postOnOneConnection([
+        { kind: 'bin', body: binaryCall('onIgnoreFile', 4 * 1024 * 1024) },
+        { kind: 'txt', body: encoder.encode(JSON.stringify({ file: telefuncFile, name: 'onGreet', args: [] })) },
+      ])
+      expect(ignored!.text).toContain('ignored')
+      expect(greeted!.text).toContain('hello')
+      expect(greeted!.socket).toBe(ignored!.socket)
+    })
+
+  test('file upload: a binary call whose metadata length says 2 GiB is answered 400 before any metadata is sent', async () => {
+    const started = Date.now()
+    const status = await new Promise<number>((resolve, reject) => {
+      const url = `${getServerUrl()}/_telefunc`
+      const options = { method: 'POST', headers: { 'x-telefunc-request': 'bin' } }
+      const req = url.startsWith('https:')
+        ? requestOverTls(url, { ...options, rejectUnauthorized: false })
+        : request(url, options)
+      req.on('response', (response) => {
+        resolve(response.statusCode!)
+        req.destroy()
+      })
+      req.on('error', reject)
+      const header = new Uint8Array(4)
+      new DataView(header.buffer).setUint32(0, 2 ** 31)
+      // The body stays open: no metadata follows the length.
+      req.write(header)
+    })
+    expect(status).toBe(400)
+    expect(Date.now() - started).lessThan(1000)
+  })
+
+  test("file upload: a telefunction that transfers one File's chunks away reads the next File's bytes intact", async () => {
+    await navigate(`${getServerUrl()}/file-upload`)
+    await page.click('#test-transfer-first-file')
+    await autoRetry(async () => {
+      expect(await getResult('#upload-result')).deep.equal({ firstBytes: 1024 * 1024, secondSum: 2 * 1024 * 1024 })
+    })
+  })
 }

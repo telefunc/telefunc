@@ -499,4 +499,49 @@ function testStreaming() {
       expect((await getCleanupState()).generatorFinallyThrowsRan).toBe('true')
     })
   })
+
+  if (process.env.PUBLIC_ENV__STREAM_TRANSPORT === 'channel') {
+    test('streaming: values larger than the 1 MiB parts a channel sends them in arrive whole, and an empty chunk arrives as nothing', async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await page.click('#test-values-larger-than-a-part')
+      await autoRetry(
+        async () => {
+          expect(await getResult('#streaming-result')).deep.equal({
+            yielded: ['x * 3e6', 'done'],
+            resolved: 'y * 3e6',
+            chunks: ['aaa', 'bb'],
+          })
+        },
+        { timeout: 20_000 },
+      )
+    })
+
+    test("streaming: an upload chunk that isn't a Uint8Array fails the upload, and the page's console says so", async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await page.click('#test-upload-chunk-not-bytes')
+      await autoRetry(async () => {
+        const result = await getResult('#streaming-result')
+        expect(result.read).not.toBe('read whole')
+        expect(result.call === 'resolved' ? result.read : result.call).toBeTruthy()
+      })
+      expectLog('Stream chunks given to a telefunction must be Uint8Array.', {
+        filter: (log) => log.logSource === 'Browser Error',
+      })
+    })
+  }
+
+  test('streaming: a call whose stream is returned beside a value that fails to serialize rejects as a bug, and the stream is cancelled', async () => {
+    await navigate(`${getServerUrl()}/streaming`)
+    await resetCleanupState()
+    await page.click('#test-stream-then-circular')
+    await autoRetry(async () => {
+      expect((await getResult('#streaming-result')).error).toContain('Internal Server Error')
+    })
+    await autoRetry(async () => {
+      expect((await getCleanupState()).streamThenCircularCancelled).toBe('true')
+    })
+    expectLog('Cannot serialize value returned by telefunction onStreamThenCircular()', {
+      filter: (log) => log.logSource === 'stderr',
+    })
+  })
 }

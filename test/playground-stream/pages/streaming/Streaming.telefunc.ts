@@ -29,6 +29,11 @@ export {
   onReturnFinishedAndEndlessStreams,
   onReturnFailingStream,
   onGeneratorFinallyThrows,
+  onYieldLargeString,
+  onReturnPromiseOfLargeString,
+  onReturnStreamWithEmptyChunk,
+  onStreamThenCircular,
+  onReadUpload,
 }
 
 import { Abort, Channel, getContext } from 'telefunc'
@@ -498,5 +503,48 @@ async function* onGeneratorFinallyThrows(): AsyncGenerator<string> {
   } finally {
     cleanupState.generatorFinallyThrowsRan = 'true'
     throw Abort({ reason: 'generator-finally-failure' })
+  }
+}
+
+/** Each value is larger than the 1 MiB parts a channel sends it in. */
+async function* onYieldLargeString(): AsyncGenerator<string> {
+  yield 'x'.repeat(3_000_000)
+  yield 'done'
+}
+
+const onReturnPromiseOfLargeString = async () => {
+  return { promise: Promise.resolve('y'.repeat(3_000_000)) }
+}
+
+const onReturnStreamWithEmptyChunk = async () => {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const text of ['aaa', '', 'bb']) controller.enqueue(new TextEncoder().encode(text))
+      controller.close()
+    },
+  })
+}
+
+/** cleanupState: streamThenCircularCancelled = 'true' once the stream returned beside a value that can't be serialized is cancelled. */
+const onStreamThenCircular = async () => {
+  const bad: Record<string, unknown> = {}
+  bad.self = bad
+  return {
+    stream: new ReadableStream<Uint8Array>({
+      cancel() {
+        cleanupState.streamThenCircularCancelled = 'true'
+      },
+    }),
+    bad,
+  }
+}
+
+/** Returns the message reading the page's upload throws with. */
+const onReadUpload = async (stream: ReadableStream<Uint8Array>) => {
+  try {
+    for await (const _ of stream);
+    return 'read whole'
+  } catch (err) {
+    return (err as Error).message
   }
 }
