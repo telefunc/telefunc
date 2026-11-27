@@ -16,6 +16,7 @@ import { runServerAction } from './server-actions'
 import { redis } from './redis'
 import { installFailingBackend, addBackendFault } from './failing-backend'
 import { StallClock } from './stalls'
+import { fieldOf, listOf, numberAt, optionalFieldOf, present, textAt, textListOf } from '../checked'
 
 config.channel.pingInterval = 1000
 config.shield = true
@@ -97,7 +98,7 @@ app.post('/api/redis/drop-connections', async (c) => {
     const own = await node.client('ID')
     const clients = String(await node.client('LIST'))
     for (const [, id] of clients.matchAll(/^id=(\d+)/gm)) {
-      if (Number(id) !== own) dropped += Number(await node.client('KILL', 'ID', id!))
+      if (Number(id) !== own) dropped += Number(await node.client('KILL', 'ID', present(id, 'a client id')))
     }
   }
   return c.json({ dropped })
@@ -113,7 +114,7 @@ app.get('/api/redis/keys', async (c) => {
   const keys: { key: string; ttl: number }[] = []
   for (const node of redisNodes()) {
     for await (const batch of node.scanStream({ match: c.req.query('pattern') ?? '*', count: 1000 })) {
-      for (const key of batch as string[]) keys.push({ key, ttl: await node.pttl(key) })
+      for (const key of textListOf(batch)) keys.push({ key, ttl: await node.pttl(key) })
     }
   }
   return c.json({ keys })
@@ -122,32 +123,35 @@ app.get('/api/redis/keys', async (c) => {
 // Redis Cluster: moves the slot of `key` to another master one key at a time, as `redis-cli --cluster reshard` does.
 app.post('/api/redis/move-slot', async (c) => {
   const masters = redisNodes()
-  const slot = Number(await masters[0]!.call('CLUSTER', 'KEYSLOT', c.req.query('key')!))
+  const first = present(masters[0], 'a Redis master')
+  const slot = Number(await first.call('CLUSTER', 'KEYSLOT', present(c.req.query('key'), 'the key query parameter')))
   const ids = await Promise.all(masters.map(async (node) => String(await node.call('CLUSTER', 'MYID'))))
-  const owners = String(await masters[0]!.call('CLUSTER', 'NODES'))
+  const owners = String(await first.call('CLUSTER', 'NODES'))
     .split('\n')
     .map((line) => line.split(' '))
     .filter((fields) => fields[2]?.includes('master'))
   const ownsSlot = (fields: string[]) =>
     fields.slice(8).some((range) => {
-      const [first, last = first] = range.split('-').map(Number)
-      return first! <= slot && slot <= last!
+      const [from, to] = range.split('-').map(Number)
+      const start = present(from, 'a slot range')
+      return start <= slot && slot <= (to ?? start)
     })
-  const sourceId = owners.find(ownsSlot)![0]!
-  const source = masters[ids.indexOf(sourceId)]!
-  const targetId = ids.find((id) => id !== sourceId)!
-  const target = masters[ids.indexOf(targetId)]!
-  const [host, port] = owners
-    .find((fields) => fields[0] === targetId)![1]!
-    .split('@')[0]!
-    .split(':')
+  const sourceId = present(owners.find(ownsSlot)?.[0], "the slot's master")
+  const source = present(masters[ids.indexOf(sourceId)], "the slot's master's client")
+  const targetId = present(
+    ids.find((id) => id !== sourceId),
+    'another master',
+  )
+  const target = present(masters[ids.indexOf(targetId)], "the other master's client")
+  const address = owners.find((fields) => fields[0] === targetId)?.[1]?.split('@')[0]
+  const [host, port] = present(address, "the other master's address").split(':')
   await target.call('CLUSTER', 'SETSLOT', slot, 'IMPORTING', sourceId)
   await source.call('CLUSTER', 'SETSLOT', slot, 'MIGRATING', targetId)
   let moved = 0
   for (;;) {
-    const keys = (await source.call('CLUSTER', 'GETKEYSINSLOT', slot, 1)) as string[]
+    const keys = textListOf(await source.call('CLUSTER', 'GETKEYSINSLOT', slot, 1))
     if (keys.length === 0) break
-    await source.call('MIGRATE', host!, port!, '', 0, 5000, 'KEYS', ...keys)
+    await source.call('MIGRATE', present(host, 'a host'), present(port, 'a port'), '', 0, 5000, 'KEYS', ...keys)
     moved += keys.length
     await new Promise((resolve) => setTimeout(resolve, 20))
   }
@@ -174,7 +178,7 @@ app.get('/api/redis/snapshot', async (c) => {
   const snapshot: RedisSnapshot = []
   for (const [node, client] of redisNodes().entries()) {
     for await (const batch of client.scanStream({ count: 1000 })) {
-      for (const key of batch as string[]) {
+      for (const key of textListOf(batch)) {
         const value = await client.dumpBuffer(key)
         if (value)
           snapshot.push({ node, key, ttl: Math.max(0, await client.pttl(key)), value: value.toString('base64') })
@@ -184,12 +188,17 @@ app.get('/api/redis/snapshot', async (c) => {
   return c.json({ snapshot })
 })
 app.post('/api/redis/restore', async (c) => {
-  const { snapshot } = (await c.req.json()) as { snapshot: RedisSnapshot }
+  const snapshot: RedisSnapshot = listOf(fieldOf(await c.req.json(), 'snapshot')).map((entry) => ({
+    node: numberAt(entry, 'node'),
+    key: textAt(entry, 'key'),
+    ttl: numberAt(entry, 'ttl'),
+    value: textAt(entry, 'value'),
+  }))
   for (const [node, client] of redisNodes().entries()) {
     const kept = snapshot.filter((entry) => entry.node === node)
     const keys = new Set(kept.map((entry) => entry.key))
     for await (const batch of client.scanStream({ count: 1000 })) {
-      for (const key of batch as string[]) if (!keys.has(key)) await client.del(key)
+      for (const key of textListOf(batch)) if (!keys.has(key)) await client.del(key)
     }
     for (const { key, ttl, value } of kept) await client.restore(key, ttl, Buffer.from(value, 'base64'), 'REPLACE')
   }
@@ -219,7 +228,7 @@ type CrossInstanceBroadcastFixture = {
 }
 const crossInstanceBroadcasts = new Map<string, CrossInstanceBroadcastFixture>()
 
-const nameOf = (member: { meta: unknown }) => String((member.meta as { name?: unknown }).name)
+const nameOf = (member: { meta: unknown }) => String(optionalFieldOf(member.meta, 'name'))
 
 // `name` names this instance's member (default: the instance); `departureTimeout` applies to a room it creates.
 app.post('/api/room-cross-instance/join', async (c) => {
@@ -283,7 +292,11 @@ app.post('/api/room-cross-instance/publish-many', async (c) => {
   const commits: Promise<unknown>[] = []
   for (let n = from; n < from + Number(c.req.query('count')); n++) {
     commits.push(fixture.participant.publish(n))
-    commits.push(fixture.participant.publishBinary(new Uint8Array([n % 256]), { track: c.req.query('track')! }))
+    commits.push(
+      fixture.participant.publishBinary(new Uint8Array([n % 256]), {
+        track: present(c.req.query('track'), 'the track query parameter'),
+      }),
+    )
   }
   await Promise.all(commits)
   return c.json({ ok: true, instance: INST })
@@ -294,7 +307,7 @@ app.post('/api/room-cross-instance/publish-binary', async (c) => {
   const roomId = c.req.query('roomId')
   const fixture = roomId ? crossInstanceRooms.get(roomId) : undefined
   if (!fixture) return c.json({ ok: false, reason: 'room fixture not joined on this instance' }, 404)
-  const track = c.req.query('track')!
+  const track = present(c.req.query('track'), 'the track query parameter')
   await fixture.participant.publishBinary(new Uint8Array([await c.req.json()]), {
     track,
     retain: c.req.query('retain') === 'true',
@@ -307,7 +320,7 @@ app.post('/api/room-cross-instance/watch', async (c) => {
   const roomId = c.req.query('roomId')
   const fixture = roomId ? crossInstanceRooms.get(roomId) : undefined
   if (!fixture) return c.json({ ok: false, reason: 'room fixture not joined on this instance' }, 404)
-  const track = c.req.query('track')!
+  const track = present(c.req.query('track'), 'the track query parameter')
   fixture.room.subscribeBinary((data, { from }) => fixture.frames.push(`${track}:${nameOf(from)}:${data[0]}`), {
     track,
   })
@@ -319,7 +332,7 @@ app.post('/api/room-cross-instance/join-many', async (c) => {
   const roomId = c.req.query('roomId')
   const fixture = roomId ? crossInstanceRooms.get(roomId) : undefined
   if (!fixture) return c.json({ ok: false, reason: 'room fixture not joined on this instance' }, 404)
-  const name = c.req.query('name')!
+  const name = present(c.req.query('name'), 'the name query parameter')
   const joined = await Promise.all(
     Array.from({ length: Number(c.req.query('count')) }, (_, i) =>
       fixture.room.join({ meta: { instance: INST, name: `${name}${i}` } }),
@@ -380,7 +393,7 @@ app.get('/api/room-cross-instance/view', async (c) => {
   const participants = fixture.room.isClosed ? [] : fixture.room.getParticipants()
   const members = Object.fromEntries(participants.map((member) => [nameOf(member), member.meta]))
   // A room the store closed before this view saw it holds no members.
-  const inStore = await Room.getParticipants(roomId!).catch(() => [])
+  const inStore = await Room.getParticipants(fixture.room.id).catch(() => [])
   const stored = Object.fromEntries(inStore.map((member) => [nameOf(member), member.meta]))
   return c.json({
     ok: true,

@@ -53,6 +53,7 @@ import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
 import { dropRedisSubscribers, redis } from '../../redis'
 import { allowEveryChannel, refuseChannels } from './refuseChannels'
+import { entryOf, messageOf } from '../../../checked'
 
 type TextMsg = { text: string; from: string }
 
@@ -207,7 +208,7 @@ async function onBroadcastWhileEstablishing(count: number, bytes: number) {
   // publish() resolves once the message is accepted: a store like Redis delivers it to local subscribers after that.
   const sawAll = Promise.withResolvers<void>()
   room.subscribe((data) => {
-    seen.push(data[0]!)
+    seen.push(data.charAt(0))
     if (seen.length === count) sawAll.resolve()
   })
   const outcomes = await Promise.all(
@@ -260,7 +261,7 @@ async function onJoinedBeforeReady() {
   addBackendFault({ op: 'early', key, times: 2 })
   const first = new BroadcastChannel<{ n: number }>({ key })
   const second = new BroadcastChannel<{ n: number }>({ key })
-  const seen = { first: [] as number[], second: [] as number[] }
+  const seen: { first: number[]; second: number[] } = { first: [], second: [] }
   const { promise: delivered, resolve } = Promise.withResolvers<void>()
   first.subscribe((msg) => seen.first.push(msg.n))
   await first.publish({ n: 1 })
@@ -304,7 +305,7 @@ async function onChatLeaveOnClose() {
 }
 
 async function onGetChatWatched(key: string) {
-  const watched = chatWatched.get(key)!
+  const watched = entryOf(chatWatched, key)
   if (watched.received.length > 0) watched.unsubscribe()
   return watched.received
 }
@@ -358,7 +359,7 @@ async function onServerBroadcastChecks() {
 }
 
 let bugs: string[] | null = null
-onBug((err) => bugs?.push((err as Error).message))
+onBug((err) => bugs?.push(messageOf(err)))
 
 /** Subscribers that throw or reject, and un-awaited publishes the store fails. */
 async function onBroadcastErrors() {

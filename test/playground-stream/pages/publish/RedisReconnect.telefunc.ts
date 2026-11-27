@@ -12,25 +12,26 @@ export {
   onPublishAcrossSeqBoundary,
 }
 
-import type { Socket } from 'node:net'
+import { Socket } from 'node:net'
 import type { Redis } from 'ioredis'
 import { Broadcast, BroadcastChannel, config, onBug } from 'telefunc'
 import type { BroadcastRoute, DriverAttempt } from 'telefunc/__internal'
 // Only `installRedis()` is public, and it takes one backend per process.
-import { REDIS_COMMANDS } from '../../../../packages/redis/dist/commands.js'
+import { REDIS_COMMANDS, type RedisCommand } from '../../../../packages/redis/dist/commands.js'
 import type { SubscriberSocket } from '../../../../packages/redis/dist/ioredis.js'
 import { RedisBackend } from '../../../../packages/redis/dist/RedisBackend.js'
 import { RedisConnection } from '../../../../packages/redis/dist/RedisConnection.js'
 import { dropRedisSubscribers, redis, whileRedisSubscribersDown } from '../../redis'
 import { sleep } from '../../sleep'
 import { allowEveryChannel, refuseChannels } from './refuseChannels'
+import { present } from '../../../checked'
 
 /** On the page's `start`, the server's Redis connection drops, and it publishes 3 binary frames from one reused buffer
  *  while ioredis reconnects. */
 async function onBinaryBroadcastAcrossReconnect() {
   const room = new BroadcastChannel<{ start: true }>({ key: `room:reconnect-test:${crypto.randomUUID()}` })
   room.subscribe(() => {
-    redis!.disconnect(true)
+    present(redis, 'a Redis: REDIS_URL is set').disconnect(true)
     const bytes = new Uint8Array(64)
     for (let i = 1; i <= 3; i++) void room.publishBinary(bytes.fill(i))
   })
@@ -85,7 +86,7 @@ async function onBroadcastSubscriberSilent() {
     await receivedCount(received, 1)
     // Two pings at rest: an answered one keeps the connection.
     await sleep(21_000)
-    ;(sockets[0] as unknown as { stream: Socket }).stream.pause()
+    tcpSocketOf(present(sockets[0], 'a subscriber socket')).pause()
     await backend.publish(route, 'missed')
     for (let tries = 1; reported.length === 0 && tries <= 300; tries++) await sleep(100)
     await backend.publish(route, 'after')
@@ -103,18 +104,18 @@ async function onBroadcastPublishedDuringResume() {
   const { connection, backend, sockets, reported, received, stop } = ownRedisBackend(route)
   let resuming = false
   const run = connection.run.bind(connection)
-  connection.run = (async (command: never, input: never) => {
+  connection.run = async <Input, Output>(command: RedisCommand<Input, Output>, input: Input) => {
     if (resuming && command === REDIS_COMMANDS.broadcastStart) {
       resuming = false
       await backend.publish(route, 'during the read')
     }
     return run(command, input)
-  }) as typeof connection.run
+  }
   try {
     await backend.publish(route, 'before')
     await receivedCount(received, 1)
     resuming = true
-    sockets[0]!.disconnect()
+    present(sockets[0], 'a subscriber socket').disconnect()
     await receivedCount(received, 2)
     await backend.publish(route, 'after')
     await receivedCount(received, 3)
@@ -135,10 +136,10 @@ async function onBroadcastStartReadFailed() {
     await receivedCount(received, 1)
     const run = connection.run.bind(connection)
     let startReads = 0
-    connection.run = (async (command: never, input: never) => {
+    connection.run = async <Input, Output>(command: RedisCommand<Input, Output>, input: Input) => {
       if (command === REDIS_COMMANDS.broadcastStart && startReads++ === 0) throw new Error('the start read failed')
       return run(command, input)
-    }) as typeof connection.run
+    }
     const binary = backend.subscribe({ key: route.key, kind: 'binary' }, { deliver() {} }, 'binary')
     await backend.publish(route, 'beside the failed read')
     await receivedCount(received, 2)
@@ -148,10 +149,20 @@ async function onBroadcastStartReadFailed() {
   }
 }
 
+/** The TCP socket under an ioredis connection. */
+function tcpSocketOf(connection: object): Socket {
+  const stream = 'stream' in connection ? connection.stream : undefined
+  if (!(stream instanceof Socket)) throw new Error(`Expected an ioredis connection's socket, read ${String(stream)}`)
+  return stream
+}
+
 /** A backend of the test's own, as `installRedis()` takes one per process, subscribed to `route`: what arrives, what the
  *  key's `onDeliveryLost` reports and the subscriber sockets it opens. `stop()` ends all of it. */
 function ownRedisBackend(route: BroadcastRoute) {
-  const connection = new RedisConnection({ redis: redis!.duplicate(), prefix: 'tf:' })
+  const connection = new RedisConnection({
+    redis: present(redis, 'a Redis: REDIS_URL is set').duplicate(),
+    prefix: 'tf:',
+  })
   const backend = new RedisBackend({ connection })
   const sockets: SubscriberSocket[] = []
   const open = connection.openSubscriberSocket.bind(connection)
@@ -203,8 +214,9 @@ async function receivedCount(received: unknown[], count: number) {
  *  `default`, so it gets its own backend: `installRedis()` takes one per process. */
 async function onRedisSubscribeFailure() {
   const user = `subscribe-test-${crypto.randomUUID()}`
-  await redis!.acl('SETUSER', user, 'on', '>test', '~*', '&*', '+@all', '-subscribe')
-  const client = redis!.duplicate({ username: user, password: 'test', retryStrategy: () => null })
+  const store = present(redis, 'a Redis: REDIS_URL is set')
+  await store.acl('SETUSER', user, 'on', '>test', '~*', '&*', '+@all', '-subscribe')
+  const client = store.duplicate({ username: user, password: 'test', retryStrategy: () => null })
   client.on('error', () => {})
   const backend = new RedisBackend({ connection: new RedisConnection({ redis: client, prefix: 'tf:' }) })
   const text = { key: user, kind: 'text' } as const
@@ -220,7 +232,7 @@ async function onRedisSubscribeFailure() {
       backend.publish({ key: user, kind: 'binary' }, new Uint8Array(1)),
     ])
     await backend.publish(text, 'later')
-    await redis!.acl('SETUSER', user, '+subscribe')
+    await store.acl('SETUSER', user, '+subscribe')
     // Dragonfly applies an ACL change to an open connection a moment after it answers, so a new subscription may still
     // be refused.
     let delivered: Promise<void>
@@ -246,7 +258,7 @@ async function onRedisSubscribeFailure() {
     await attempt?.unsubscribe()
     client.disconnect()
     // Also closes the backend's command connection, which runs as `user` too.
-    await redis!.acl('DELUSER', user)
+    await store.acl('DELUSER', user)
   }
 }
 
@@ -255,8 +267,9 @@ async function onRedisSubscribeFailure() {
  *  user is this test's own, as in `onRedisSubscribeFailure`. */
 async function onRedisChannelDenied() {
   const user = `channel-test-${crypto.randomUUID()}`
-  await redis!.acl('SETUSER', user, 'on', '>test', '~*', 'resetchannels', '&*allowed*', '+@all')
-  const client = redis!.duplicate({ username: user, password: 'test', retryStrategy: () => null })
+  const store = present(redis, 'a Redis: REDIS_URL is set')
+  await store.acl('SETUSER', user, 'on', '>test', '~*', 'resetchannels', '&*allowed*', '+@all')
+  const client = store.duplicate({ username: user, password: 'test', retryStrategy: () => null })
   client.on('error', () => {})
   const backend = new RedisBackend({ connection: new RedisConnection({ redis: client, prefix: 'tf:' }) })
   const route = (name: string) => ({ key: `${user}:${name}`, kind: 'text' }) as const
@@ -289,7 +302,7 @@ async function onRedisChannelDenied() {
   } finally {
     await Promise.all([up.unsubscribe(), denied?.unsubscribe(), fresh?.unsubscribe()])
     client.disconnect()
-    await redis!.acl('DELUSER', user)
+    await store.acl('DELUSER', user)
   }
 }
 

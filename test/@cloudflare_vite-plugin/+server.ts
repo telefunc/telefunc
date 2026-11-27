@@ -18,7 +18,7 @@ config.channel = {
 // Cloudflare requires Durable Object classes to be named exports of the worker entry.
 // `wrangler.jsonc`'s `main: "vike:server"` re-exports everything from this file,
 // so these reach Cloudflare's binding resolver intact.
-export class TelefuncDurableObject extends (tf.TelefuncDurableObject as TelefuncDurableObjectWithPresence) {
+export class TelefuncDurableObject extends withPresenceRpcs(tf.TelefuncDurableObject) {
   // Test-only: the key's authority refuses the first presence of each `refused-presence:` key's subscriber.
   override async telefuncBroadcastHold(request: PresenceRequest) {
     if (request.key.startsWith('refused-presence:') && !refusedPresences.has(request.key)) {
@@ -104,6 +104,23 @@ type TelefuncDurableObjectWithPresence = new (
   telefuncBroadcastDeliver(request: DeliveryRequest): Promise<void>
   telefuncDurableObjectCall(name: string, method: string, args: unknown[]): Promise<unknown>
 }
+/** The adapter's class, checked to serve each RPC method this one overrides: a renamed one fails here, where a cast
+ *  would leave its override uncalled. */
+function withPresenceRpcs(base: typeof tf.TelefuncDurableObject): TelefuncDurableObjectWithPresence {
+  if (!servesPresenceRpcs(base)) throw new Error('TelefuncDurableObject lacks an RPC method this one overrides')
+  return base
+}
+function servesPresenceRpcs(base: typeof tf.TelefuncDurableObject): base is TelefuncDurableObjectWithPresence {
+  const methods = [
+    'fetch',
+    'telefuncBroadcastHold',
+    'telefuncBroadcastRenew',
+    'telefuncBroadcastForward',
+    'telefuncBroadcastDeliver',
+    'telefuncDurableObjectCall',
+  ]
+  return methods.every((method) => typeof Reflect.get(base.prototype, method) === 'function')
+}
 const realNow = Date.now
 let callsAhead = 0
 /** `work`, with `Date.now()` `ms` ahead of the real clock until it and every other call ahead settled. */
@@ -172,7 +189,7 @@ app.all('/__broadcast-subscribe-from-worker', (c) => {
 })
 // A Room Durable Object call before any .telefunc file loads, as a room's alarm() after the Worker restarts.
 app.all('/__room-call-from-worker', async (c) => {
-  const namespace = c.env.TelefuncDurableObject as DurableObjectNamespace<TelefuncDurableObject>
+  const namespace = c.env.TelefuncDurableObject
   await namespace
     .get(namespace.idFromName('__telefunc_room__:x'))
     .telefuncDurableObjectCall('room', 'directoryGet', ['x'])

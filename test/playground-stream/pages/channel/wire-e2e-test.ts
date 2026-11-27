@@ -30,6 +30,7 @@ import { cardOf } from './upload-refusal-e2e-test'
 import { burstOf, burstWhileOffline, memoryPeakOf } from './burst-e2e'
 import { sendRefusedWarning, sessionEndedByUnreadable, withNetworkConditions } from '../../../utils'
 import { parseChannelTransports } from '../../channelTransports'
+import { present } from '../../../checked'
 
 type Tally = { text: number; binary: number; inOrder: boolean }
 type WireState = {
@@ -137,10 +138,10 @@ function testWire(isDev: boolean) {
       await page.click('#wire-chat')
       let channelId = ''
       const events = async () => {
-        const { chat } = await getResult<WireState>('#wire-state')
-        channelId = chat!.channelId
+        const chat = present((await getResult<WireState>('#wire-state')).chat, "the chat card's state")
+        channelId = chat.channelId
         const server = (await getCleanupState())[`wireChat_${channelId}`]
-        return { page: chat!.events, server: server && JSON.parse(server) }
+        return { page: chat.events, server: server && JSON.parse(server) }
       }
       const last = async () => {
         await page.click('#wire-chat-check')
@@ -248,9 +249,15 @@ function testWire(isDev: boolean) {
         await page.click('#wire-connection')
         await autoRetry(async () => expect({ sseRetired, webSockets }).deep.equal({ sseRetired: true, webSockets: 1 }))
         await sleep(1_000)
-        const { connection } = await getResult<WireState>('#wire-state')
-        const server = (await getCleanupState())[`wireConnection_${connection!.channelId}`]
-        expect({ page: connection!.events, server: JSON.parse(server!) }).deep.equal({
+        const connection = present(
+          (await getResult<WireState>('#wire-state')).connection,
+          "the connection card's state",
+        )
+        const server = (await getCleanupState())[`wireConnection_${connection.channelId}`]
+        expect({
+          page: connection.events,
+          server: JSON.parse(present(server, "the server's connection events")),
+        }).deep.equal({
           page: ['start:false', 'open:true'],
           server: ['start:false', 'open:true'],
         })

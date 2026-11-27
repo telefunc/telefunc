@@ -49,6 +49,7 @@ import { dirname } from 'node:path'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { startBlackHoleProxy, type BlackHoleProxy } from './black-hole-proxy'
+import { fieldOf, listOf, numberAt, textAt, textListOf } from '../checked'
 
 const playgroundDir = dirname(fileURLToPath(import.meta.url))
 const execFileAsync = promisify(execFile)
@@ -97,27 +98,30 @@ function startInstance(instance: 'a' | 'b' | 'c' | 'd') {
 /** Drops every connection to the stack's Redis, as a failover or a network cut does. */
 async function dropRedisConnections() {
   const resp = await fetch(`${getServerUrl()}/api/redis/drop-connections`, { method: 'POST' })
-  const { dropped } = (await resp.json()) as { dropped: number }
+  const dropped = numberAt(await resp.json(), 'dropped')
   if (dropped === 0) throw new Error('dropRedisConnections() found no connection to drop')
 }
 
 /** The Pub/Sub channels some connection to the stack's Redis subscribes to, matching a glob pattern. */
 async function getRedisChannels(pattern: string): Promise<string[]> {
   const resp = await fetch(`${getServerUrl()}/api/redis/channels?pattern=${encodeURIComponent(pattern)}`)
-  return ((await resp.json()) as { channels: string[] }).channels
+  return textListOf(fieldOf(await resp.json(), 'channels'))
 }
 
 /** The keys in the stack's Redis matching a glob pattern, each with its time to live in ms (-1: none). */
 async function getRedisKeys(pattern: string): Promise<{ key: string; ttl: number }[]> {
   const resp = await fetch(`${getServerUrl()}/api/redis/keys?pattern=${encodeURIComponent(pattern)}`)
-  return ((await resp.json()) as { keys: { key: string; ttl: number }[] }).keys
+  return listOf(fieldOf(await resp.json(), 'keys')).map((entry) => ({
+    key: textAt(entry, 'key'),
+    ttl: numberAt(entry, 'ttl'),
+  }))
 }
 
 type RedisSnapshot = unknown
 
 async function snapshotRedis(): Promise<RedisSnapshot> {
   const resp = await fetch(`${getServerUrl()}/api/redis/snapshot`)
-  return ((await resp.json()) as { snapshot: RedisSnapshot }).snapshot
+  return fieldOf(await resp.json(), 'snapshot')
 }
 
 /** Rewinds the stack's Redis to a snapshot and drops every connection, as a failover onto a replica that missed the
@@ -136,7 +140,7 @@ async function rewindRedis(snapshot: RedisSnapshot) {
 async function moveRedisSlot(key: string) {
   const resp = await fetch(`${getServerUrl()}/api/redis/move-slot?key=${encodeURIComponent(key)}`, { method: 'POST' })
   if (!resp.ok) throw new Error(`moveRedisSlot() failed: ${await resp.text()}`)
-  return (await resp.json()) as { moved: number }
+  return { moved: numberAt(await resp.json(), 'moved') }
 }
 
 type ServerRuntime = 'node' | 'bun' | 'deno'

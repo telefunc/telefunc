@@ -16,6 +16,7 @@ import {
   onWirePresence,
 } from './Wire.telefunc'
 import { Tally, textMessage, binaryMessage, type TallyState } from './wire-messages'
+import { present } from '../../../checked'
 
 type WireState = {
   resume: { channelId: string; received: TallyState } | null
@@ -116,7 +117,13 @@ function WireDemo() {
   const closeOnDisconnect = useCallback(async () => {
     const { channel } = await onWireConnection()
     closeOnDisconnectChannel.current = channel
-    const seen = { open: false, disconnected: false, reconnects: 0, close: null as string | null, closed: false }
+    const seen: NonNullable<WireState['closeOnDisconnect']> = {
+      open: false,
+      disconnected: false,
+      reconnects: 0,
+      close: null,
+      closed: false,
+    }
     const show = () => setState((s) => ({ ...s, closeOnDisconnect: { ...seen } }))
     const controller = new AbortController()
     channel.onReconnect(
@@ -485,7 +492,7 @@ function WireDemo() {
         <button
           id="wire-connection-close"
           type="button"
-          onClick={() => connectionChannel.current!.close()}
+          onClick={() => present(connectionChannel.current, "the connection card's channel").close()}
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Close it
@@ -501,7 +508,9 @@ function WireDemo() {
         <button
           id="wire-chat-check"
           type="button"
-          onClick={() => chatReport.current(chatChannel.current!.isClosed ? 'closing' : 'check')}
+          onClick={() =>
+            chatReport.current(present(chatChannel.current, "the chat card's channel").isClosed ? 'closing' : 'check')
+          }
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Show whether the chat is connected

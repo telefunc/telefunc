@@ -19,6 +19,7 @@ import {
 } from '../../e2e-utils'
 import { newCDPSession } from '../../../utils'
 import { parseChannelTransports } from '../../channelTransports'
+import { present } from '../../../checked'
 
 type ShieldState = {
   validReceiptKey: string | null
@@ -204,7 +205,7 @@ function testPublish(isDev: boolean, inDocker = false) {
 
       // 3 publishes → 3 acks with consecutive seqs, all keyed to the shared topic.
       expect(result.acks.length).toBe(3)
-      const seqs = consecutive(result.acks[0]!.seq)
+      const seqs = consecutive(present(result.acks[0], 'a first ack').seq)
       expect(result.acks.map((a) => a.seq)).deep.equal(seqs)
       for (const ack of result.acks) expect(ack.key).match(/^room:text-test:/)
 
@@ -223,7 +224,7 @@ function testPublish(isDev: boolean, inDocker = false) {
       const result = await getResult<BinaryPairResult>('#publish-result')
 
       expect(result.acks.length).toBe(3)
-      const seqs = consecutive(result.acks[0]!.seq)
+      const seqs = consecutive(present(result.acks[0], 'a first ack').seq)
       expect(result.acks.map((a) => a.seq)).deep.equal(seqs)
       for (const ack of result.acks) expect(ack.key).match(/^room:binary-test:/)
 
