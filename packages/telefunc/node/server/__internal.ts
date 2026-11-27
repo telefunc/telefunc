@@ -24,7 +24,8 @@ export { unrefTimer } from '../../utils/unrefTimer.js'
 export { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 
 // An add-on that drives a page's channel ends: Room's stubs and its client.
-export type { ServerBroadcastEnd, ClientBroadcast }
+export type { ServerBroadcastEnd }
+export type { ClientBroadcast } from '../../client/__internal.js'
 export type { BroadcastEndOwner } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 export type { BroadcastKind } from '../../wire-protocol/wire/payloads.js'
 export type { ChannelPublishAck, ChannelPublishInfo } from '../../wire-protocol/channel/channel.js'
@@ -128,7 +129,6 @@ export type {
 } from '../../wire-protocol/adapter/cloudflare/sqlStorage.js'
 
 import type { ServerBroadcastEnd as ServerBroadcastEndClass } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
-import type { ClientBroadcast as ClientBroadcastClass } from '../../wire-protocol/channel/client/ClientBroadcast.js'
 
 /** The members of a page's broadcast end that an add-on drives. */
 type ServerBroadcastEnd = Pick<
@@ -142,27 +142,6 @@ type ServerBroadcastEnd = Pick<
   | 'isConnected'
   | 'deliver'
   | 'listen'
-  | 'onClose'
-  | 'onDisconnect'
-  | 'onReconnect'
-  | 'close'
->
-
-/** The members of a page's `ClientBroadcast` that an add-on drives. A page holds the class as its `Broadcast`, so the
- *  internal ones are `_`-prefixed, as `ClientChannel`'s are. It receives `T` and publishes `Publish`. */
-type ClientBroadcast<T = unknown, Publish = T> = Pick<
-  ClientBroadcastClass<T, Publish>,
-  | '_publishUnreported'
-  | '_publishBinaryUnreported'
-  | '_sendRequest'
-  | '_setSubscribed'
-  | '_setWantParts'
-  | '_sendReply'
-  | '_subscribeLocal'
-  | '_confirmSoon'
-  | 'isClosed'
-  | 'isConnected'
-  | 'onOpen'
   | 'onClose'
   | 'onDisconnect'
   | 'onReconnect'
