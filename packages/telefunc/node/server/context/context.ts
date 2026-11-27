@@ -28,14 +28,12 @@ const globalObject = getGlobalObject<{
   restoreContext: RestoreContext
   withoutContext: WithoutContext
   provideTelefuncContext: ProvideTelefuncContext | null
-  neverRestored: boolean
   isAsyncMode: boolean
 }>('context.ts', {
   getContext: getContext_sync,
   restoreContext: restoreContext_sync,
   withoutContext: withoutContext_sync,
   provideTelefuncContext: null,
-  neverRestored: true,
   isAsyncMode: false,
 })
 
@@ -47,7 +45,6 @@ function getRawContext(): Context | null {
 }
 
 function restoreContext<T>(context: Context, fn: () => T): T {
-  globalObject.neverRestored = false
   return globalObject.restoreContext(context, fn)
 }
 

@@ -126,15 +126,15 @@ export {
 
 import { Buffer } from 'node:buffer'
 import { Abort, Broadcast, config, onBug } from 'telefunc'
+import { createDeferred } from 'telefunc/__internal'
 import { Room, type LeaveCause, type LocalParticipant } from '@telefunc/room'
 import { sendPrivate } from '@telefunc/room/__internal'
 import { anyoneCanJoin } from '../../anyone-can-join'
 import { sleep } from '../../sleep'
 import { redis, whileRedisSubscribersDown } from '../../redis'
-import { createDeferred } from '../../createDeferred'
 import { cleanupState } from '../../cleanup-state'
 import { byteAt, entryOf, messageOf, numberOf, present, textOf } from '../../../checked'
-import { onServerAction } from '../../server-actions'
+import { forgetServerAction, onServerAction } from '../../server-actions'
 import { cutWireSockets } from '../../wire-sockets'
 import { demandNames, type NamedDemand } from './demandNames'
 import { publishMine } from './publishMine'
@@ -751,15 +751,22 @@ const releaseKeepers = new Map<string, LocalParticipant>()
 
 /**
  * Server action roomRelease_<roomId> sets cleanupState roomRelease_<roomId> to what the server still holds.
- * It stays after it runs, so the test can run it after each GC round: it holds only weak references.
+ * It stays after it runs, so the test can run it after each GC round: it holds only weak references. Once all is
+ * released, it goes, and so does the keeper.
  */
 async function onRoomRelease(roomId: string) {
+  const key = `roomRelease_${roomId}`
   const refs = await releaseRefs(roomId)
   onServerAction(
-    `roomRelease_${roomId}`,
-    () => {
+    key,
+    async () => {
       const held = Object.entries(refs).map(([name, ref]) => `${name}:${ref.deref() ? 'held' : 'released'}`)
-      cleanupState[`roomRelease_${roomId}`] = held.join()
+      cleanupState[key] = held.join()
+      if (Object.values(refs).some((ref) => ref.deref() !== undefined)) return
+      forgetServerAction(key)
+      const keeper = present(releaseKeepers.get(roomId), 'the keeper')
+      releaseKeepers.delete(roomId)
+      await keeper.leave()
     },
     { once: false },
   )

@@ -9,6 +9,7 @@ export {
 export type { BackendFault }
 
 import {
+  createDeferred,
   DriverAttempt,
   installBackend,
   MemoryBackend,
@@ -28,7 +29,6 @@ import {
   type RoomPlane,
   type RoomSubscriptionSource,
 } from '@telefunc/room/backend'
-import { createDeferred } from './createDeferred'
 import { fieldOf, listOf, optionalFieldOf, present, textAt, textListOf, textOf } from '../checked'
 
 /** `op` is a driver method (its next matching call rejects; with `after`, once it ran, as a store whose reply is lost),

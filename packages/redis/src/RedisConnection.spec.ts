@@ -225,10 +225,7 @@ describe('a command sent without a script, read or write as ioredis tells it', (
   })
 })
 
-/** A server that answers the handshake (CLIENT SETINFO, then INFO as a ready server) and holds the reply to the first
- *  other command, and so to every command after it. */
-/** A server that answers a connection's handshake and holds every reply after it; `held` tells, by each connection that
- *  holds a reply, whether that connection is still open. */
+/** The peer answers the handshake, then records each socket whose command reply it holds. */
 async function holdingServer(): Promise<{ port: number; server: Server; held: Map<object, boolean> }> {
   const held = new Map<object, boolean>()
   const server = createServer((socket) => {
