@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { RoomModel } from '../../shared/RoomModel.js'
 import { emptyBinaryWants } from './binaryWants.js'
+import { DemandReport } from './DemandReport.js'
 import { PageIndex, type PageEnd } from './PageIndex.js'
 import { runAll, toggle } from '../../utils/sets.js'
 import { getOrCreate } from 'telefunc/__internal'
@@ -47,24 +49,29 @@ class End implements PageEnd {
   }
 }
 
+afterEach(() => {
+  vi.restoreAllMocks()
+})
+
+/** An index over a model whose `hidden` members are hidden, and the report it tells: each member read of the model or
+ *  told of counts a visit. */
 function setup() {
   const visits: Visits = { count: 0 }
   const hidden = new Set<string>()
-  const model = {
-    memberHidden(member: string) {
-      visits.count++
-      return hidden.has(member)
-    },
-  }
+  const owner = { onMemberLeft() {}, onMemberMeta() {}, tellDemand() {} }
+  const model = new RoomModel({ roomId: 'lobby', meta: [], seed: { members: [] }, metaSeq: 0, owner })
+  vi.spyOn(RoomModel.prototype, 'memberHidden').mockImplementation((member) => {
+    visits.count++
+    return hidden.has(member)
+  })
   const index = new PageIndex({ model })
   const told = new Map<string, { page: string; by?: string }>()
-  const report = {
-    setWho(entry: { page: string; by?: string }, on: boolean) {
-      visits.count++
-      if (on) told.set(JSON.stringify(entry), entry)
-      else told.delete(JSON.stringify(entry))
-    },
-  }
+  const report = new DemandReport({ owner })
+  vi.spyOn(DemandReport.prototype, 'setWho').mockImplementation((entry, on) => {
+    visits.count++
+    if (on) told.set(JSON.stringify(entry), entry)
+    else told.delete(JSON.stringify(entry))
+  })
   const plan = () => runAll(index.report(report))
   /** The who-entries told, once the planning pass ran. */
   const whoIsTold = () => {

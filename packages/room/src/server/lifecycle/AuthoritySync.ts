@@ -33,13 +33,10 @@ type AuthoritySyncOptions = {
   owner: AuthoritySyncOwner
   incarnation: RoomIncarnation
   /** Reconciles a roster read into the view, and sends it to the clients it concerns. */
-  roster: Pick<RosterStream, 'reconcile'>
+  roster: RosterStream
   /** Read-only here: every change goes through the owner's methods. */
-  model: Pick<
-    RoomModel,
-    'closed' | 'metaWaiting' | 'metaSeq' | 'rosterKnown' | 'memberIds' | 'recordMembership' | 'stopRecordingMembership'
-  >
-  lanePlan: Pick<LanePlan, 'replan' | 'observing' | 'controlEstablished'>
+  model: RoomModel
+  lanePlan: LanePlan
 }
 
 /** The repairs a gap asks for, each due `ROOM_META_REPAIR_MS` after it. */
@@ -67,9 +64,9 @@ class AuthoritySync {
 
   private readonly owner: AuthoritySyncOwner
   private readonly incarnation: RoomIncarnation
-  private readonly roster: AuthoritySyncOptions['roster']
-  private readonly model: AuthoritySyncOptions['model']
-  private readonly lanePlan: AuthoritySyncOptions['lanePlan']
+  private readonly roster: RosterStream
+  private readonly model: RoomModel
+  private readonly lanePlan: LanePlan
 
   constructor({ owner, incarnation, roster, model, lanePlan }: AuthoritySyncOptions) {
     this.owner = owner

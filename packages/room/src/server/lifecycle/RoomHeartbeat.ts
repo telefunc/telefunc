@@ -20,14 +20,14 @@ assertIsNotBrowser()
 
 type RoomHeartbeatOptions = {
   /** What it renews at the authority, and redoes where it failed. */
-  hosting: Pick<RoomHosting, 'maintain'>
+  hosting: RoomHosting
   incarnation: RoomIncarnation
-  model: Pick<RoomModel, 'closed'>
-  lanePlan: Pick<LanePlan, 'observing' | 'ownsInbox'>
-  outgoingDemand: Pick<DemandReport, 'reporting'>
+  model: RoomModel
+  lanePlan: LanePlan
+  outgoingDemand: DemandReport
   /** Renews what this process told of its demand. */
-  demandExchange: Pick<DemandExchange, 'renew'>
-  authority: Pick<AuthoritySync, 'reconcileMeta' | 'checkCoverage'>
+  demandExchange: DemandExchange
+  authority: AuthoritySync
 }
 
 /** Graceful departures use events; the heartbeat renews this server's lease and its demand, reaps the lapsed leases
@@ -39,13 +39,13 @@ class RoomHeartbeat {
   private ticking = false
   private checkingCoverage = false
 
-  private readonly hosting: RoomHeartbeatOptions['hosting']
+  private readonly hosting: RoomHosting
   private readonly incarnation: RoomIncarnation
-  private readonly model: RoomHeartbeatOptions['model']
-  private readonly lanePlan: RoomHeartbeatOptions['lanePlan']
-  private readonly outgoingDemand: RoomHeartbeatOptions['outgoingDemand']
-  private readonly demandExchange: RoomHeartbeatOptions['demandExchange']
-  private readonly authority: RoomHeartbeatOptions['authority']
+  private readonly model: RoomModel
+  private readonly lanePlan: LanePlan
+  private readonly outgoingDemand: DemandReport
+  private readonly demandExchange: DemandExchange
+  private readonly authority: AuthoritySync
 
   constructor({
     hosting,

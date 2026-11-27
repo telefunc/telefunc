@@ -39,7 +39,7 @@ type RoomDemandOptions = {
   /** The members this process owns, by their owning handle, kept current by the replica. */
   ownedMembers: ReadonlyMap<string, MemberOwner>
   /** A report of a member's every track covers the tracks it published on. */
-  publishedTracks: Pick<PublishedTracks, 'has' | 'namedTracks'>
+  publishedTracks: PublishedTracks
 }
 
 /** The demand for the members a process owns: every process's reports, each process's leased, and who receives each
@@ -64,7 +64,7 @@ class RoomDemand {
   private settling = false
 
   private readonly ownedMembers: ReadonlyMap<string, MemberOwner>
-  private readonly publishedTracks: RoomDemandOptions['publishedTracks']
+  private readonly publishedTracks: PublishedTracks
 
   constructor({ ownedMembers, publishedTracks }: RoomDemandOptions) {
     this.ownedMembers = ownedMembers

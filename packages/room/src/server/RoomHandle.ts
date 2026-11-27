@@ -52,15 +52,15 @@ type ServerJoin = { admission: Admission; participant: ServerLocalParticipant }
 type RoomHandleOptions = {
   replica: RoomReplica
   /** Where the handle's holders' wants replan. */
-  lanePlan: Pick<LanePlan, 'textChanged' | 'binaryChanged' | 'observing'>
+  lanePlan: LanePlan
   /** For the handle's stubs. */
-  roster: Pick<RosterStream, 'settled' | 'sentTo'>
+  roster: RosterStream
   /** For the handle's participants. */
-  incomingDemand: Pick<RoomDemand, 'watchesOf'>
+  incomingDemand: RoomDemand
   /** For the handle's writes. */
   acks: PendingDmAcks
   /** Hosts the members the handle admits, and evicts again one whose eviction failed. */
-  hosting: Pick<RoomHosting, 'lease' | 'evictLater'>
+  hosting: RoomHosting
 }
 
 /** One `Room.get()`'s handle on a room: its guards, its tail, the stubs it opened, its participants and its listeners,
@@ -92,9 +92,9 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
   private readonly admissions: Admissions
   readonly writes: RoomWrites
 
-  private readonly lanePlan: RoomHandleOptions['lanePlan']
-  private readonly roster: RoomHandleOptions['roster']
-  private readonly incomingDemand: RoomHandleOptions['incomingDemand']
+  private readonly lanePlan: LanePlan
+  private readonly roster: RosterStream
+  private readonly incomingDemand: RoomDemand
 
   constructor({ replica, lanePlan, roster, incomingDemand, acks, hosting }: RoomHandleOptions) {
     this.replica = replica

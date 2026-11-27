@@ -31,19 +31,19 @@ interface AdmissionsOwner {
 
 type AdmissionsOptions = {
   owner: AdmissionsOwner
-  replica: Pick<RoomReplica, 'incarnation' | 'model' | 'openInbox' | 'applyControl'>
-  lanePlan: Pick<LanePlan, 'observing'>
+  replica: RoomReplica
+  lanePlan: LanePlan
   /** Hosts the members the handle admits, and evicts again one whose eviction failed. */
-  hosting: Pick<RoomHosting, 'lease' | 'evictLater'>
+  hosting: RoomHosting
 }
 
 /** One handle's joins, from its guard to a committed member, and each one's rollback. A join is three awaits against a
  *  store that can stall or lose a reply, during which the holder can detach and the room can close. */
 class Admissions {
   private readonly owner: AdmissionsOwner
-  private readonly replica: AdmissionsOptions['replica']
-  private readonly lanePlan: AdmissionsOptions['lanePlan']
-  private readonly hosting: AdmissionsOptions['hosting']
+  private readonly replica: RoomReplica
+  private readonly lanePlan: LanePlan
+  private readonly hosting: RoomHosting
   /** The admissions under way; an `owned` one the heartbeat leaves alone, and its holder's detach doesn't evict. */
   private readonly underWay = new Map<string, Admission>()
 

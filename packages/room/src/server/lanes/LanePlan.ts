@@ -55,13 +55,13 @@ type LanePlanOptions = {
   /** The incarnation the lanes are subscribed at. */
   incarnation: RoomIncarnation
   /** Read-only here: every change goes through the owner's methods. */
-  model: Pick<RoomModel, 'closed' | 'rosterKnown' | 'memberIds' | 'memberCount' | 'hasMember'>
+  model: RoomModel
   /** What this process tells of its demand, which the plan sets as it plans. */
   outgoingDemand: DemandReport
   /** Where the demand lane delivers, and hears when it delivers and when it stops. */
-  demandExchange: Pick<DemandExchange, 'onPage' | 'ask' | 'forget'>
+  demandExchange: DemandExchange
   /** Who is at each page here, which the plan tells with the demand. */
-  pages: Pick<PageIndex, 'changed' | 'report' | 'endChanged'>
+  pages: PageIndex
 }
 
 /** What a planning pass replans. `all`: the binary lanes of every member and every track. `members`: the binary lanes
@@ -106,10 +106,10 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private readonly owner: LanePlanOwner
   private readonly roles: LaneRoles
   private readonly incarnation: RoomIncarnation
-  private readonly model: LanePlanOptions['model']
+  private readonly model: RoomModel
   private readonly outgoingDemand: DemandReport
-  private readonly demandExchange: LanePlanOptions['demandExchange']
-  private readonly pages: LanePlanOptions['pages']
+  private readonly demandExchange: DemandExchange
+  private readonly pages: PageIndex
 
   constructor({ owner, roles, incarnation, model, outgoingDemand, demandExchange, pages }: LanePlanOptions) {
     this.owner = owner

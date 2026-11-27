@@ -31,7 +31,7 @@ type ServerLocalParticipantOptions = {
   room: RoomHandle
   participant: ParticipantBaseOptions['participant']
   /** Holds who receives the participant's tracks, once for the whole room. */
-  incomingDemand: Pick<RoomDemand, 'watchesOf'>
+  incomingDemand: RoomDemand
 }
 
 /** Server-side `LocalParticipant`, returned by `ServerRoom.join()`. Its acts go to its room's writes. */
@@ -43,7 +43,7 @@ class ServerLocalParticipant extends ParticipantBase {
   /** The client holding this participant, which its inbox forwards to instead of local listeners. */
   private holder: RoomParticipantStub | null = null
 
-  private readonly incomingDemand: ServerLocalParticipantOptions['incomingDemand']
+  private readonly incomingDemand: RoomDemand
 
   constructor({ room, participant, incomingDemand }: ServerLocalParticipantOptions) {
     super({ participant, rewinds: room.model.metaRewinds, link: room })

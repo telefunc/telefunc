@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { replicaParts } from '../../test/replicaParts.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS } from '../constants.js'
+import { LanePlan } from '../lanes/LanePlan.js'
 import { StaleReads } from './StaleReads.js'
 
+/** The stale reads of room `lobby`'s view, whose lanes follow it while `lanePlan.observing` is set. */
 function staleReads() {
-  const model = { closed: false }
+  const { model, lanePlan: plan } = replicaParts({ id: 'lobby', inc: crypto.randomUUID(), hold: null })
   const lanePlan = { observing: false }
-  return { model, lanePlan, reads: new StaleReads({ roomId: 'lobby', model, lanePlan }) }
+  vi.spyOn(LanePlan.prototype, 'observing', 'get').mockImplementation(() => lanePlan.observing)
+  return { model, lanePlan, reads: new StaleReads({ roomId: 'lobby', model, lanePlan: plan }) }
 }
 
 describe('StaleReads', () => {
@@ -16,7 +20,7 @@ describe('StaleReads', () => {
   })
   afterEach(() => {
     vi.useRealTimers()
-    warn.mockRestore()
+    vi.restoreAllMocks()
   })
 
   it('warns once, naming the room, at a read a heartbeat past when it was last current', () => {

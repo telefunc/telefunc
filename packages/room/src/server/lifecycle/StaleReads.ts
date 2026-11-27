@@ -9,8 +9,8 @@ assertIsNotBrowser()
 
 type StaleReadsOptions = {
   roomId: string
-  model: Pick<RoomModel, 'closed'>
-  lanePlan: Pick<LanePlan, 'observing'>
+  model: RoomModel
+  lanePlan: LanePlan
 }
 
 /** A view nothing follows answers as of when it was last current: its `Room.get()`, or the end of the follow that kept
@@ -22,8 +22,8 @@ class StaleReads {
   private warned = false
 
   private readonly roomId: string
-  private readonly model: StaleReadsOptions['model']
-  private readonly lanePlan: StaleReadsOptions['lanePlan']
+  private readonly model: RoomModel
+  private readonly lanePlan: LanePlan
 
   constructor({ roomId, model, lanePlan }: StaleReadsOptions) {
     this.roomId = roomId

@@ -66,7 +66,7 @@ assertIsNotBrowser()
 type RoomStubOptions = {
   room: RoomHandle
   /** Whether every client of the view was sent every member it holds. */
-  roster: Pick<RosterStream, 'settled' | 'sentTo'>
+  roster: RosterStream
   end: ServerBroadcastEnd
   publishShield?: ShieldValidator
   /** The hidden members its response handed the client, which a streamed response may add to after the stub
@@ -79,7 +79,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   /** Its channel to its client. */
   readonly end: ServerBroadcastEnd
   private readonly room: RoomHandle
-  private readonly roster: RoomStubOptions['roster']
+  private readonly roster: RosterStream
   private readonly publishShield: ShieldValidator | undefined
   /** The members its client joined, each with its `selfDelivery`. */
   private readonly members = new Map<string, boolean>()

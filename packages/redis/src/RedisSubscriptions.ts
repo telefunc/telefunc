@@ -14,8 +14,7 @@ import type { RedisConnection } from './RedisConnection.js'
 
 /** What the subscriptions read of the backend's connection: their socket, how many nodes it may sit on, and the client
  *  a failure is told against. */
-type SubscriberSource = Pick<RedisConnection, 'openSubscriberSocket' | 'subscriberNodeCount' | 'client'>
-type RedisSubscriptionsOptions = { connection: SubscriberSource }
+type RedisSubscriptionsOptions = { connection: RedisConnection }
 
 /** What a driver's frames carry, and how long its lanes' order lasts. */
 type FrameShape = {
@@ -130,7 +129,7 @@ const SUBSCRIBER_PING_MS = 10_000
  * incarnation is still the open head).
  */
 class RedisSubscriptions {
-  private readonly connection: SubscriberSource
+  private readonly connection: RedisConnection
   /** Every channel some attempt needs, with the attempts that listen on it. */
   private readonly byChannel = new Map<string, Set<RedisAttempt>>()
   /** Each holder some attempt delivers to, by its name. */

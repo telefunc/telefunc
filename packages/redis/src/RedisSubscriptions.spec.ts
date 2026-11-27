@@ -5,8 +5,8 @@ import { config } from 'telefunc'
 import { ChannelOverflowError, createDeferred, type DriverAttempt } from 'telefunc/__internal'
 import { assert } from './assert.js'
 import { slotOf, type FormerMaster, type RedisClient, type SubscriberSocket } from './ioredis.js'
-import { NewSubscriptionWait, type WaitingSend } from './NewSubscriptionWait.js'
-import { RedisSubscriptions } from './RedisSubscriptions.js'
+import type { NewSubscriptionWait, WaitingSend } from './NewSubscriptionWait.js'
+import { RedisConnection } from './RedisConnection.js'
 import type { Starts } from './orderRecord.js'
 
 const TEXT = 'text-channel'
@@ -66,6 +66,27 @@ const PASSING = [
   replyError("TFSTALE a subscription's start reached a replica"),
 ]
 
+/** The backend's connection to a Redis it never reaches, whose subscriber socket is `socket`, on `nodes` nodes. */
+class SocketConnection extends RedisConnection {
+  private readonly socket: SubscriberSocket
+  private readonly nodes: number
+
+  constructor(socket: SubscriberSocket, nodes: number) {
+    // Never connects: a failure is only told against its address.
+    super({ redis: new Redis({ host: '127.0.0.1', port: 6390, lazyConnect: true }), prefix: 'tf:' })
+    this.socket = socket
+    this.nodes = nodes
+  }
+
+  override openSubscriberSocket(): Promise<SubscriberSocket> {
+    return Promise.resolve(this.socket)
+  }
+
+  override subscriberNodeCount(): number {
+    return this.nodes
+  }
+}
+
 function setup(
   subscribe: SubscriberSocket['subscribe'] = async () => {},
   connect: SubscriberSocket['connect'] = async () => {},
@@ -92,13 +113,7 @@ function setup(
     if (event === 'close') close = () => listener()
     return socket
   }
-  const connection = {
-    openSubscriberSocket: async () => socket,
-    subscriberNodeCount: () => nodes,
-    // Never connects: a failure is only told against its address.
-    client: new Redis({ host: '127.0.0.1', port: 6390, lazyConnect: true }),
-  }
-  const subscriptions = new RedisSubscriptions({ connection })
+  const { subscriptions, sends } = new SocketConnection(socket, nodes)
   const delivered: string[] = []
   const listen = (
     channel: string,
@@ -134,7 +149,7 @@ function setup(
     missedOn,
     close: () => close(),
     publish: (channel: string, frame: Buffer) => publish(channel, frame),
-    sends: new NewSubscriptionWait({ subscriptions }),
+    sends,
   }
 }
 

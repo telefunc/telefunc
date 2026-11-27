@@ -49,7 +49,7 @@ type Page = {
 /** Every track of every member, a track of every member, every track of a member, or a track of a member. */
 type Scope = { member?: string; track?: string }
 
-type PageIndexOptions = { model: Pick<RoomModel, 'memberHidden'> }
+type PageIndexOptions = { model: RoomModel }
 
 /** The pages holding this room here, which decide whose own messages a page gets back, which pages a removal closes,
  *  and whom a watch is told as.
@@ -64,7 +64,7 @@ class PageIndex {
   private readonly heldAt = new Map<string, Set<Page>>()
   /** The pages changed since they were reported, with the members changed of each, or `'all'`. */
   private readonly changedPages = new Map<Page, Set<string> | 'all'>()
-  private readonly model: PageIndexOptions['model']
+  private readonly model: RoomModel
 
   constructor({ model }: PageIndexOptions) {
     this.model = model
@@ -131,7 +131,7 @@ class PageIndex {
   }
 
   /** Reports what changed of each changed page's who-entries, a page per step. */
-  *report(report: Pick<DemandReport, 'setWho'>): Generator<void> {
+  *report(report: DemandReport): Generator<void> {
     for (const [page, members] of this.changedPages) {
       this.changedPages.delete(page)
       this.reportPage(page, members, report)
@@ -195,7 +195,7 @@ class PageIndex {
   }
 
   /** Tells the page's who-entries that name `members` as they are now, or with `'all'`, every entry again. */
-  private reportPage(page: Page, members: Set<string> | 'all', report: Pick<DemandReport, 'setWho'>): void {
+  private reportPage(page: Page, members: Set<string> | 'all', report: DemandReport): void {
     if (members === 'all') {
       tellWho(page, report, false)
       page.scopes = [...page.ends].flatMap((end) => [...scopesOf(end.binaryWants)])
@@ -228,7 +228,7 @@ function newPage(key: string | undefined): Page {
 
 /** Tells, or untells, each entry the page's who-entries hold: each participant they name, or the page's token where
  *  they name none, in each scope. */
-function tellWho(page: Page, report: Pick<DemandReport, 'setWho'>, on: boolean): void {
+function tellWho(page: Page, report: DemandReport, on: boolean): void {
   const who = page.named.size > 0 ? [...page.named].map((by) => ({ page: page.token, by })) : [{ page: page.token }]
   for (const scope of page.scopes) for (const each of who) report.setWho({ ...each, ...scope }, on)
 }

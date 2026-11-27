@@ -1,12 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getRoomPlane } from '../../backend/plane.js'
+import { replicaParts } from '../../test/replicaParts.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS } from '../constants.js'
+import { LanePlan } from '../lanes/LanePlan.js'
 import { encodeRoomRecord } from '../lanes/lanes.js'
 import type { RoomIncarnation } from '../protocol.js'
 import { RoomLease, holdViews, renewLease } from '../store/lease.js'
 import { AuthoritySync } from './AuthoritySync.js'
 import { newRoomHold } from './hold.js'
 import { RoomHeartbeat } from './RoomHeartbeat.js'
+import { RoomHosting } from './RoomHosting.js'
+import { RosterStream } from './RosterStream.js'
 
 /** A room in the memory store that a page's view holds, and the heartbeat of the server whose lease holds it. */
 async function heldRoom() {
@@ -24,25 +28,23 @@ async function heldRoom() {
   )
   const lease = new RoomLease()
   await holdViews(plane.direct, room, lease, ['page'])
-  const model = { closed: false }
+  const { model, lanePlan, outgoingDemand, demandExchange, authority, hosting } = replicaParts(room)
+  // The view's lanes follow the room, and its hosting renews the lease that holds the page's view.
+  vi.spyOn(LanePlan.prototype, 'observing', 'get').mockReturnValue(true)
   let renewedAt = 0
-  const hosting = {
-    maintain: vi.fn(async () => {
-      renewedAt = Date.now()
-      await renewLease(plane.direct, room, lease)
-    }),
-  }
-  const authority = {
-    reconcileMeta: () => plane.direct.reads.readHead(room.id),
-    checkCoverage: vi.fn<() => Promise<void>>(),
-  }
+  const maintain = vi.spyOn(RoomHosting.prototype, 'maintain').mockImplementation(async () => {
+    renewedAt = Date.now()
+    await renewLease(plane.direct, room, lease)
+  })
+  vi.spyOn(AuthoritySync.prototype, 'reconcileMeta').mockImplementation(() => plane.direct.reads.readHead(room.id))
+  const checkCoverage = vi.spyOn(AuthoritySync.prototype, 'checkCoverage').mockResolvedValue()
   const heartbeat = new RoomHeartbeat({
     hosting,
     incarnation: room,
     model,
-    lanePlan: { observing: true, ownsInbox: false },
-    outgoingDemand: { reporting: false },
-    demandExchange: { renew: async () => {} },
+    lanePlan,
+    outgoingDemand,
+    demandExchange,
     authority,
   })
   heartbeat.update()
@@ -51,7 +53,7 @@ async function heldRoom() {
     heartbeat.update()
   }
   const lapse = async () => (await plane.direct.reads.readHead(room.id))?.expiresAt ?? 0
-  return { room, hosting, authority, stop, lapse, renewedAt: () => renewedAt }
+  return { room, maintain, checkCoverage, stop, lapse, renewedAt: () => renewedAt }
 }
 
 /** Runs heartbeats until `ran` holds, as a tick still running skips the next. */
@@ -70,55 +72,45 @@ describe('RoomHeartbeat', () => {
   })
   afterEach(() => {
     vi.useRealTimers()
-    error.mockRestore()
+    vi.restoreAllMocks()
   })
 
   it("renews the lease and the room's lapse while a coverage check doesn't end", async () => {
-    const { hosting, authority, stop, lapse, renewedAt } = await heldRoom()
-    authority.checkCoverage.mockReturnValue(new Promise(() => {}))
-    await tickUntil(() => expect(authority.checkCoverage).toHaveBeenCalledOnce())
-    await tickUntil(() => expect(hosting.maintain).toHaveBeenCalledTimes(2))
+    const { maintain, checkCoverage, stop, lapse, renewedAt } = await heldRoom()
+    checkCoverage.mockReturnValue(new Promise(() => {}))
+    await tickUntil(() => expect(checkCoverage).toHaveBeenCalledOnce())
+    await tickUntil(() => expect(maintain).toHaveBeenCalledTimes(2))
     // The lease's 120 s, the room's 20 s timeout and two heartbeats past the tick.
     await vi.waitFor(async () => expect(await lapse()).toBeGreaterThanOrEqual(renewedAt() + 200_000))
-    expect(authority.checkCoverage).toHaveBeenCalledOnce()
+    expect(checkCoverage).toHaveBeenCalledOnce()
     stop()
   })
 
   it('reports a coverage check that rejects once, and checks again at a later tick', async () => {
-    const { authority, stop } = await heldRoom()
-    authority.checkCoverage.mockRejectedValueOnce(new Error('coverage read failed')).mockResolvedValue(undefined)
-    await tickUntil(() => expect(authority.checkCoverage).toHaveBeenCalledTimes(2))
+    const { checkCoverage, stop } = await heldRoom()
+    checkCoverage.mockRejectedValueOnce(new Error('coverage read failed')).mockResolvedValue(undefined)
+    await tickUntil(() => expect(checkCoverage).toHaveBeenCalledTimes(2))
     expect(error).toHaveBeenCalledOnce()
     expect(error).toHaveBeenCalledWith(expect.stringContaining('coverage read failed'))
     stop()
   })
 
   it('leaves a view as it closed when the room closes during a coverage check', async () => {
-    const { room, stop } = await heldRoom()
-    const model = {
-      closed: false,
-      metaWaiting: false,
-      metaSeq: 0,
-      rosterKnown: true,
-      memberIds: () => [].values(),
-      recordMembership: () => [],
-      stopRecordingMembership: () => {},
-    }
-    const owner = { applyControl: vi.fn() }
-    const authority = new AuthoritySync({
-      owner,
-      incarnation: room,
-      roster: { reconcile: async () => true },
-      model,
-      lanePlan: { replan: async () => {}, observing: true, controlEstablished: true },
-    })
+    const { room, stop, checkCoverage } = await heldRoom()
+    // This test's own sync, which checks coverage itself; its lanes hold the control subscription.
+    checkCoverage.mockRestore()
+    const applyControl = vi.fn()
+    const { model, authority } = replicaParts(room, applyControl)
+    vi.spyOn(LanePlan.prototype, 'controlEstablished', 'get').mockReturnValue(true)
+    vi.spyOn(LanePlan.prototype, 'replan').mockResolvedValue()
+    vi.spyOn(RosterStream.prototype, 'reconcile').mockResolvedValue(true)
     authority.controlDelivered({ seq: 1, timestamp: 0 })
     // The close dropped the room's lanes, and its closed frame reaches the view while the check reads the control lane.
     await getRoomPlane().direct.dropIncarnation(room.id, room.inc)
     const check = authority.checkCoverage()
     model.closed = true
     await check
-    expect(owner.applyControl).not.toHaveBeenCalled()
+    expect(applyControl).not.toHaveBeenCalled()
     stop()
   })
 })

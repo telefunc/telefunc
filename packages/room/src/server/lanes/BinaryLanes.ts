@@ -41,7 +41,7 @@ type Establishing = { lanes: Set<LaneSubscription>; waiting: Set<string>; replan
 type BinaryLanesOptions = {
   /** Where every lane reports, as each lane of the room does. */
   laneOwner: LaneSubscriptionOwner
-  model: Pick<RoomModel, 'closed'>
+  model: RoomModel
 }
 
 /** The binary lanes this process subscribes, by shape, and the switch between them: a lane that no longer serves a
@@ -72,7 +72,7 @@ class BinaryLanes {
   private readonly replans: Replans = { members: new Set(), tracks: new Set(), pairs: new Map() }
 
   private readonly laneOwner: LaneSubscriptionOwner
-  private readonly model: BinaryLanesOptions['model']
+  private readonly model: RoomModel
 
   constructor({ laneOwner, model }: BinaryLanesOptions) {
     this.laneOwner = laneOwner
