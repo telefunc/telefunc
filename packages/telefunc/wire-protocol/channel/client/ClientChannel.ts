@@ -104,10 +104,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  resolve with different types, each with `parse(text)` of the answer. */
   protected pendingAcks = new Map<number, { resolve: (v: any) => void; reject: (err: Error) => void }>()
   protected selfTime = new SelfTime()
-  /** Paces fire-and-forget TEXT, BINARY and PUBLISH sends to what the server grants; see `constants.ts`. */
+  /** Paces fire-and-forget TEXT and BINARY sends to what the server grants; see `constants.ts`. */
   protected sendCredit: SendCredit
   protected receiveCredit: ReceiveCredit
-  /** @internal Its credits as its connection drives them across wires. */
+  /** @internal What it declares each time it attaches: its credits and, for a broadcast, its want. */
   readonly _attach: ChannelAttach
   /** The seq of this page's newest lossy send, which may still wait to go. */
   private newestLossySeq: number | undefined

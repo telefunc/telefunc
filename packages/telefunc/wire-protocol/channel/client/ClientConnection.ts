@@ -50,7 +50,7 @@ interface MuxChannel {
   _onEnded(err?: Error): void
   /** Its connection is gone for good. */
   _onConnectionLost(err: Error): void
-  /** Its credits as the connection drives them across wires. */
+  /** What it declares each time it attaches: its credits and, for a broadcast, its want. */
   readonly _attach: ChannelAttach
 }
 
@@ -130,8 +130,8 @@ type ClientChannelTransport = {
   sendFrame(frame: OutboundFrame): void
   /** How many bytes of data frames it accepts now, `Infinity` if nothing bounds them. Other frames go at once. */
   headroom(): number
-  /** How long a lossy publish may wait to go before the page counts as behind: past the wire's own wait, its least
-   *  round trip, so `Infinity` before that is measured. */
+  /** How long a frame may wait to go before the page counts as behind: past the wire's own wait, its least round trip,
+   *  so `Infinity` before that is measured. */
   readonly behindAfter: number
   /** Bytes of the frames it was handed that haven't gone out to the network. */
   bufferedAmount(): number

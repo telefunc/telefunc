@@ -217,9 +217,10 @@ async function readBody(
     const hold = holdUploadResponse(request, runContext.clientGone, reader.restRead)
     runContext.requestContext.responseHold = hold
     const clientGone = hold?.clientGone ?? runContext.clientGone
-    // A page attaches to a channel the call returns once its upload is over: until then, each byte of it says the page
-    // is on its way. An upload that stops, at its end or as its client goes silent, leaves its last byte as the sign;
-    // one that stopped short for a whole connect window is given up on, with its files.
+    // While an unattached channel's upload is still arriving (for example on half-duplex clients that read the response
+    // only after the upload finishes), each chunk resets its connectTtl inactivity window. An upload that stops, at its
+    // end or as its client goes silent, leaves its last byte as the sign; one that stopped short for a whole connect
+    // window is given up on, with its files.
     let lastByteAt = performance.now()
     reader.onChunk = () => {
       lastByteAt = performance.now()
@@ -236,8 +237,9 @@ async function readBody(
     // While the call runs, the file reads end as the client leaves, once a read of the body under way took its failure.
     const leftDuringCall = () => void giveUpOnceReadSettled(reader)
     clientGone.addEventListener('abort', leftDuringCall, { once: true })
-    // A browser delivers the answer only once it has sent the whole body: where a returned value holds the request on,
-    // the rest of the body is read now, and kept for the call's files within what the channels' memory allows.
+    // Half-duplex clients deliver the answer only once they have sent the whole body: where a returned value holds the
+    // request on, the rest of the body is read now, and kept for the call's files within what the channels' memory
+    // allows.
     runContext.requestContext.onAnswered(() => {
       reader.keepRest()
       watchClient()

@@ -189,7 +189,8 @@ type ServerReplacerContext = {
   createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts?: {
     ack?: boolean
   }): ServerChannel<ClientToServer, ServerToClient>
-  /** Registers a channel with the response lifecycle. Also installs shield validators if the channel has shields. */
+  /** Registers a channel with the response lifecycle: the response carries it, with its shield validators, once
+   *  serialized. */
   registerChannel(channel: ServerChannel<any, any>): void
   sendStream(createProducer: () => StreamingProducer): {
     metadata: StreamingMetadata

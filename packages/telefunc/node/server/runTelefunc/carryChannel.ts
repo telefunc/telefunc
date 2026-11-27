@@ -11,7 +11,8 @@ function carryChannel<ClientToServer, ServerToClient>(
   channel: ServerChannel<ClientToServer, ServerToClient>,
   requestContext: RequestContext,
 ): void {
-  // Wired first: registering attaches a page that waits for the channel, which runs its `onOpen` callbacks.
+  // The response's abort first: registering attaches a page that waits for the channel, which runs its `onOpen`
+  // callbacks, and an `Abort()` in one aborts the response.
   channel._setResponseAbort(requestContext.responseAbort.abort)
   if (ServerBroadcast.isServerBroadcast(channel)) channel._carriedBy = requestContext.request
   getChannelMux().registerChannel(channel, requestContext.page, getSessionToken(requestContext.request))

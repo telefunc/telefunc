@@ -585,7 +585,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  `toJSON`, ended it already. */
   private abortWith(reason: AbortReason, message?: string): void {
     this.lifecycle.endWith(createAbortError(reason.value, message), () => {
-      // Owed, the abort is so before its close callbacks run, which may need a subscriber's memory (`ServerBroadcast.shed`).
+      // Owed before its close callbacks run: what it drops is gone by then, so they find its memory free.
       this.onAbortOwed()
       this.sendWaitingNow({ dropLossy: true })
       this.sendEnd((peer) => peer.sendSequenced(encode.abort, reason.serialized))
