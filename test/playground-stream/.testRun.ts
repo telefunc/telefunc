@@ -73,7 +73,12 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | '
         ((cmd === 'pnpm dev' || cmd === 'pnpm preview') &&
           log.logSource === 'stderr' &&
           log.logText.includes('[Bug] You stumbled upon a Vike bug') &&
-          log.logText.includes('at logHttpResponse'))
+          log.logText.includes('at logHttpResponse')) ||
+        // channel/e2e-test.ts's corrupted ACK_RES test triggers an intentional pageerror; Vite dev forwards it to stderr when HMR connects in time.
+        (cmd === 'pnpm dev' &&
+          log.logSource === 'stderr' &&
+          log.logText.includes('[vite][Unhandled error] SyntaxError:') &&
+          log.logText.includes('ClientChannel.onPeerAckRes'))
       )
     },
   })
