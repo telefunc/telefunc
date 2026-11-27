@@ -65,7 +65,7 @@ import { TelefuncStreamBeta } from '../../components'
 
 1. <Link href="#channel"><code>Channel</code></Link>: API for advanced real-time use cases.
 
-> A single telefunction can [mix primitives](https://gist.github.com/brillout/155c8eb4cbaa043bc52e96c0c2ed7086) (generators, channels, promises, ...) side by side, each resolving independently.
+> You can [mix primitives](https://gist.github.com/brillout/155c8eb4cbaa043bc52e96c0c2ed7086) (generators, channels, promises, ...) in the same return value. See the <Link href="#inline-stream-limitations">limitations for returned streams</Link>.
 
 #### Integrations
 
@@ -301,7 +301,9 @@ while (true) {
 
 > You can also return a `File` or `Blob` instead, see: <Link href="/file-download" />.
 
-> If a call returns several streams, read them concurrently, or cancel the ones you don't need: by default they share one HTTP response, and a stream left unread past 1 MiB pauses the others until you read or cancel it.
+##### Limitations {#inline-stream-limitations}
+
+> By default, returned values share one HTTP response, so a stream left unread past 1 MiB pauses later values until you read or cancel it. Read returned streams concurrently or cancel the ones you don't need.
 
 
 #### Client → server
