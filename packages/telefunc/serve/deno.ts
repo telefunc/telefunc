@@ -9,7 +9,7 @@ import { getServerConfig } from '../node/server/serverConfig.js'
 import { getTelefuncChannelOptions } from '../wire-protocol/channel/server/ws.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { getTelefuncRequestUrl, toResponse } from './shared.js'
-import { onDenoPeerClose, terminateDenoPeer } from '../workarounds/crosswsDeno.js'
+import { denoHooks, terminateDenoPeer } from '../workarounds/crosswsDeno.js'
 
 type DenoWs = ReturnType<typeof crossws>
 type DenoInfo = Parameters<DenoWs['handleUpgrade']>[1]
@@ -36,19 +36,7 @@ function telefunc(): TelefuncServe {
     terminate: terminateDenoPeer,
     copiesOnSend: true,
   })
-  const ws = crossws({
-    getNamespace,
-    hooks: {
-      upgrade: hooks.upgrade,
-      open(peer) {
-        onDenoPeerClose(peer, hooks.close)
-        return hooks.open(peer)
-      },
-      message: hooks.message,
-      close() {},
-      error: hooks.error,
-    },
-  })
+  const ws = crossws({ getNamespace, hooks: denoHooks(hooks) })
 
   return {
     async serve({ request, info, context }: ServeInput): Promise<Response | undefined> {

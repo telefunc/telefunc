@@ -3,14 +3,29 @@
 //   (https://github.com/h3js/crossws/pull/216, closed unmerged).
 // - It reports a close without its code, which tells a page that left from a dropped one: a page that left would be
 //   held for its reconnect (https://github.com/h3js/crossws/pull/213, closed unmerged).
-export { terminateDenoPeer, onDenoPeerClose }
+export { terminateDenoPeer, denoHooks }
 
-import type { Peer } from 'crossws'
+import type { Hooks, Peer } from 'crossws'
 import { assert } from '../utils/assert.js'
 
 /** Ends `peer` at once: Deno's `WebSocket` has no `terminate()`, so it is closed. */
 function terminateDenoPeer(peer: Peer): void {
   peer.close()
+}
+
+/** `hooks` for crossws's Deno adapter: a peer's close comes from Deno's own `WebSocket`, with its code and reason, and
+ *  crossws's own close, without them, is dropped. */
+function denoHooks(hooks: Pick<Hooks, 'upgrade' | 'open' | 'message' | 'close' | 'error'>): Partial<Hooks> {
+  return {
+    upgrade: hooks.upgrade,
+    open(peer) {
+      onDenoPeerClose(peer, hooks.close)
+      return hooks.open(peer)
+    },
+    message: hooks.message,
+    close() {},
+    error: hooks.error,
+  }
 }
 
 /** Calls `close` at `peer`'s close, with its code and reason. */
