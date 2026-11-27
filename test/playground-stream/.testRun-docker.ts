@@ -110,7 +110,7 @@ function testRunDocker() {
     await testCounter()
   })
 
-  testFileUpload()
+  testFileUpload(false, true)
   testFileDownload()
   testStreaming()
   testAbort()

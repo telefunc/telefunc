@@ -1,6 +1,6 @@
 export { testFileUpload }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult, serverRuntime, sleep } from '../../e2e-utils'
 import { Agent, request } from 'node:http'
 import { request as requestOverTls } from 'node:https'
@@ -67,7 +67,7 @@ async function post(kind: 'bin' | 'txt', body: BodyInit, cookie?: string) {
   }
 }
 
-function testFileUpload() {
+function testFileUpload(isDev = false, inDocker = false) {
   test('file upload: single file + text arg', async () => {
     await navigate(`${getServerUrl()}/file-upload`)
 
@@ -355,27 +355,32 @@ function testFileUpload() {
       expect(greeted!.socket).toBe(ignored!.socket)
     })
 
-  test('file upload: a binary call whose metadata length says 2 GiB is answered 400 before any metadata is sent', async () => {
-    const started = Date.now()
-    const status = await new Promise<number>((resolve, reject) => {
-      const url = `${getServerUrl()}/_telefunc`
-      const options = { method: 'POST', headers: { 'x-telefunc-request': 'bin' } }
-      const req = url.startsWith('https:')
-        ? requestOverTls(url, { ...options, rejectUnauthorized: false })
-        : request(url, options)
-      req.on('response', (response) => {
-        resolve(response.statusCode!)
-        req.destroy()
+  // Caddy in Docker holds a half-open 4-byte upload stream until its read timeout; direct server lanes cover this.
+  if (!inDocker)
+    test('file upload: a binary call whose metadata length says 2 GiB is answered 400 before any metadata is sent', async () => {
+      const started = Date.now()
+      const status = await new Promise<number>((resolve, reject) => {
+        const url = `${getServerUrl()}/_telefunc`
+        const options = { method: 'POST', headers: { 'x-telefunc-request': 'bin' } }
+        const req = url.startsWith('https:')
+          ? requestOverTls(url, { ...options, rejectUnauthorized: false })
+          : request(url, options)
+        req.on('response', (response) => {
+          resolve(response.statusCode!)
+          req.destroy()
+        })
+        req.on('error', reject)
+        const header = new Uint8Array(4)
+        new DataView(header.buffer).setUint32(0, 2 ** 31)
+        // The body stays open: no metadata follows the length.
+        req.write(header)
       })
-      req.on('error', reject)
-      const header = new Uint8Array(4)
-      new DataView(header.buffer).setUint32(0, 2 ** 31)
-      // The body stays open: no metadata follows the length.
-      req.write(header)
+      expect(status).toBe(400)
+      expect(Date.now() - started).lessThan(1000)
+      if (isDev) {
+        expectLog('Malformed request in development', { filter: (log) => log.logSource === 'stderr' })
+      }
     })
-    expect(status).toBe(400)
-    expect(Date.now() - started).lessThan(1000)
-  })
 
   test("file upload: a telefunction that transfers one File's chunks away reads the next File's bytes intact", async () => {
     await navigate(`${getServerUrl()}/file-upload`)

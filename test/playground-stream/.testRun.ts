@@ -93,7 +93,7 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm p
     await testCounter()
   })
 
-  testFileUpload()
+  testFileUpload(isDev)
 
   testFileDownload()
 

@@ -248,10 +248,6 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
-  testAbortUnsendable()
-
-  if (channelTransports[0] === 'sse') testSseOpenAnsweredWithHtml()
-
   // ── abort(result) from telefunc/client — abort semantics on all channels ──
 
   test('channel: abort(result) from telefunc/client — every channel in result receives Abort error via onClose', async () => {
@@ -1591,6 +1587,10 @@ function testChannel(isDev: boolean, inDocker = false) {
     expect(await bugs()).deep.equal(bugsBefore)
     expectLog('the server responded with a status of 400', { filter: (log) => log.logSource === 'Browser Error' })
   })
+
+  testAbortUnsendable()
+
+  if (channelTransports[0] === 'sse') testSseOpenAnsweredWithHtml()
 }
 
 /** A first SSE open answered with a page of HTML, as an app's SPA fallback answers it. */
