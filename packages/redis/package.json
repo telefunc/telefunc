@@ -9,6 +9,9 @@
     "directory": "packages/redis"
   },
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "exports": {
     "./package.json": "./package.json",

@@ -4,6 +4,7 @@ export type { OrderingInfo } from '../../wire-protocol/backend/driverOrdering.js
 export { tetherTo, untether } from '../../utils/wrapProxy.js'
 export { invokeChannelListener, soleAnswer } from './context/invokeWithoutContext.js'
 export { handleCallbackBug } from './runTelefunc/validateTelefunctionError.js'
+export { isPeerGone } from './runTelefunc/isPeerGone.js'
 export { hostLocal } from '../../wire-protocol/channel/server/ChannelMux.js'
 export { reconnectWindow } from './serverConfig.js'
 export { MAX_CHANNELS_PER_CONNECTION, PUBLISH_HOLD_BYTES } from '../../wire-protocol/constants.js'
@@ -167,4 +168,3 @@ type ClientBroadcast<T = unknown, Publish = T> = Pick<
   | 'onReconnect'
   | 'close'
 >
-export { isPeerGone } from './runTelefunc/isPeerGone.js'
