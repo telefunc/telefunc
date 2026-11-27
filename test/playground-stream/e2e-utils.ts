@@ -23,6 +23,7 @@ export {
   stopProxy,
   startProxy,
   countConnections,
+  scriptsRequestedDuring,
   serverRuntime,
   setServerRuntime,
   canCutWire,
@@ -31,7 +32,7 @@ export {
 }
 
 import { page, getServerUrl, expectLog } from '@brillout/test-e2e'
-import type { Response, WebSocket } from 'playwright-chromium'
+import type { Request, Response, WebSocket } from 'playwright-chromium'
 import { execSync } from 'node:child_process'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -294,6 +295,21 @@ function defined<T>(value: T | null | undefined, what: string): T {
 
 async function getResult<T = any>(selector: string): Promise<T> {
   return JSON.parse((await page.textContent(selector))!)
+}
+
+/** The scripts the page requests while `action` runs. */
+async function scriptsRequestedDuring(action: () => Promise<void>): Promise<string[]> {
+  const scripts: string[] = []
+  const onRequest = (request: Request) => {
+    if (request.resourceType() === 'script') scripts.push(request.url())
+  }
+  page.on('request', onRequest)
+  try {
+    await action()
+  } finally {
+    page.off('request', onRequest)
+  }
+  return scripts
 }
 
 /** Counts the WebSockets and SSE streams the page opens to Telefunc from now until `stop()`. */

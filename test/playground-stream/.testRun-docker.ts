@@ -113,7 +113,7 @@ function testRunDocker() {
   testFileUpload()
   testFileDownload()
   testStreaming()
-  testAbort()
+  testAbort(false)
   testClose(true)
   testChannel(false, true)
   testFunction(false, true)

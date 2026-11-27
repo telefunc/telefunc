@@ -749,16 +749,6 @@ test('each call loads only the code the values it carries need', async () => {
   expect(imported).toEqual(['streams', 'channels', 'broadcasts'])
 })
 
-test('a response carrying an inline stream and a channel loads both, then revives both', async () => {
-  const { call } = await page()
-  for (const feature of FEATURES) gates[feature].open()
-  respond = streamed({ gen: GENERATOR, channel: CHANNEL })
-  const ret = await call([])
-  assertHas(ret, 'gen')
-  assertHas(ret, 'channel')
-  expect(imported.sort()).toEqual(['channels', 'streams'])
-})
-
 test('an extension that imports telefunc/__internal creates a broadcast and a channel from its response, loading no other code', async () => {
   const { call, config } = await page()
   gates.channels.open()

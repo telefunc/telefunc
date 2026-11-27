@@ -3,9 +3,17 @@ export { testAbort }
 import { connect } from 'node:net'
 import { once } from 'node:events'
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { resetCleanupState, getCleanupState, navigate, getResult, serverRuntime, sleep } from '../../e2e-utils'
+import {
+  resetCleanupState,
+  getCleanupState,
+  navigate,
+  getResult,
+  serverRuntime,
+  sleep,
+  scriptsRequestedDuring,
+} from '../../e2e-utils'
 
-function testAbort() {
+function testAbort(isDev: boolean) {
   // ── Generator abort mechanisms ──────────────────────────────────────
 
   test('abort: generator via abort(gen)', async () => {
@@ -116,18 +124,22 @@ function testAbort() {
     await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
-    await page.click('#test-slow-normal-telefunc')
-    // Abort once the server runs the telefunc.
-    await autoRetry(async () => {
-      const state = await getCleanupState()
-      expect(state.slowNormal).toBe('running')
+    const scripts = await scriptsRequestedDuring(async () => {
+      await page.click('#test-slow-normal-telefunc')
+      // Abort once the server runs the telefunc.
+      await autoRetry(async () => {
+        const state = await getCleanupState()
+        expect(state.slowNormal).toBe('running')
+      })
+      await page.click('#test-slow-normal-abort')
+      await autoRetry(async () => {
+        const result = await getResult('#abort-result')
+        expect(result.isAbort).toBe(true)
+        expect(result.error).toContain('Aborted telefunction call')
+      })
     })
-    await page.click('#test-slow-normal-abort')
-    await autoRetry(async () => {
-      const result = await getResult('#abort-result')
-      expect(result.isAbort).toBe(true)
-      expect(result.error).toContain('Aborted telefunction call')
-    })
+    // The built page has the code of a call that carries plain values only.
+    if (!isDev) expect(scripts).deep.equal([])
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.slowNormal).toBe('cleaned-up')

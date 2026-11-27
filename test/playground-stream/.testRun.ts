@@ -96,7 +96,7 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm p
   testStreaming(isDev)
   testStreamingRequestContext()
 
-  testAbort()
+  testAbort(isDev)
 
   testClose()
 
