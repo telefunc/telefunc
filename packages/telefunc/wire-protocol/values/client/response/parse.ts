@@ -216,9 +216,8 @@ async function reviveResponse(
   let parsed: unknown
   try {
     const values = new ResponseValues(body, callContext.extensionResponseTypes, !bodyStreamReader)
-    const loaded = loadedFeatures()
-    const needed = values.missingFeatures(loaded)
-    if (needed?.length) await loadFeatures(needed, callContext)
+    const needed = values.missingFeatures(loadedFeatures())
+    const loaded = needed?.length ? await loadFeatures(needed, callContext) : loadedFeatures()
     throwIfAborted(callContext)
     parsed = values.revive(context, handOut, loaded)
     if (pendingValues.length > 0) {
