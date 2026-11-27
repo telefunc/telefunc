@@ -117,8 +117,8 @@ function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unkn
   const outcome = (proof: boolean): BackendError['outcome'] => (!writes || proof ? 'not-run' : 'may-have-run')
   // A Cluster command ioredis gave up is told by the reply that ended it, as if that reply had come on its own: every
   // try before it was a redirection, MOVED, ASK, TRYAGAIN or CLUSTERDOWN, which ran nothing, as ioredis tries a command
-  // again on those only and counts its redirections down before it reads a reply (ioredis 5.10.1,
-  // built/cluster/index.js:550-560), so at an app's `maxRedirections: 0` the first reply, whatever it is, ends it.
+  // again on those only and counts its redirections down before it reads a reply, so at an app's `maxRedirections: 0`
+  // the first reply, whatever it is, ends it.
   const last = lastClusterReply(error)
   const redirection = last === undefined ? undefined : REDIRECTION.exec(last)?.[1]
   if (redirection !== undefined) {
@@ -241,7 +241,8 @@ function sentence(kind: Kind, where: string, tagged: string, cluster: boolean): 
   switch (kind) {
     case 'replica':
       // A Cluster client reaches each slot's primary by itself: ioredis hands a write to a replica only while it holds
-      // no connection to the slot's primary (redis/ioredis#2274), so no other client would help.
+      // no connection to the slot's primary, so no other client would help.
+      // TODO: remove once the ioredis peer range starts at 6.1.0, which fixed https://github.com/redis/ioredis/issues/2274
       if (cluster) {
         return (
           `A replica of the Redis Cluster at ${where} refused a write of Telefunc's Redis backend${tagged}, as ioredis ` +

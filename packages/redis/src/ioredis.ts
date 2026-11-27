@@ -47,9 +47,6 @@ function rawWrites(name: string): boolean {
 /** A script as the backend sends it: its source and its SHA1, by which a socket that ran it once runs it again. */
 type StoreScript = { lua: string; sha: string }
 
-/** Each script's SHA1, computed once. */
-const scripts = new Map<string, StoreScript>()
-
 function scriptOf(lua: string): StoreScript {
   let script = scripts.get(lua)
   if (script === undefined) {
@@ -58,10 +55,6 @@ function scriptOf(lua: string): StoreScript {
   }
   return script
 }
-
-/** The scripts each socket ran, by SHA1: a socket's first request of a script sends its source (EVAL), later ones its
- *  SHA1 (EVALSHA), as Redis keeps a script it ran until it restarts or SCRIPT FLUSH. */
-const socketScripts = new WeakMap<object, Set<string>>()
 
 /** How much of a request the backend hands its socket at once: the socket's progress then shows as each slice is taken,
  *  and a large argument goes as slices of itself, never copied whole into one frame. */
@@ -237,8 +230,8 @@ function connectsAlike(a: RedisClient, b: RedisClient): boolean {
   return CONNECTION_OPTIONS.every((name) => isDeepStrictEqual(a.options[name], b.options[name]))
 }
 
-/** A Cluster's startup nodes, as the app gave them: ioredis keeps them private, and its own duplicate() reads the same
- *  field. */
+/** A Cluster's startup nodes, as the app gave them. ioredis has no public accessor for them, so this reads the private
+ *  field its own duplicate() reads. */
 function startupNodesOf(cluster: Cluster): unknown {
   return cluster['startupNodes']
 }
@@ -293,7 +286,7 @@ function commandTimeoutOf(redis: RedisClient): number | undefined {
 
 /** ioredis's rejection of a Cluster command once its redirections ran out, holding the reply that ended it. ioredis
  *  counts the app's `maxRedirections` down on every reply that fails a try, before it reads the reply, so at 0 the
- *  first reply ends the command, whatever it is (ioredis 5.10.1, `Cluster.handleError()`). */
+ *  first reply ends the command, whatever it is. */
 const GAVE_UP = /^Too many Cluster redirections\. Last error: ReplyError: /
 
 /** The reply that ended a Cluster command ioredis gave up once its redirections ran out, as Redis worded it. Every try
@@ -513,6 +506,11 @@ type Attempt = {
 /** This file's state on `globalThis`. */
 function createGlobalObject() {
   return {
+    /** Each script's SHA1, computed once. */
+    scripts: new Map<string, StoreScript>(),
+    /** The scripts each socket ran, by SHA1: a socket's first request of a script sends its source (EVAL), later ones
+     *  its SHA1 (EVALSHA), as Redis keeps a script it ran until it restarts or SCRIPT FLUSH. */
+    socketScripts: new WeakMap<object, Set<string>>(),
     /** The node each Cluster's subscriber was last duplicated from. */
     subscriberNodes: new WeakMap<Cluster, Redis>(),
     /** Each client's wait for its next `ready` (`nextReady()`). */
@@ -526,7 +524,10 @@ declare module './getGlobalObject.js' {
     'ioredis.ts': ReturnType<typeof createGlobalObject>
   }
 }
-const { subscriberNodes, readyWaits, attempts } = getGlobalObject('ioredis.ts', createGlobalObject)
+const { scripts, socketScripts, subscriberNodes, readyWaits, attempts } = getGlobalObject(
+  'ioredis.ts',
+  createGlobalObject,
+)
 
 /** A Cluster's connect that closed after its nodes failed, with each node's last error (`endedWith()`): what the nodes
  *  replied tells a refused login from a node that is only unreachable (`redisFailure()`). Only the backend reads it. */
