@@ -52,8 +52,6 @@ export async function onClock() {
 
 > The server returns `channel.client`: the client gets the same API but with message directions flipped.
 
-> A channel's `id` is a random UUID unless you pass one with `new Channel({ id })`: it can be at most 256 bytes as JSON writes it, and a longer one throws.
-
 ```ts
 // Clock.tsx
 // Environment: client
@@ -390,8 +388,6 @@ broadcast.subscribe((n) => showToast(n))
 
 > Where only the newest message matters, such as a price, use `new BroadcastChannel({ key, lossy: true })`: its client then skips to the newest message when it falls behind.
 
-> On Cloudflare, a subscription in effect reaches other locations' publishes once they see it, see <Link href="/stream/cloudflare#delivery-guarantees">delivery guarantees</Link>.
-
 
 ## `new BroadcastChannel()` VS `new Channel()`
 
@@ -431,9 +427,9 @@ Channels and broadcasts signal failure through these errors:
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
 | `NetworkError` (`isChannel: true`) | Connection lost beyond `reconnectTimeout`, replay evicted while offline, or, on the server, the user left the page | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
-| `ChannelOverflowError` | A `send()`, or the server's reply to a client's `{ ack: true }` send, was refused — the server already holds too much for that channel | **Open** | Only that `send()` rejects; for `{ ack: true }`, the server's listener may have run already, so retrying can repeat its side effects. `await` your sends to apply backpressure |
-| `ChannelOverflowError` | The client's messages or `{ ack: true }` requests outran what the server holds for the channel: its `listen()` callbacks were busy, a stream argument went unread, or too many replies were pending to hold even a refusal | Closed | Recreate the channel; `await` your sends, send more slowly, or finish your `listen()` callbacks and read your streams sooner |
-| `ChannelOverflowError` | A broadcast subscriber fell behind: a reliable one, or a lossy one whose newest message can't fit | Closed | Call the telefunction again to rejoin, read faster, or pass `lossy: true` to a reliable `BroadcastChannel` |
+| `ChannelOverflowError` | A `send()` hit the server's memory limit | **Open** | `await` your sends (only that call rejects; `{ ack: true }` may have run already) |
+| `ChannelOverflowError` | Client messages outran the server's memory limit | Closed | Recreate the channel; `await` sends and finish `listen()` callbacks sooner |
+| `ChannelOverflowError` | A broadcast subscriber fell behind | Closed | Rejoin, read faster, or use `lossy: true` |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `null`).
 

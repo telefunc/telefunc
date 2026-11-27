@@ -25,7 +25,7 @@ config.channel = {
 
 > **What to tune**: the defaults suit typical stream use cases; tune these only if you run into one of the issues below:
 > - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
-> - `ChannelOverflowError` on a refused `send()` → apply backpressure by `await`-ing your `send()`s; the channel stays open. One that closed the channel: recreate it or rejoin, see <Link href="/channel#errors" />.
+> - `ChannelOverflowError` → `await` your `send()`s; if it closed the channel, recreate it or rejoin, see <Link href="/channel#errors" />.
 > - Want to use less memory → lower `maxMemory`.
 > - WebSocket for pages on another origin than your server → see <Link href="/transport#websocket" />.
 
