@@ -98,13 +98,16 @@ declare global {
       reason: 'circular' | 'oversize',
       beforeOpen: boolean,
     ) => Promise<{ id: string; isAbort: boolean; abortValue: unknown }>
-    /** Opens a channel the server counts the messages of (`onChannelCounted`), on a connection of its own, over
-     *  `transports` when given: its id once it opened, or the message it ended with. */
-    openCounted?: (transports?: ('sse' | 'ws')[]) => Promise<{ id: string } | { ended: string }>
-    /** Sends `msg` on the channel `openCounted()` opened: its answer, or the message the send failed with. */
-    sendCounted?: (msg: string) => Promise<string>
-    /** How the channel `openCounted()` opened ended: the message it ended with. */
-    countedEnd?: () => Promise<string>
+    /** Opens a channel the server counts the messages of (`onChannelCounted`), over `transports` when given, as `name`,
+     *  on the connection of `connectionKey`, else on one of its own: its id once it opened, or the message it ended with. */
+    openCounted?: (
+      transports?: ('sse' | 'ws')[],
+      slot?: { name?: string; connectionKey?: string },
+    ) => Promise<{ id: string } | { ended: string }>
+    /** Sends `msg` on the channel `openCounted()` opened as `name`: its answer, or the message the send failed with. */
+    sendCounted?: (msg: string, name?: string) => Promise<string>
+    /** How the channel `openCounted()` opened as `name` ended: the message it ended with. */
+    countedEnd?: (name?: string) => Promise<string>
   }
 }
 
@@ -549,24 +552,28 @@ function ChannelDemo() {
         channel.onClose((err) => resolve(err instanceof Error ? err.message : String(err)))
       })
     }
-    let counted: { channel: { send(msg: string, options: { ack: true }): Promise<string> }; end: Promise<string> }
-    window.openCounted = async (transports) => {
-      const context = { connectionKey: crypto.randomUUID(), ...(transports ? { transports } : {}) }
+    const counted = new Map<
+      string,
+      { channel: { send(msg: string, options: { ack: true }): Promise<string> }; end: Promise<string> }
+    >()
+    window.openCounted = async (transports, { name = '', connectionKey = crypto.randomUUID() } = {}) => {
+      const context = { connectionKey, ...(transports ? { transports } : {}) }
       const { id, channel } = await openChannel(withContext(onChannelCounted, { channel: context }))
       const end = new Promise<string>((resolve) =>
         channel.onClose((err) => resolve(err instanceof Error ? err.message : String(err))),
       )
-      counted = { channel, end }
+      counted.set(name, { channel, end })
       return Promise.race([
         new Promise<{ id: string }>((resolve) => channel.onOpen(() => resolve({ id }))),
         end.then((ended) => ({ ended })),
       ])
     }
-    window.sendCounted = (msg) =>
-      counted.channel
-        .send(msg, { ack: true })
+    window.sendCounted = (msg, name = '') =>
+      counted
+        .get(name)!
+        .channel.send(msg, { ack: true })
         .catch((err: unknown) => (err instanceof Error ? err.message : String(err)))
-    window.countedEnd = () => counted.end
+    window.countedEnd = (name = '') => counted.get(name)!.end
     window.abortWithUnsendable = async (reason, beforeOpen) => {
       const { id, channel } = await openChannel(() => onChannelAbortUnsendable(reason, beforeOpen))
       const err = await new Promise<unknown>((resolve) => channel.onClose(resolve))

@@ -1,4 +1,11 @@
-export { testAbortUnsendable, testSseOpenAnsweredWithHtml, testSseRefusals, testSseRecoveryRefused, testChannel }
+export {
+  testAbortUnsendable,
+  testSseOpenAnsweredWithHtml,
+  testSseRefusals,
+  testSseRecoveryRefused,
+  testSseStalledChannel,
+  testChannel,
+}
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Page, Request, Response, WebSocket, WebSocketRoute } from 'playwright-chromium'
@@ -1624,13 +1631,22 @@ function isSseRequest(request: Request, which: 'opens' | 'posts'): boolean {
 }
 const isSseUrl = (url: URL) => url.pathname.endsWith('/_telefunc') && url.searchParams.get('_telefunc') === 'sse'
 
-/** Opens a channel whose server counts its messages, on a connection of its own, over `transports`. */
-async function openCounted(transports: ('sse' | 'ws')[]): Promise<string> {
-  const opened = await page.evaluate((transports) => window.openCounted!(transports), transports)
+/** Opens a channel whose server counts its messages, over `transports`, as `name`, on the connection of
+ *  `connectionKey`, else on one of its own. */
+async function openCounted(
+  transports: ('sse' | 'ws')[],
+  slot: { name?: string; connectionKey?: string } = {},
+): Promise<string> {
+  const opened = await page.evaluate(({ transports, slot }) => window.openCounted!(transports, slot), {
+    transports,
+    slot,
+  })
   if (!('id' in opened)) throw new Error(`The channel ended before it opened: ${opened.ended}`)
   return opened.id
 }
-const sendCounted = (msg: string) => page.evaluate((msg) => window.sendCounted!(msg), msg)
+const sendCounted = (msg: string, name?: string) =>
+  page.evaluate(({ msg, name }) => window.sendCounted!(msg, name), { msg, name })
+const countedEnd = (name?: string) => page.evaluate((name) => window.countedEnd!(name), name)
 /** What the server of `openCounted()`'s channel got, in order. */
 async function countedOf(id: string): Promise<string[]> {
   return JSON.parse((await getCleanupState())[`counted_${id}`] ?? '[]')
@@ -1670,7 +1686,7 @@ function testSseRefusals(isDev: boolean, inDocker = false) {
             expect(await countedOf(id)).deep.equal(['past a plain 409'])
           } else {
             void sendCounted('refused with a marked 409')
-            expect(await page.evaluate(() => window.countedEnd!())).toMatch(/server was updated since this page loaded/)
+            expect(await countedEnd()).toMatch(/server was updated since this page loaded/)
             expect(refused).toBe(1)
           }
         })
@@ -1739,7 +1755,7 @@ function testSseRecoveryRefused() {
     }
     await withRoute(isSseUrl, badGateway, async () => {
       await cutWire()
-      expect(await page.evaluate(() => window.countedEnd!())).toBe('Server rejected SSE connection with 502 text/html')
+      expect(await countedEnd()).toBe('Server rejected SSE connection with 502 text/html')
       expect(refused).greaterThanOrEqual(2)
     })
     expectLog('the server responded with a status of 502', { filter: (log) => log.logSource === 'Browser Error' })
@@ -1766,11 +1782,43 @@ function testSseRecoveryRefused() {
     }
     await withRoute(isSseUrl, badGatewayThenUpdated, async () => {
       await cutWire()
-      expect(await page.evaluate(() => window.countedEnd!())).toMatch(/server was updated since this page loaded/)
+      expect(await countedEnd()).toMatch(/server was updated since this page loaded/)
       expect(answers.slice(0, 2)).deep.equal([502, 409])
     })
     expectLog('the server responded with a status of 502', { filter: (log) => log.logSource === 'Browser Error' })
     expectLog('the server responded with a status of 409', { filter: (log) => log.logSource === 'Browser Error' })
+  })
+}
+
+/** A channel whose batch POSTs a proxy never lets through, beside one on the same connection whose POSTs it lets
+ *  through. Needs a short `reconnectTimeout`. */
+function testSseStalledChannel() {
+  test('channel: a channel whose batch POSTs never get through ends after reconnectTimeout, naming what the page saw, and the channel beside it on its connection goes on', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    const connectionKey = crypto.randomUUID()
+    await openCounted(['sse'], { name: 'stuck', connectionKey })
+    const besideId = await openCounted(['sse'], { name: 'beside', connectionKey })
+    let cut = 0
+    const cutStuck: Parameters<Page['route']>[1] = async (route) => {
+      const request = route.request()
+      if (!isSseRequest(request, 'posts') || !request.postDataBuffer()?.includes('never through'))
+        return route.fallback()
+      cut++
+      await route.abort()
+    }
+    await withRoute(isSseUrl, cutStuck, async () => {
+      const stuckEnd = countedEnd('stuck')
+      void sendCounted('never through', 'stuck')
+      // The first cut drops the wire; from the next, the stuck data goes in POSTs of its own and the wire stays.
+      await autoRetry(() => expect(cut).greaterThanOrEqual(2))
+      expect(await sendCounted('beside it', 'beside')).toBe('ack:beside it')
+      expect(await stuckEnd).toMatch(
+        /the server hasn't confirmed what the page sent on it for over 2 s of reconnects\. The last try: The request carrying it got no answer/,
+      )
+      expect(await sendCounted('after it ended', 'beside')).toBe('ack:after it ended')
+      expect(await countedOf(besideId)).deep.equal(['beside it', 'after it ended'])
+    })
+    expectLog('net::ERR_FAILED', { filter: (log) => log.logSource === 'Browser Error' })
   })
 }
 
