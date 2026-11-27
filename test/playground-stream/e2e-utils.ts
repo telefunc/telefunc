@@ -6,6 +6,8 @@ export {
   serverArrayBuffers,
   cutWire,
   dropNextWebSocket,
+  holdNextWebSocket,
+  closeAllConnections,
   runServerAction,
   holdNextSsePost,
   holdNextSseWire,
@@ -149,7 +151,18 @@ async function cutWire() {
 
 /** The server drops the page's next WebSocket before it opens, as a brief network drop would. */
 async function dropNextWebSocket() {
-  await fetch(`${getServerUrl()}/api/wire/next-websocket`, { method: 'POST' })
+  await fetch(`${getServerUrl()}/api/wire/next-websocket?action=drop`, { method: 'POST' })
+}
+
+/** The page's next WebSocket upgrade gets no answer, as behind a proxy that black-holes WebSockets. */
+async function holdNextWebSocket() {
+  await fetch(`${getServerUrl()}/api/wire/next-websocket?action=hold`, { method: 'POST' })
+}
+
+/** The server closes all its connections, as a shutdown does. */
+async function closeAllConnections() {
+  const resp = await fetch(`${getServerUrl()}/api/server/close-all-connections`, { method: 'POST' })
+  if (!resp.ok) throw new Error(`closeAllConnections() failed: ${await resp.text()}`)
 }
 
 /** The server hands the page's next SSE batch POST to Telefunc only at `releaseHeldSsePosts()`, and answers it then. */

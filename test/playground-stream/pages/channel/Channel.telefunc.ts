@@ -2,6 +2,7 @@ export {
   onChannelInit,
   onChannelAbortTest,
   onChannelAbortUnsendable,
+  onChannelCounted,
   onChannelPerSendAck,
   onChannelHookInstrument,
   onChannelBinary,
@@ -161,6 +162,19 @@ async function onChannelAbortTest() {
     ch.abort({ reason: 'test-abort', code: 42 })
   }, 400)
   return { channel: ch.client }
+}
+
+/** A channel whose server writes each message it gets to `cleanupState[`counted_${id}`]`, in order, and answers it. */
+async function onChannelCounted() {
+  const ch = new Channel<(msg: string) => string, never>()
+  const id = crypto.randomUUID()
+  const got: string[] = []
+  ch.listen((msg) => {
+    got.push(msg)
+    cleanupState[`counted_${id}`] = JSON.stringify(got)
+    return `ack:${msg}`
+  })
+  return { id, channel: ch.client }
 }
 
 /** A channel the server aborts, before or once its page opened it, with a reason it can't send: one JSON can't hold, or
