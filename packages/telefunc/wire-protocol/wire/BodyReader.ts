@@ -118,7 +118,7 @@ class BodyReader {
   /** Called once the source ends, read to its end. */
   onEnd?: () => void
 
-  /** Settles once the read-off has read the body to its end, or its client left: the client's upload is over. */
+  /** Settles once the read-off stops, however it does: at the body's end, at its client's leaving, or at a failed read. */
   get restRead(): Promise<void> {
     return this.readOffEnd.promise
   }
@@ -195,8 +195,7 @@ class BodyReader {
    *  reaches them fails, saying why. What is kept goes once no file is left to read. */
   keepRest(): void {
     if (this.readOff !== null || this.filesEndedBy !== null) return
-    if (this.unread.size > 0)
-      this.kept = { memory: this.memory(), chunks: [], refused: false, readAll: false, more: null }
+    if (this.unread.size > 0) this.kept = { memory: this.memory(), chunks: [], phase: 'reading', more: null }
     this.readOff = this.readRest()
     // A failure, the app's own error, goes to `endCall` or `discardRest`, which await the same read-off.
     this.readOff.catch(() => {})
@@ -220,7 +219,7 @@ class BodyReader {
       for (let chunk = await this.readChunk(); chunk !== null; chunk = await this.readChunk()) this.keep(chunk)
     } finally {
       if (this.kept !== null) {
-        this.kept.readAll = true
+        if (this.kept.phase === 'reading') this.kept.phase = 'finished'
         wakeKept(this.kept)
       }
       this.readOffEnd.resolve()
@@ -229,9 +228,9 @@ class BodyReader {
 
   private keep(chunk: Uint8Array<ArrayBuffer>): void {
     const kept = this.kept
-    if (kept === null || kept.refused) return
+    if (kept === null || kept.phase !== 'reading') return
     if (kept.memory.tryHold(chunk.length)) kept.chunks.push(chunk)
-    else kept.refused = true
+    else kept.phase = 'refused'
     wakeKept(kept)
   }
 
@@ -246,8 +245,8 @@ class BodyReader {
         kept.memory.letGo(chunk.length)
         return chunk
       }
-      if (kept.refused) throw this.droppedError(by)
-      if (kept.readAll) return this.readChunk()
+      if (kept.phase === 'refused') throw this.droppedError(by)
+      if (kept.phase === 'finished') return this.readChunk()
       kept.more ??= createDeferred()
       await kept.more.promise
     }
@@ -690,7 +689,7 @@ class FileRead {
     return this.phase === 'over'
   }
 
-  /** Whether the app read it: its stream was pulled. */
+  /** Whether it is in its started phase: its stream was pulled, and it isn't over yet. */
   get started(): boolean {
     return this.phase === 'started'
   }
@@ -761,13 +760,13 @@ class FileRead {
 }
 
 /** What the read-off keeps for the file reads: the chunks it read, in order, each held on `memory` until a file read
- *  takes it; whether `memory` refused one (`refused`: that chunk and every one after it were dropped); whether the
- *  read-off read the rest of the body (`readAll`); and what a file read that waits for its next chunk awaits (`more`). */
+ *  takes it; its `phase` (`refused`: `memory` refused a chunk, and that one and every one after it were dropped, for
+ *  good; `finished`: the read-off stopped, however it did, with every chunk it read kept); and what a file read that
+ *  waits for its next chunk awaits (`more`). */
 type Kept = {
   readonly memory: QueueMemory
   readonly chunks: Uint8Array<ArrayBuffer>[]
-  refused: boolean
-  readAll: boolean
+  phase: 'reading' | 'refused' | 'finished'
   more: Deferred<void> | null
 }
 
