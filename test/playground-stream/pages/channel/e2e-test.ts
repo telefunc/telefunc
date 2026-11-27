@@ -1700,6 +1700,7 @@ function testSseRefusals(isDev: boolean, inDocker = false) {
       for (const refusal of refusals)
         expect(refusal).toBe('400 text/vnd.telefunc.refusal; kind=route; reason="Malformed Telefunc Request"')
     })
+    expectLog('the server responded with a status of 400', { filter: (log) => log.logSource === 'Browser Error' })
     if (isDev) {
       expectLog('The `x-telefunc-request` header of the HTTP request is missing', {
         filter: (log) => log.logSource === 'stderr',
