@@ -1,4 +1,4 @@
-// Workaround: crossws 0.4.6's Node adapter gives `open` a peer whose `request` is another `Request` than the one its
+// Workaround: crossws's Node adapter gives `open` a peer whose `request` is another `Request` than the one its
 // `upgrade` hook got, built anew from `Host`. Without the upgrade's own object carried in the peer's context, `open`
 // finds nothing of what the upgrade hook decided by that request, and every Node WebSocket ends as it opens.
 // TODO: remove once https://github.com/h3js/crossws/commit/442ba0b23a204e8ce8d1445f3fb3b5fcb9768561 is released and Telefunc updates crossws.
