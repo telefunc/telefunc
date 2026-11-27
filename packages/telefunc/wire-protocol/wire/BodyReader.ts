@@ -219,6 +219,7 @@ class BodyReader {
     try {
       if (this.reading !== null) await this.reading.catch(() => {})
       if (this.kept === null) this.buffer = EMPTY
+      else this.dropGone()
       if (this.stop) return
       for (let chunk = await this.readChunk(); chunk !== null; chunk = await this.readChunk()) this.keep(chunk)
     } finally {
@@ -233,9 +234,50 @@ class BodyReader {
   private keep(chunk: Uint8Array<ArrayBuffer>): void {
     const kept = this.kept
     if (kept === null || kept.phase !== 'reading') return
-    if (kept.memory.tryHold(chunk.length)) kept.chunks.push(chunk)
-    else this.refuseKept(kept, this.bytesRead - chunk.length)
+    const skipped = this.holder === null ? this.skipGoneBytes(chunk.length) : 0
+    const length = chunk.length - skipped
+    if (length === 0) return
+    if (kept.memory.tryHold(length)) {
+      kept.chunks.push(skipped === 0 ? chunk : new Uint8Array(chunk.subarray(skipped)))
+    } else {
+      this.refuseKept(kept, this.bytesRead - length)
+    }
     wakeKept(kept)
+  }
+
+  /** Drops the buffered prefix of files that can no longer be read, while no pull holds the position. */
+  private dropGone(): void {
+    const kept = this.kept
+    if (kept === null || this.holder !== null || this.unread.has(this.next)) return
+    const skipped = this.skipGoneBytes(this.buffer.length)
+    if (skipped > 0) {
+      this.buffer = skipped === this.buffer.length ? EMPTY : new Uint8Array(this.buffer.subarray(skipped))
+    }
+    for (let chunk = kept.chunks[0]; chunk !== undefined; chunk = kept.chunks[0]) {
+      const skipped = this.skipGoneBytes(chunk.length)
+      if (skipped === 0) return
+      kept.memory.letGo(skipped)
+      if (skipped < chunk.length) {
+        kept.chunks[0] = new Uint8Array(chunk.subarray(skipped))
+        return
+      }
+      kept.chunks.shift()
+    }
+  }
+
+  /** Advances the file position across up to `length` bytes belonging to files that are gone. */
+  private skipGoneBytes(length: number): number {
+    let skipped = 0
+    while (!this.unread.has(this.next) && this.fileSizes.has(this.next)) {
+      const left = this.leftOfNext()
+      const take = Math.min(left, length - skipped)
+      skipped += take
+      this.left = left - take
+      if (this.left > 0) break
+      this.next++
+      this.left = undefined
+    }
+    return skipped
   }
 
   /** The read-off keeps no more from `end`, the body's offset where it stopped: what it keeps of the file there goes, as
@@ -332,6 +374,7 @@ class BodyReader {
     this.files.get(index)?.dropAhead()
     for (const callback of onGone) callback()
     if (this.unread.size === 0) this.dropKept()
+    else this.dropGone()
   }
 
   /**
@@ -527,6 +570,7 @@ class BodyReader {
   /** Lets go of the position, and wakes the reads that wait for it. */
   private release(): void {
     this.holder = null
+    this.dropGone()
     this.wake()
   }
 
