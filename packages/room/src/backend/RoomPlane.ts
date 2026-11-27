@@ -11,7 +11,7 @@ import {
 import type { EveryMemberLane, EveryTrackLane, LaneId, RoomDriver, RoomSubscriptionSource } from './contract.js'
 import { roomSubscriptionSourceKey } from './laneKey.js'
 import { assert } from '../utils/assert.js'
-import { CallStore, RoomStore, type RoomReads } from './RoomStore.js'
+import { RoomStore, type RoomReads } from './RoomStore.js'
 
 type RoomPlaneOptions = { driver: RoomDriver }
 
@@ -60,7 +60,7 @@ class RoomPlane {
   /** The value of `work`, a public call whose steps go through `store`; its answer is read at its close
    *  (`BackendCall.run`). */
   call<T>(work: (store: RoomStore) => Promise<T>): Promise<T> {
-    return BackendCall.run((account) => work(new CallStore(this.driver, this.reads, account)))
+    return BackendCall.run((account) => work(new RoomStore(this.driver, this.reads, account)))
   }
 
   subscribeLane(
