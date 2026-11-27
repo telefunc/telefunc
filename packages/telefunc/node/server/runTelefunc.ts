@@ -38,7 +38,7 @@ import { createRequestContext, type RequestContext } from './context/requestCont
 import type { ClientLeft } from './runTelefunc/clientLeft.js'
 import type { TakesUpgrades } from './runTelefunc/takesUpgrades.js'
 import { getChannelMux } from '../../wire-protocol/channel/server/ChannelMux.js'
-import { heldResponseBody, unholdOnceOver, type ResponseHold } from '../../workarounds/denoUploadResponseHold.js'
+import { heldResponseBody, type ResponseHold } from '../../workarounds/denoUploadResponseHold.js'
 
 type StreamWritableWeb = WritableStream
 type StreamReadableWeb = ReadableStream
@@ -278,9 +278,7 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
     // However the call ended: what its response still sends, a stream or a channel, holds the request from here on.
     requestContext.markComplete()
   }
-  const hold = requestContext.responseHold
-  if (hold) void unholdOnceOver(hold)
-  return createHttpResponse(response, hold)
+  return createHttpResponse(response, requestContext.responseHold)
 }
 
 async function runTelefunc_(

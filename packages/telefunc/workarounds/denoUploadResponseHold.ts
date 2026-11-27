@@ -9,7 +9,7 @@
 //   read of the body says the client left.
 // TODO: remove the signal's unhook once https://github.com/denoland/deno/pull/35733 is released and Telefunc drops
 // legacy abort mode, and the held body once a fix of https://github.com/denoland/deno/issues/36966 is released.
-export { holdUploadResponse, heldResponseBody, unholdOnceOver }
+export { holdUploadResponse, heldResponseBody }
 export type { ResponseHold }
 
 import { hasProp } from '../utils/hasProp.js'
@@ -27,11 +27,14 @@ function holdUploadResponse(request: Request, clientGone: AbortSignal, restRead:
   const abort = () => gone.abort(clientGone.reason)
   if (clientGone.aborted) abort()
   else clientGone.addEventListener('abort', abort, { once: true })
-  return {
+  const hold: ResponseHold = {
     over: Promise.race([restRead, aborted(gone.signal)]),
     clientGone: gone.signal,
     unheld: () => clientGone.removeEventListener('abort', abort),
   }
+  // Started before any held body waits on `over`, so the signal stops counting before the response ends.
+  void unholdOnceOver(hold)
+  return hold
 }
 
 /** `body`, which ends only once the hold is over. */
