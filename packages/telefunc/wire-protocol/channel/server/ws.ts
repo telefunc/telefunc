@@ -40,7 +40,8 @@ function getTelefuncChannelOptions({
     wholeMessages: true,
     copiesOnSend,
     bufferedAmount,
-    // A loss closes at once: a Durable Object peer's terminate() is a close handshake a vanished client never answers.
+    // A loss is terminated: the mux detaches the wire as it decides the loss, while a Durable Object's or Deno's
+    // terminate() only starts a close handshake, which a vanished client never answers.
     // An end the server decided closes with its refusal as the reason, after what the socket already holds and ahead of
     // what the wire's sender holds back, which goes with the wire.
     close: (peer, { refusal }) => {

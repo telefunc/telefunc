@@ -8,7 +8,8 @@ export { terminateDenoPeer, denoHooks }
 import type { Hooks, Peer } from 'crossws'
 import { assert } from '../utils/assert.js'
 
-/** Ends `peer` at once: Deno's `WebSocket` has no `terminate()`, so it is closed. */
+/** Ends `peer` with a close in place of `terminate()`, which Deno's `WebSocket` lacks: the socket enters `CLOSING`, and
+ *  its `close` comes once the handshake ends. */
 function terminateDenoPeer(peer: Peer): void {
   peer.close()
 }
