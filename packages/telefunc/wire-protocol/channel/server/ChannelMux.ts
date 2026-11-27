@@ -1,5 +1,15 @@
 export { ChannelMux, getChannelMux, hostLocal, CHANNEL_MUX }
-export type { Fault, WireEntry, ReconcileOutcome, ServerEnd, ServerTransport, SessionHold, Wire, WireClose }
+export type {
+  Fault,
+  WireEntry,
+  ReconcileOutcome,
+  ServerEnd,
+  ServerTransport,
+  SessionHold,
+  TakesUpgrades,
+  Wire,
+  WireClose,
+}
 
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
@@ -9,7 +19,6 @@ import { DeadlineTimer } from '../DeadlineTimer.js'
 import { GcRegistry } from '../../../utils/GcRegistry.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import type { TakesUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 import {
   CREDIT_MSG_WINDOW_MAX,
   CREDIT_WINDOW_MAX_BYTES,
@@ -62,6 +71,11 @@ import type { CallPage, MuxChannel } from './ServerChannel.js'
 /** A transport-owned wire handle. The mux never looks inside one — it only compares them by
  *  identity and hands them back to the transport that created it. */
 type Wire = unknown
+
+/** Whether the server a request arrived on takes WebSocket upgrades, asked each time the page that the request connected
+ *  is offered its transports: a Node server may get its upgrade listener, or lose it, later. Only the adapter that was
+ *  handed the request can say, as for `ClientLeft`. */
+type TakesUpgrades = () => boolean
 
 type ServerTransport<TWire> = {
   /** Stable per-wire id, or `null` for transports that don't multiplex client→server
