@@ -159,6 +159,38 @@ test('a failed chunk load rejects the call with ConnectionError, cancels its bod
   expect(ret).toHaveProperty('gen')
 })
 
+test('a failed chunk load two calls share rejects each with ConnectionError, or Abort for the one aborted as it fails', async () => {
+  const { call, withContext, ConnectionError } = await page()
+  const { onAbort } = await import('../../../client/remoteTelefunctionCall/onAbort.js')
+  let told = 0
+  onAbort(() => told++)
+  respond = streamed({ gen: GENERATOR })
+  const aborted: boolean[] = []
+  // Each microtask from the chunk's failure to the second call's rejection.
+  for (let ticks = 0; ticks <= 16; ticks++) {
+    told = 0
+    gates.streams = newGate()
+    failing.add('streams')
+    const controller = new AbortController()
+    const first = settledWithin(call([]), 1000)
+    const second = settledWithin(withContext(call, { signal: controller.signal })([]), 1000)
+    // Both calls wait for the same chunk load.
+    await vi.waitFor(() => expect(posts).toHaveLength(2 * (ticks + 1)))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    gates.streams.open()
+    void abortAfterTicks(controller, ticks)
+    expect(await first).toBeInstanceOf(ConnectionError)
+    const settled = await second
+    const message = `aborted after ${ticks} microtasks: ${String(settled)}`
+    expect(isAbort(settled) || settled instanceof ConnectionError, message).toBe(true)
+    expect(told, message).toBe(isAbort(settled) ? 1 : 0)
+    aborted.push(isAbort(settled))
+  }
+  // The abort lands both before the failure and after it.
+  expect(aborted.at(0)).toBe(true)
+  expect(aborted.at(-1)).toBe(false)
+})
+
 test.each([
   ['the channel', false],
   ['the generator', false],

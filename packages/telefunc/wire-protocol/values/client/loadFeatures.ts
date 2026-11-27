@@ -26,10 +26,17 @@ function loadedFeatures(): Features {
   return globalObject.loaded
 }
 
-/** Loads `features` for a call (see `callWaitsFor()`), each once per page; after a load that failed, the next call that
- *  needs it calls `import()` again. */
+/** Loads `features` for a call, each once per page: an abort rejects at once, as during the call's `fetch()`, and a load
+ *  that fails rejects with `ConnectionError`, as a call that can't reach its server does; the next call that needs it
+ *  calls `import()` again. */
 async function loadFeatures(features: Feature[], call: WaitingCall): Promise<Features> {
-  await callWaitsFor(call, () => Promise.all(features.map(loadFeature)))
+  await abortable(call, async () => {
+    try {
+      await Promise.all(features.map(loadFeature))
+    } catch {
+      throw new ConnectionError()
+    }
+  })
   return globalObject.loaded
 }
 
@@ -49,17 +56,6 @@ function loadedWithExtensions(features: Pick<Features, 'channels' | 'broadcasts'
 }
 
 type WaitingCall = { abortController: AbortController; telefunctionName: string; telefuncFilePath: string }
-
-/** A call waiting for the code it needs: an abort rejects at once, as during the call's `fetch()`, and a load that fails
- *  rejects as a call that can't reach its server does. */
-async function callWaitsFor<T>(call: WaitingCall, load: () => Promise<T>): Promise<Awaited<T>> {
-  try {
-    return await abortable(call, load)
-  } catch (err) {
-    if (call.abortController.signal.aborted) throw err
-    throw new ConnectionError()
-  }
-}
 
 function loadFeature(feature: Feature): Promise<void> {
   return (globalObject.loading[feature] ??= importFeature(feature))
