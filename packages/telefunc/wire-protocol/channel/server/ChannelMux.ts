@@ -368,6 +368,11 @@ class ChannelMux implements UpgradeStagesOwner {
     if (outcome.retiredWire !== null) this.wires.get(outcome.retiredWire)?.sender.send(encode.fin())
   }
 
+  /** The wire's socket sent what it held: what the ledger holds for the wire and the socket no longer holds goes. */
+  onWireDrain(wire: Wire): void {
+    this.wires.get(wire)?.sender.rebalanceMemory()
+  }
+
   /** The wire's transport saw it close: the mux forgets it. Returns the session the wire held, if it held one. */
   onWireClosed(wire: Wire, reason: WireClose): SessionHold | undefined {
     const entry = this.wires.get(wire)

@@ -52,7 +52,7 @@ function getTelefuncChannelOptions({
   // A hook's throw `ends` its peer where it isn't ending already: the mux's peer goes as a loss, through the mux's one
   // close, so that it can't cut an end already going. The upgrade hook has no guard: neither `readableHost()` nor
   // `upgradeRefusal()` throws, and the adapters' own `upgrade` builds the peer's context.
-  const hooks = defineHooks<Omit<Hooks, 'drain' | 'ping' | 'pong'>>({
+  const hooks = defineHooks<Omit<Hooks, 'ping' | 'pong'>>({
     upgrade: (request) => {
       const host = readableHost(request)
       if (host === null) return new Response(null, { status: 400 })
@@ -80,6 +80,7 @@ function getTelefuncChannelOptions({
       null,
     ),
     error: guardCrosswsHook((peer) => mux.onWireClosed(peer, 'transient'), null),
+    drain: guardCrosswsHook((peer) => mux.onWireDrain(peer), null),
   })
   return {
     hooks,
