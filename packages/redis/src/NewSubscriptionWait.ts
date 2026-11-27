@@ -25,8 +25,13 @@ type WaitRule = {
 }
 
 /** The sends of one queue, waiting for our new subscriptions on their channels; `refused` holds Redis's refusal of each
- *  channel it refused meanwhile. */
-type Wait = { readonly ready: Promise<void>; readonly refused: Map<string, unknown>; sends: number }
+ *  channel it refused meanwhile, and `passed` the channels its sends deliver on (their `failsOn`). */
+type Wait = {
+  readonly ready: Promise<void>
+  readonly refused: Map<string, unknown>
+  readonly passed: Set<string>
+  sends: number
+}
 
 /** The bytes of one budget's waiting sends, and the ledger's holder for them. */
 type WaitingBytes = { bytes: number; readonly memory: QueueMemory }
@@ -87,6 +92,7 @@ class NewSubscriptionWait {
     }
     wait ??= this.openWait(queue, channels)
     this.waits.set(queue, wait)
+    for (const channel of failsOn) wait.passed.add(channel)
     wait.sends++
     waiting.bytes += charged
     this.waitingBytes.set(budget, waiting)
@@ -122,22 +128,26 @@ class NewSubscriptionWait {
    *  leaves its queue at once, so the next send there doesn't join it. */
   private openWait(queue: string, channels: readonly string[]): Wait {
     const refused = new Map<string, unknown>()
+    const passed = new Set<string>()
     const leave = (channel: string, refusal: unknown) => {
       refused.set(channel, refusal)
       if (this.waits.get(queue) === wait) this.waits.delete(queue)
     }
-    const wait: Wait = { ready: this.whenReady(channels, leave), refused, sends: 0 }
+    const wait: Wait = { ready: this.whenReady(channels, passed, leave), refused, passed, sends: 0 }
     return wait
   }
 
+  /** Once ours on `channels` were ready once, or past SEND_WAIT_MS, where ours on the `passed` channels may have missed
+   *  the sends. */
   private async whenReady(
     channels: readonly string[],
+    passed: ReadonlySet<string>,
     onRefused: (channel: string, refusal: unknown) => void,
   ): Promise<void> {
     const timeout = createDeferred()
     const timer = unrefTimer(
       setTimeout(() => {
-        this.subscriptions.passedBySends(channels)
+        this.subscriptions.passedBySends([...passed])
         timeout.resolve()
       }, SEND_WAIT_MS),
     )

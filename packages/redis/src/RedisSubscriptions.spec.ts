@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDeferred, type DriverAttempt } from 'telefunc/__internal'
 import { assert } from './assert.js'
 import { slotOf, type FormerMaster, type RedisClient, type SubscriberSocket } from './ioredis.js'
-import { NewSubscriptionWait } from './NewSubscriptionWait.js'
+import { NewSubscriptionWait, type WaitingSend } from './NewSubscriptionWait.js'
 import { RedisSubscriptions } from './RedisSubscriptions.js'
 import type { Starts } from './orderRecord.js'
 
@@ -113,15 +113,19 @@ function setup(
       },
       reportMissed(count) {
         missed.push(count)
+        missedOn.push(channel)
       },
       holder,
     })
   const missed: Array<number | null> = []
+  /** The channel of each subscription that told it missed some, in `missed`'s order. */
+  const missedOn: string[] = []
   return {
     subscriptions,
     listen,
     delivered,
     missed,
+    missedOn,
     close: () => close(),
     publish: (channel: string, frame: Buffer) => publish(channel, frame),
     sends: new NewSubscriptionWait({ subscriptions }),
@@ -746,6 +750,40 @@ describe('a publish waiting on its key’s new subscriptions', () => {
 
       expect({ told, state: ready.state(), missed }).toEqual({ told: [null], state: 'ready', missed: [null] })
     })
+
+    for (const [waited, told] of [
+      ['a text publish', [TEXT]],
+      ['a text and a binary publish', [BINARY, TEXT]],
+    ] as const) {
+      it(`where ${waited} waited for both kinds, the subscription of each kind a publish went to tells it may have missed some`, async () => {
+        vi.useFakeTimers()
+        const { listen, sends, missedOn } = setup()
+        const textRead = createDeferred<Starts>()
+        const binaryRead = createDeferred<Starts>()
+        listen(TEXT, () => textRead.promise)
+        listen(BINARY, () => binaryRead.promise)
+        const waitings: WaitingSend<string>[] = [waitingHello(sends)]
+        if (told.length === 2) {
+          const binary = sends.waitTurn<string>(
+            { ...RULE, failsOn: [BINARY], budget: BINARY },
+            'bytes',
+            (payload) => payload,
+          )
+          assert(binary !== null)
+          waitings.push(binary)
+        }
+        await vi.advanceTimersByTimeAsync(60_000)
+        for (const waiting of waitings) {
+          await waiting.turn
+          waiting.sent()
+        }
+        textRead.resolve(none())
+        binaryRead.resolve(none())
+        await vi.advanceTimersByTimeAsync(0)
+
+        expect(missedOn.toSorted()).toEqual(told)
+      })
+    }
 
     it('a subscription ready before that tells of nothing missed', async () => {
       vi.useFakeTimers()
