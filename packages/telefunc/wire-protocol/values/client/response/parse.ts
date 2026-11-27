@@ -128,7 +128,7 @@ async function readText(response: Response, callContext: CallContext): Promise<s
       text += decoder.decode(value, { stream: true })
     }
   } catch (err) {
-    // A body that the abort errored, as a fetch's own does, ends the call as aborted; another failure lets the source go.
+    // Fetch can error the body on abort. For other failures, attempt cancellation and keep the read error.
     if (!signal.aborted) {
       cancel()
       throw err
