@@ -196,6 +196,11 @@ class RedisSubscriptions {
     return pending
   }
 
+  /** Sends that waited for each of ours on `channels` that was never ready yet went out before it was. */
+  passedBySends(channels: readonly string[]): void {
+    for (const channel of channels) for (const attempt of this.byChannel.get(channel) ?? []) attempt.passedBySends()
+  }
+
   /** Arms a delivery fence on the ready attempts of each channel the commit is published on: `delivery` settles
    *  once each saw the commit. */
   prepareFence(channels: CommitChannels): {
@@ -565,6 +570,8 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
   private early: LaneFrame[] = []
   /** A frame in another form was dropped and reported. */
   private foreignReported = false
+  /** Sends that waited for its first ready went out before it: that ready tells it may have missed some. */
+  private passedBySend = false
   private readonly firstReadiness = createDeferred()
   /** Settles on its first ready or its end. Rejects if it fails before either, for the sends waiting on it. */
   readonly firstReady: Promise<void> = this.firstReadiness.promise
@@ -645,6 +652,11 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
     return true
   }
 
+  /** Sends that waited for its first ready went out before it, if it is still to come. */
+  passedBySends(): void {
+    if (this.establishing) this.passedBySend = true
+  }
+
   /** `LaneRoute`: what a drop or the reorder wait passed by. */
   reportMissed(count: number): void {
     this.tell(count)
@@ -700,7 +712,8 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
       const follows = this.laneOf(laneKey).history.follows
       if (follows !== null && follows !== now) left.add(follows)
     }
-    let news = false
+    let news = this.passedBySend
+    this.passedBySend = false
     for (const history of left) news = this.holder.leaves(history, now) || news
     if (news) this.tell(null)
     for (const laneKey of lanes) {

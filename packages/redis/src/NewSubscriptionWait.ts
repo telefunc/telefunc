@@ -40,11 +40,12 @@ type NewSubscriptionWaitOptions = { subscriptions: RedisSubscriptions }
 /**
  * Our PUBLISH and COMMIT go out on the command connection, so one can reach Redis before the SUBSCRIBE our subscriber
  * connection sent just before it, and our own new subscription would miss it. So a send waits, at most SEND_WAIT_MS,
- * until our subscriptions on its channels were ready once, and a later send of its queue waits behind it. Each budget's
- * waiting sends are held on the server's memory ledger, within what `config.channel.maxMemory` admits, though one send
- * alone waits whatever its size. When Redis refuses a subscription it waits for, a send fails with that reason rather
- * than go out unseen by our own subscription; a send made after it has no subscription of ours to miss. A subscription
- * that ends any other way only ends the wait.
+ * until our subscriptions on its channels were ready once, and a later send of its queue waits behind it; past that, it
+ * goes out, and each of them tells once ready that it may have missed some. Each budget's waiting sends are held on the
+ * server's memory ledger, within what `config.channel.maxMemory` admits, though one send alone waits whatever its size.
+ * When Redis refuses a subscription it waits for, a send fails with that reason rather than go out unseen by our own
+ * subscription; a send made after it has no subscription of ours to miss. A subscription that ends any other way only
+ * ends the wait.
  */
 class NewSubscriptionWait {
   private readonly subscriptions: RedisSubscriptions
@@ -134,7 +135,12 @@ class NewSubscriptionWait {
     onRefused: (channel: string, refusal: unknown) => void,
   ): Promise<void> {
     const timeout = createDeferred()
-    const timer = unrefTimer(setTimeout(timeout.resolve, SEND_WAIT_MS))
+    const timer = unrefTimer(
+      setTimeout(() => {
+        this.subscriptions.passedBySends(channels)
+        timeout.resolve()
+      }, SEND_WAIT_MS),
+    )
     try {
       await Promise.race([this.readyOn(channels, onRefused), timeout.promise])
     } finally {

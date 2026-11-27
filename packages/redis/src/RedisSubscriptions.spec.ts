@@ -698,6 +698,71 @@ describe('a publish waiting on its key’s new subscriptions', () => {
     expect(binary.state()).toBe('ready')
   })
 
+  describe('for 60 s', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('goes out, and the subscription it waited for tells once ready that it may have missed some', async () => {
+      vi.useFakeTimers()
+      const { listen, sends, missed } = setup()
+      const read = createDeferred<Starts>()
+      const attempt = listen(TEXT, () => read.promise)
+      const waiting = waitingHello(sends)
+      const turn = waiting.turn.then((payload) => payload)
+      await vi.advanceTimersByTimeAsync(59_999)
+      const early = await Promise.race([turn, Promise.resolve('waiting')])
+      await vi.advanceTimersByTimeAsync(1)
+      const sent = await turn
+      waiting.sent()
+      read.resolve(none())
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect({ early, sent, state: attempt.state(), missed }).toEqual({
+        early: 'waiting',
+        sent: 'hello',
+        state: 'ready',
+        missed: [null],
+      })
+    })
+
+    it('a subscription on its channel that was ready already tells nothing, then or at its next resume', async () => {
+      vi.useFakeTimers()
+      const { subscriptions, listen, sends, missed, close } = setup()
+      const frames = { fanIn: false, placed: true, text: true, lanesEndWithMembers: false }
+      const ready = listen(TEXT, async () => none(), frames, 'ready')
+      await Promise.all(subscriptions.establishingOn([TEXT]))
+      const read = createDeferred<Starts>()
+      listen(TEXT, () => read.promise, frames, 'new')
+      const waiting = waitingHello(sends)
+      await vi.advanceTimersByTimeAsync(60_000)
+      await waiting.turn
+      waiting.sent()
+      read.resolve(none())
+      await vi.advanceTimersByTimeAsync(0)
+      const told = [...missed]
+      close()
+      await vi.advanceTimersByTimeAsync(1_000)
+
+      expect({ told, state: ready.state(), missed }).toEqual({ told: [null], state: 'ready', missed: [null] })
+    })
+
+    it('a subscription ready before that tells of nothing missed', async () => {
+      vi.useFakeTimers()
+      const { listen, sends, missed } = setup()
+      const read = createDeferred<Starts>()
+      const attempt = listen(TEXT, () => read.promise)
+      const waiting = waitingHello(sends)
+      await vi.advanceTimersByTimeAsync(59_000)
+      read.resolve(none())
+      const sent = await waiting.turn
+      waiting.sent()
+      await vi.advanceTimersByTimeAsync(60_000)
+
+      expect({ sent, state: attempt.state(), missed }).toEqual({ sent: 'hello', state: 'ready', missed: [] })
+    })
+  })
+
   it('fails with the refusal when Redis refuses the subscription of its own kind it waits for', async () => {
     const { listen, sends } = setup(async (...channels) => {
       if (channels.includes(TEXT)) throw refusal()
