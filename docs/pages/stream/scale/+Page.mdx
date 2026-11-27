@@ -6,7 +6,7 @@ import { TelefuncStreamBeta } from '../../../components'
 If you use <Link href="/stream">Telefunc Stream</Link>, scaling Telefunc horizontally (multiple Node instances, multiple containers, multiple machines) adds two requirements:
 
 - **Sticky sessions** (so a reconnecting client returns to the same server instance) — your load balancer must route every request from a given client to the same instance.
-  > Required: every <Link href="/stream">stream</Link> needs this.
+  > Required for what a browser keeps open to its server-side state: a <Link href="/channel">`Channel`</Link>, a <Link href="/channel#new-broadcastchannel">`BroadcastChannel`</Link>, a <Link href="/room">room</Link> and a <Link href="/stream#callback">callback</Link>. A stream returned in one HTTP response, such as an `AsyncGenerator`, completes in that response, and a server-side `Broadcast.publish()` only needs the backend below.
 - **Cross-instance backend** (a <Link href="/channel#broadcast">broadcast</Link> or a <Link href="/room">room</Link> must reach subscribers on every server instance) — install one such as <Link href="/redis">`@telefunc/redis`</Link>.
   > Optional: this is required only for broadcasts and rooms.
 
@@ -23,31 +23,68 @@ A <Link href="/channel">`Channel`</Link> is a stateful connection. Its server-si
 ### Nginx — `ip_hash`
 
 ```nginx
+# Inside the http block, e.g. /etc/nginx/conf.d/my-app.conf
+
 upstream telefunc {
   ip_hash;
   server app1:3000;
   server app2:3000;
+}
+
+map $http_upgrade $connection_upgrade {
+  default upgrade;
+  '' close;
+}
+
+server {
+  listen 80;
+
+  location / {
+    proxy_pass http://telefunc;
+  }
+
+  location /_telefunc {
+    proxy_pass http://telefunc;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade; # WebSocket
+    proxy_set_header Connection $connection_upgrade;
+    proxy_buffering off; # SSE
+    proxy_read_timeout 1h;
+  }
 }
 ```
 
 ### HAProxy — cookie
 
 ```
+frontend web
+  mode http
+  bind :80
+  default_backend telefunc
+
 backend telefunc
+  mode http
+  timeout tunnel 1h
   cookie SERVERID insert indirect nocache
   server app1 app1:3000 check cookie app1
   server app2 app2:3000 check cookie app2
 ```
 
-> Sanity check: after deploying, open the browser network tab, refresh once, and confirm every request to `/_telefunc` carries the same `SERVERID` cookie. If two consecutive requests carry different values, HAProxy isn't configured for sticky sessions.
-
 ### Caddy — `lb_policy cookie`
 
 ```
-reverse_proxy app1:3000 app2:3000 {
-  lb_policy cookie
+# Caddyfile
+
+example.com {
+  reverse_proxy app1:3000 app2:3000 {
+    lb_policy cookie
+  }
 }
 ```
+
+### Check it
+
+Have each instance answer with its name, for example in a response header, then open your app with the browser network tab open. The first `/_telefunc` call and every `/_telefunc` request after it show the same instance, including the ones after you switch the tab to **Offline** for a few seconds and back, which make the client reconnect. With HAProxy, the `SERVERID` cookie shows it too.
 
 ### AWS ALB — target-group stickiness
 

@@ -210,6 +210,7 @@ Pass your types to `Room.get()`, `Room.create()` or `Room.getOrCreate()`:
 // Chat.telefunc.ts
 // Environment: server
 
+import { Abort, getContext } from 'telefunc'
 import { Room } from '@telefunc/room'
 
 type RoomMeta = { topic: string }
@@ -217,6 +218,8 @@ type MemberMeta = { name: string }
 type Message = { text: string }
 
 export async function onGetChat(roomId: string) {
+  const { user } = getContext()
+  if (!(await canRead(user, roomId))) throw Abort()
   return await Room.get<RoomMeta, MemberMeta, Message>(roomId)
 }
 ```
@@ -404,9 +407,9 @@ me.onLeave((cause) => {
 
 The removed participant's page stops receiving the room: `room.isClosed` is `true` and `room.onClose()` runs with the removal's cause, unless the page holds another participant of the room. A page that never joined keeps receiving.
 
-> Removing doesn't keep anyone out: a telefunction that returns the room again lets them back in. Refuse them there, or in `onBeforeJoin()` (see <Link href="#control-who-can-join-and-post" />).
+> Removing doesn't keep anyone out: a telefunction that returns the room again lets them back in, and a returned room receives messages without joining. Refuse them in that telefunction, before `Room.get(roomId)`, as in <Link href="#control-who-can-join-and-post" />; `onBeforeJoin()` only refuses a join.
 
-A page that falls behind what the server can hold for it gets `'disconnected'`. Until then, it receives every message, join, leave, `meta` change and frame, except frames published with `lossy: true`, where it skips to the newest (see <Link href="#stream-audio-or-video" />).
+A page that falls behind what the server can hold for it gets `'disconnected'`. Until then, it receives every message, join, leave, `meta` change and frame, except messages and frames published with `lossy: true`, where it skips to the newest (see <Link href="#send-a-message-to-everyone" /> and <Link href="#stream-audio-or-video" />).
 
 
 ## Run a game loop or a bot on the server
@@ -488,7 +491,7 @@ for (const member of room.getParticipants()) watch(member)
 room.onJoin(watch)
 ```
 
-With `retain: isKeyframe`, a viewer who arrives mid-stream starts from the last keyframe, see <Link href="#give-late-joiners-the-current-state" />.
+With `retain: isKeyframe`, a viewer who arrives mid-stream receives the last keyframe first, or a newer frame when one reaches it first on a slow link: start its decoder at the first keyframe it receives (see <Link href="#give-late-joiners-the-current-state" />).
 
 On a track, `info.seq` counts its sender's frames on that track. A viewer that falls behind gets every frame, and gets `'disconnected'` where the server can't hold them for it. Where only the newest frame matters, such as a position or live audio and video, pass `lossy: true` in each publish on its track: a viewer that falls behind then skips to the newest frame, and its `info.seq` jumps over what it skipped:
 
@@ -561,7 +564,7 @@ await me.publish({ phase: 'voting' }, { retain: true })
 await me.publishBinary(keyframe, { track: 'camera', meta: { isKeyframe: true }, retain: true, lossy: true })
 ```
 
-A late joiner gets the room's last retained message, and each participant's last retained frame on each track, as long as its publisher is in the room. When a newer message or frame from that publisher arrives first, the late joiner gets only the newer one. For state that outlives the participants, such as a game phase, publish it from a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>.
+A late joiner gets the room's last retained message, and each participant's last retained frame on each track, as long as its publisher is in the room. When a newer message or frame from that publisher reaches the late joiner first, such as on a slow link, it gets only the newer one. For state that outlives the participants, such as a game phase, publish it from a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>.
 
 Adding another listener while the same room is already listening to that publisher or track doesn't replay its retained message or frame. A second component that needs it calls a telefunction that returns `Room.get(id)` and subscribes on the result, without joining.
 

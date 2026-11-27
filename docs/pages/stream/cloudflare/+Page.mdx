@@ -10,6 +10,13 @@ Use <Link href="/stream">Telefunc Stream</Link> on [Cloudflare Workers](https://
 
 ## Setup
 
+Install Telefunc, Vite, Cloudflare's Vite plugin and Wrangler:
+
+```bash
+npm install telefunc
+npm install --save-dev vite @cloudflare/vite-plugin wrangler
+```
+
 Add the Telefunc handler to your Worker:
 
 ```ts
@@ -79,7 +86,22 @@ export default defineConfig({
 })
 ```
 
-Then run `vite dev` to develop, and `vite build` followed by `wrangler deploy` to deploy. To check it works, serve the <Link href="/channel#new-channel">clock example</Link>.
+Add your page as `index.html`, next to `vite.config.ts`:
+
+```html
+<!-- index.html -->
+
+<!doctype html>
+<html>
+  <body>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
+```
+
+Vite serves it in development, and Cloudflare's Vite plugin deploys it with its scripts as the Worker's static assets, which Cloudflare serves before calling your Worker: the Worker only receives `/_telefunc` and your app's other routes.
+
+Then run `vite dev` to develop, and `vite build` followed by `wrangler deploy` to deploy. To check it works, put the <Link href="/channel#new-channel">clock example</Link>'s browser code in `main.ts`, and its telefunction in `Clock.telefunc.ts` next to it.
 
 > The Durable Object keeps each client's channels together and routes room and broadcast messages across regions. If your app doesn't use `Channel`, `Broadcast`, or `Room`, you can skip the binding and use <Link href="/serve"><code>serve()</code></Link> instead, keeping `enable_request_signal`. See <Link href="#architecture" /> for implementation details.
 

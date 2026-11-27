@@ -5,7 +5,7 @@ import { TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
-Use Redis to share <Link href="/channel#broadcast">broadcasts</Link> and <Link href="/room">rooms</Link> across your Telefunc servers: a `publish()` on one server reaches every `subscribe()` on every other server.
+Use Redis to share <Link href="/channel#broadcast">broadcasts</Link> and <Link href="/room">rooms</Link> across your Telefunc servers: a `publish()` on one server reaches every active `subscribe()` across your servers.
 
 > You only need this if you scale horizontally — see <Link href="/stream/scale" />.
 
