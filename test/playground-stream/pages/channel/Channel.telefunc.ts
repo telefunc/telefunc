@@ -1,6 +1,7 @@
 export {
   onChannelInit,
   onChannelAbortTest,
+  onChannelAbortUnsendable,
   onChannelPerSendAck,
   onChannelHookInstrument,
   onChannelBinary,
@@ -160,6 +161,26 @@ async function onChannelAbortTest() {
     ch.abort({ reason: 'test-abort', code: 42 })
   }, 400)
   return { channel: ch.client }
+}
+
+/** A channel the server aborts, before or once its page opened it, with a reason it can't send: one JSON can't hold, or
+ *  one past the 320 MiB a channel holds by default (`maxPendingBytes`). `cleanupState[`abortUnsendable_${id}`]` says what the `abort()` call did. */
+async function onChannelAbortUnsendable(reason: 'circular' | 'oversize', beforeOpen: boolean) {
+  const ch = new Channel<never, never>()
+  const id = crypto.randomUUID()
+  const abort = () => {
+    const circular: { self?: unknown } = {}
+    circular.self = circular
+    try {
+      ch.abort(reason === 'circular' ? circular : 'x'.repeat(320 * 1024 * 1024 + 1))
+      cleanupState[`abortUnsendable_${id}`] = 'returned'
+    } catch (err) {
+      cleanupState[`abortUnsendable_${id}`] = `threw ${err instanceof Error ? err.constructor.name : typeof err}`
+    }
+  }
+  if (beforeOpen) abort()
+  else ch.onOpen(abort)
+  return { id, channel: ch.client }
 }
 
 /**

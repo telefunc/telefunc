@@ -1,4 +1,4 @@
-export { testChannel }
+export { testAbortUnsendable, testSseOpenAnsweredWithHtml, testChannel }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Request, Response, WebSocket, WebSocketRoute } from 'playwright-chromium'
@@ -247,6 +247,10 @@ function testChannel(isDev: boolean, inDocker = false) {
       expect(state.serverAbortReceived!.abortValue).deep.equal({ reason: 'test-abort', code: 42 })
     })
   })
+
+  testAbortUnsendable()
+
+  if (channelTransports[0] === 'sse') testSseOpenAnsweredWithHtml()
 
   // ── abort(result) from telefunc/client — abort semantics on all channels ──
 
@@ -1586,6 +1590,49 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
     expect(await bugs()).deep.equal(bugsBefore)
     expectLog('the server responded with a status of 400', { filter: (log) => log.logSource === 'Browser Error' })
+  })
+}
+
+/** A first SSE open answered with a page of HTML, as an app's SPA fallback answers it. */
+function testSseOpenAnsweredWithHtml() {
+  test('channel: a first SSE open answered with a page of HTML ends the channel at once, naming what it got', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    const isSseOpen = (url: URL) => url.pathname.endsWith('/_telefunc') && url.searchParams.get('_telefunc') === 'sse'
+    await page.route(isSseOpen, async (route) => {
+      if (route.request().headers().accept !== 'text/event-stream') return route.fallback()
+      await route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><p>The app</p>' })
+    })
+    try {
+      expect(await page.evaluate(() => window.openAckChannel!())).toBe(
+        'The server answered the SSE connection with 200 text/html, not an event stream',
+      )
+    } finally {
+      await page.unroute(isSseOpen)
+    }
+  })
+}
+
+/** The server's `abort()` of a reason it can't send. */
+function testAbortUnsendable() {
+  test("channel: a server abort(value) whose value can't be sent, as JSON can't hold it or it is past what a channel holds, also before the page opened the channel, throws, and the page ends with an Abort without it", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    for (const reason of ['circular', 'oversize'] as const) {
+      for (const beforeOpen of [false, true]) {
+        const ended = await page.evaluate(({ reason, beforeOpen }) => window.abortWithUnsendable!(reason, beforeOpen), {
+          reason,
+          beforeOpen,
+        })
+        expect({ reason, beforeOpen, isAbort: ended.isAbort, abortValue: ended.abortValue }).deep.equal({
+          reason,
+          beforeOpen,
+          isAbort: true,
+          abortValue: undefined,
+        })
+        const thrown = (await getCleanupState())[`abortUnsendable_${ended.id}`]
+        if (reason === 'oversize') expect(thrown).toBe('threw ChannelOverflowError')
+        else expect(thrown).toMatch(/^threw /)
+      }
+    }
   })
 }
 

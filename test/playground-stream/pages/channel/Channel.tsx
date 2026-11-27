@@ -22,6 +22,7 @@ import { Abort as TelefuncAbort, abort, ChannelOverflowError, close, withContext
 import {
   onChannelInit,
   onChannelAbortTest,
+  onChannelAbortUnsendable,
   onChannelPerSendAck,
   onChannelHookInstrument,
   onChannelBinary,
@@ -89,6 +90,13 @@ declare global {
     sendAcrossFlip?: () => Promise<unknown>
     /** Lets the send-order row go on. */
     sendOrderGo?: (value: unknown) => void
+    /** Opens a channel the server keeps open (`onChannelPerSendAck`): 'opened', or the message it ended with. */
+    openAckChannel?: () => Promise<string>
+    /** Opens a channel the server aborts with a reason it can't send (`onChannelAbortUnsendable`), and how it ended. */
+    abortWithUnsendable?: (
+      reason: 'circular' | 'oversize',
+      beforeOpen: boolean,
+    ) => Promise<{ id: string; isAbort: boolean; abortValue: unknown }>
   }
 }
 
@@ -524,6 +532,21 @@ function ChannelDemo() {
     setConnected(false)
     addLog('system', 'abort(result) called')
   }, [addLog])
+
+  useEffect(() => {
+    window.openAckChannel = async () => {
+      const { channel } = await openChannel(onChannelPerSendAck)
+      return new Promise<string>((resolve) => {
+        channel.onOpen(() => resolve('opened'))
+        channel.onClose((err) => resolve(err instanceof Error ? err.message : String(err)))
+      })
+    }
+    window.abortWithUnsendable = async (reason, beforeOpen) => {
+      const { id, channel } = await openChannel(() => onChannelAbortUnsendable(reason, beforeOpen))
+      const err = await new Promise<unknown>((resolve) => channel.onClose(resolve))
+      return { id, isAbort: err instanceof TelefuncAbort, abortValue: (err as { abortValue?: unknown }).abortValue }
+    }
+  }, [])
 
   const testServerAbort = useCallback(async () => {
     addLog('system', 'Starting server-abort test...')
