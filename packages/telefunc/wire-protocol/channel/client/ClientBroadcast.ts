@@ -124,10 +124,12 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   protected override dispatchDataFrame(frame: ChannelDataFrame): void {
     if (frame.tag === TAG.PUBLISH) {
+      if (this.lossy) this.receiveCredit.confirmSoon()
       this.onPeerPublish(frame.text, frame.info, frame.bytes)
       return
     }
     if (frame.tag === TAG.PUBLISH_BINARY) {
+      if (this.lossy) this.receiveCredit.confirmSoon()
       this.onPeerPublishBinary(frame.data as Uint8Array<ArrayBuffer>, frame.info, frame.bytes)
       return
     }
@@ -156,7 +158,6 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     bytes: number,
   ): void {
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    if (this.lossy) this.receiveCredit.confirmSoon()
     for (const [i, { listener }] of listeners.entries()) {
       if (!listener) continue
       try {
