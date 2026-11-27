@@ -15,12 +15,11 @@ import type { Peer } from 'crossws'
 import { assert } from '../utils/assert.js'
 import { markRequestsOfServer } from './requestServer.js'
 import { putBackOwnCallback, upgradeOthersOnlyForTheirListeners } from '../workarounds/nodeShouldUpgradeCallback.js'
+import { carryUpgradeRequest } from '../workarounds/crosswsNodeRequest.js'
 
 declare module 'crossws' {
   interface PeerContext {
     socket?: Duplex
-    /** The request the upgrade hook got: crossws's Node peer carries another, which it builds from `Host`. */
-    request?: Request
   }
 }
 
@@ -38,9 +37,8 @@ let ws: ReturnType<typeof crossws> | undefined
 function webSocketAdapter(): ReturnType<typeof crossws> {
   ws ??= crossws(
     getTelefuncChannelOptions({
-      upgrade: (request) => ({ context: { socket: sockets.get(request), request } }),
+      ...carryUpgradeRequest((request) => ({ socket: sockets.get(request) })),
       send: sendInTaskWrite,
-      wireRequest: (peer) => peer.context.request,
     }),
   )
   return ws
