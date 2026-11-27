@@ -1604,22 +1604,26 @@ function testChannel(isDev: boolean, inDocker = false) {
   })
 }
 
-/** A first SSE open answered with a page of HTML, as an app's SPA fallback answers it. */
+/** A first SSE open answered with a page of HTML, as an app's SPA fallback answers it, or refused with a status. */
 function testSseOpenAnsweredWithHtml() {
-  test('channel: a first SSE open answered with a page of HTML ends the channel at once, naming what it got', async () => {
+  test('channel: a first SSE open answered with a page of HTML, or refused with 500, ends the channel at once, naming what it got', async () => {
     await navigate(`${getServerUrl()}/channel`)
-    await withRoute(
-      isSseUrl,
-      async (route) => {
-        if (!isSseRequest(route.request(), 'opens')) return route.fallback()
-        await route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><p>The app</p>' })
-      },
-      async () => {
-        expect(await page.evaluate(() => window.openAckChannel!())).toBe(
-          'The server answered the SSE connection with 200 text/html, not an event stream',
-        )
-      },
-    )
+    for (const [status, ended] of [
+      [200, 'The server answered the SSE connection with 200 text/html, not an event stream'],
+      [500, 'Server rejected SSE connection with 500 text/html'],
+    ] as const) {
+      await withRoute(
+        isSseUrl,
+        async (route) => {
+          if (!isSseRequest(route.request(), 'opens')) return route.fallback()
+          await route.fulfill({ status, contentType: 'text/html', body: '<!doctype html><p>The app</p>' })
+        },
+        async () => {
+          expect(await page.evaluate(() => window.openAckChannel!())).toBe(ended)
+        },
+      )
+    }
+    expectLog('the server responded with a status of 500', { filter: (log) => log.logSource === 'Browser Error' })
   })
 }
 
