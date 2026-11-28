@@ -63,7 +63,7 @@ import { UpgradeStages, type UpgradeStagesOwner } from './UpgradeStages.js'
 import { SessionRegistry, type ChannelHandle, type Session } from './SessionRegistry.js'
 import { AwaitedChannels, expireAwaited, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
 import { RegistrationWaits } from './RegistrationWaits.js'
-import type { CallPage, ServerChannel } from './ServerChannel.js'
+import type { ServerChannel } from './ServerChannel.js'
 
 /** A transport-owned wire handle. The mux never looks inside one — it only compares them by
  *  identity and hands them back to the transport that created it. */
@@ -242,12 +242,10 @@ class ChannelMux implements UpgradeStagesOwner {
 
   // ── Channel registry ──────────────────────────────────────────
 
-  /** Callers must not invoke `channel._registerChannel()` directly. `page`: the page the channel's connect window
-   *  waits for, which shows it is on its way while it sends the call's body (`ATTACHABLE_NOW` where nothing is on its
-   *  way). `session`: the session of the call that carried it. */
-  registerChannel(channel: ServerChannel<any, any>, page: CallPage, session?: string): void {
+  /** Makes a channel available for the client to attach. */
+  registerChannel(channel: ServerChannel<any, any>, session?: string): void {
     // Registered before any waiter attaches it: its `onOpen` may end it, and it tells this mux when it does.
-    channel._registerChannel(page, this)
+    channel._registerChannel(this)
     this.channels.set(channel.id, { channel, session })
     // A channel that ended before a response carried it waits for its page, as any ended channel does.
     if (channel._phase === 'ended') this.ended.keep(channel, this.options.reconnectTimeout)

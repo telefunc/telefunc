@@ -200,7 +200,7 @@ export async function onUpload(file: File) => void) {
 
 ## Limitations
 
-Read file arguments in order to stream the upload. Unread files kept past a call's return share the server's queue budget (<Link href="/channel-config"><code>config.channel.maxMemory</code></Link>) while the client finishes uploading (a plain reply can stop a streaming upload early).
+File bytes flow directly from the HTTP stream to your code with zero internal buffering. This makes uploads memory-efficient — but there are two trade-offs:
 
 ### One-shot reads
 
@@ -239,13 +239,15 @@ await Promise.all([
 
 > You can skip this section — read it only if you're curious.
 
-Telefunc uses a custom binary protocol to stream file bytes as you read them.
+Telefunc uses a custom binary protocol — no multipart/form-data, no internal buffering.
 
 1. The client serializes the call into a binary request: metadata first, followed by raw file bytes.
-2. The server reads the metadata and creates `File`/`Blob` objects that reference the HTTP body stream.
+2. The server parses metadata and creates lazy `File`/`Blob` objects that **reference the HTTP body stream** without reading it.
 3. When your telefunction calls `file.stream()`, bytes are pulled directly from the HTTP stream on demand.
 
-You can stream large files to disk without loading the whole file into memory.
+File bytes only flow through memory when you read them — and if you stream to disk, memory consumption is constant regardless of file size.
+
+> When a call contains files, Telefunc automatically switches from JSON to a binary format that streams file bytes without buffering.
 
 
 ## See also

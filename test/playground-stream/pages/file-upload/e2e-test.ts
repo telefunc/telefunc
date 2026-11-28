@@ -1,12 +1,12 @@
 export { testFileUpload }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult, serverRuntime, sleep } from '../../e2e-utils'
+import { navigate, getResult, serverRuntime } from '../../e2e-utils'
 import { Agent, request } from 'node:http'
 import { request as requestOverTls } from 'node:https'
 
 // Calls sent as the Telefunc client sends a binary call (`x-telefunc-request: bin`, then
-// `[u32 metadata length][metadata][the files' bytes]`), for what no page does: a File read after its call.
+// `[u32 metadata length][metadata][the files' bytes]`).
 const telefuncFile = '/pages/file-upload/FileUpload.telefunc.ts'
 const encoder = new TextEncoder()
 
@@ -16,7 +16,7 @@ function binaryCall(name: string, size: number): Uint8Array<ArrayBuffer> {
     JSON.stringify({
       file: telefuncFile,
       name,
-      args: [`!TelefuncFile:${JSON.stringify({ index: 0, size, name: 'kept.txt', type: '', lastModified: 0 })}`],
+      args: [`!TelefuncFile:${JSON.stringify({ index: 0, size, name: 'upload.txt', type: '', lastModified: 0 })}`],
     }),
   )
   const body = new Uint8Array(4 + metadata.length + size)
@@ -84,7 +84,7 @@ function testFileUpload(isDev = false, inDocker = false) {
     })
   })
 
-  test('file upload: multiple files', async () => {
+  test('file upload: multiple files read in parallel', async () => {
     await page.click('#test-multiple')
     await autoRetry(async () => {
       const result = await getResult('#upload-result')
@@ -149,10 +149,12 @@ function testFileUpload(isDev = false, inDocker = false) {
     })
   })
 
-  test('file upload: the second file cancelled while the first still arrives, the third reads its own bytes', async () => {
+  test('file upload: cancelling a partially read first file and an unread second file leaves the third intact', async () => {
     await page.click('#test-cancel-second')
     await autoRetry(async () => {
       const result = await getResult('#upload-result')
+      expect(result.firstBytes).greaterThan(0)
+      expect(result.firstBytes).lessThan(16 * 1024 * 1024)
       expect(result.text3).toBe('CCC')
     })
   })
@@ -308,29 +310,16 @@ function testFileUpload(isDev = false, inDocker = false) {
     })
   })
 
-  test('file upload: a call that returns a Channel and never reads its 32 MiB File is answered, and its channel opens on the page', async () => {
-    await page.click('#test-channel-unread-file')
-    await autoRetry(
-      async () => {
-        const result = await getResult('#upload-result')
-        expect(result).deep.equal({ received: 'open' })
-      },
-      { timeout: 10_000 },
-    )
-  })
-
-  test('file upload: a File its telefunction keeps and reads once the call is answered and its body read off to the end is read whole', async () => {
-    const kept = await post('bin', binaryCall('onKeepFile', 1000))
-    expect(kept.status).toBe(200)
-    // The whole body came with the call, so the read-off that follows its answer has read it to the end: the File keeps
-    // its bytes past its call.
-    await sleep(500)
+  test('file upload: reading a discarded file after its call ends reports server truncation', async () => {
+    const ignored = await post('bin', binaryCall('onLeaveFileUnread', 1000))
+    expect(ignored.status).toBe(200)
+    expect(ignored.text).toContain('ignored')
     const read = await post(
       'txt',
-      JSON.stringify({ file: telefuncFile, name: 'onReadKeptFile', args: [] }),
-      kept.cookie,
+      JSON.stringify({ file: telefuncFile, name: 'onReadDiscardedFile', args: [] }),
+      ignored.cookie,
     )
-    expect(read.text).toContain('read 1000 bytes')
+    expect(read.text).toContain('The server answered before reading the request body to its end')
   })
 
   test('file upload: a binary call whose body ends before its envelope is complete is refused as malformed (400)', async () => {

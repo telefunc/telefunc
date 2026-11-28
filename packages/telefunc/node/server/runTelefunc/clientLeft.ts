@@ -8,7 +8,7 @@ import { hasProp } from '../../../utils/hasProp.js'
  *  received the request can say: the adapter that was handed it passes its runtime's evidence (`serve/node.ts`,
  *  `serve/bun.ts`, `serve/deno.ts`), and with it `clientGone`, a signal that aborts once its client left and only then
  *  (on Deno, `request.signal` while the response is open: `Deno.serve` in its legacy abort mode also aborts it at the
- *  response's end, which workarounds/denoUploadResponseHold.ts holds off). */
+ *  response's end, see workarounds/denoUploadResponseHold.ts). */
 type ClientLeft = (err: unknown) => boolean | null
 
 /** A `Request` handed over without its transport, as an app or a framework built it: nothing Telefunc can read says who

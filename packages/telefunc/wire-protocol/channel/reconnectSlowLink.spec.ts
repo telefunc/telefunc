@@ -7,7 +7,7 @@ import { createServer, type Server } from 'node:http'
 import net, { type Socket } from 'node:net'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
-import { ATTACHABLE_NOW, ServerChannel } from './server/ServerChannel.js'
+import { ServerChannel } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { WireLifecycle } from './client/WireLifecycle.js'
 import { getChannelMux } from './server/ChannelMux.js'
@@ -114,7 +114,7 @@ for (const channels of [1, 1_000])
         }
         const ends = Array.from({ length: channels }, () => {
           const channel = new ServerChannel<string, string>()
-          getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
+          getChannelMux().registerChannel(channel)
           return channel
         })
         for (const channel of ends) pages.push(new ClientChannel<string, string>({ channelId: channel.id, connection }))
@@ -156,7 +156,7 @@ test('over a WebSocket, a page that handed 600 kB on a fast link that then drops
       connectionKey: crypto.randomUUID(),
     }
     const lead = new ServerChannel<string, string>()
-    getChannelMux().registerChannel(lead, ATTACHABLE_NOW)
+    getChannelMux().registerChannel(lead)
     const leadPage = new ClientChannel<string, string>({ channelId: lead.id, connection })
     pages.push(leadPage)
     const lifecycle = register.mock.contexts.at(-1)
@@ -175,7 +175,7 @@ test('over a WebSocket, a page that handed 600 kB on a fast link that then drops
       network.slow()
       const joined = Array.from({ length: 100 }, () => {
         const channel = new ServerChannel<string, string>()
-        getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
+        getChannelMux().registerChannel(channel)
         pages.push(new ClientChannel<string, string>({ channelId: channel.id, connection }))
         return channel
       })
@@ -202,9 +202,9 @@ test("over a WebSocket on a link that drops to 400 kbit/s, a page's join behind 
       connectionKey: crypto.randomUUID(),
     }
     const [lead, neighbour] = [new ServerChannel<string, string>(), new ServerChannel<string, string>()]
-    getChannelMux().registerChannel(lead, ATTACHABLE_NOW)
+    getChannelMux().registerChannel(lead)
     const leadPage = new ClientChannel<string, string>({ channelId: lead.id, connection })
-    getChannelMux().registerChannel(neighbour, ATTACHABLE_NOW)
+    getChannelMux().registerChannel(neighbour)
     pages.push(leadPage, new ClientChannel<string, string>({ channelId: neighbour.id, connection }))
     const lifecycle = register.mock.contexts.at(-1)
     register.mockRestore()
@@ -217,7 +217,7 @@ test("over a WebSocket on a link that drops to 400 kbit/s, a page's join behind 
       void neighbour.sendBinary(new Uint8Array(1_000_000), { ack: false })
       const joined = Array.from({ length: 10 }, () => {
         const channel = new ServerChannel<string, string>()
-        getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
+        getChannelMux().registerChannel(channel)
         pages.push(new ClientChannel<string, string>({ channelId: channel.id, connection }))
         return channel
       })
@@ -244,7 +244,7 @@ test('over a WebSocket at 400 kbit/s, a channel that exchanges numbered messages
       connectionKey: crypto.randomUUID(),
     }
     const lead = new ServerChannel<string, string>()
-    getChannelMux().registerChannel(lead, ATTACHABLE_NOW)
+    getChannelMux().registerChannel(lead)
     const leadPage = new ClientChannel<string, string>({ channelId: lead.id, connection })
     pages.push(leadPage)
     const lifecycle = register.mock.contexts.at(-1)
@@ -261,7 +261,7 @@ test('over a WebSocket at 400 kbit/s, a channel that exchanges numbered messages
     network.slow()
     const joined = Array.from({ length: 1_000 }, (_, ix) => {
       const channel = new ServerChannel<string, string>({ id: `${crypto.randomUUID()}-${ix}`.padEnd(256, 'x') })
-      getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
+      getChannelMux().registerChannel(channel)
       pages.push(new ClientChannel<string, string>({ channelId: channel.id, connection }))
       return channel
     })
@@ -306,7 +306,7 @@ test("over a WebSocket at 400 kbit/s, a page downloading 1 MB joins 1,000 channe
       connectionKey: crypto.randomUUID(),
     }
     const lead = new ServerChannel<string, string>()
-    getChannelMux().registerChannel(lead, ATTACHABLE_NOW)
+    getChannelMux().registerChannel(lead)
     const leadPage = new ClientChannel<string, string>({ channelId: lead.id, connection })
     pages.push(leadPage)
     const lifecycle = register.mock.contexts.at(-1)
@@ -325,7 +325,7 @@ test("over a WebSocket at 400 kbit/s, a page downloading 1 MB joins 1,000 channe
       void lead.sendBinary(new Uint8Array(LARGE), { ack: false })
       const joined = Array.from({ length: 1_000 }, () => {
         const channel = new ServerChannel<string, string>()
-        getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
+        getChannelMux().registerChannel(channel)
         pages.push(new ClientChannel<string, string>({ channelId: channel.id, connection }))
         return channel
       })
@@ -369,7 +369,7 @@ for (const burst of [false, true])
       }
       const ends = Array.from({ length: 1_000 }, () => {
         const channel = new ServerChannel<string, string>()
-        getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
+        getChannelMux().registerChannel(channel)
         pages.push(new ClientChannel<string, string>({ channelId: channel.id, connection }))
         return channel
       })

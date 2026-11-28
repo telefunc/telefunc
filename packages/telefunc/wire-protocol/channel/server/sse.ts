@@ -17,7 +17,6 @@ import { parseSseRequestMetadata, type SseRequestMetadata } from '../../wire/env
 import { OversizeFrameError, BodyReader, StreamTruncatedError } from '../../wire/BodyReader.js'
 import { getChannelMux } from './ChannelMux.js'
 import { EventStream } from './EventStream.js'
-import { queueMemory } from './channelMemory.js'
 import type { Fault, ReconcileOutcome, ServerTransport, SessionHold, TakesUpgrades, WireClose } from './ChannelMux.js'
 import { channelOf, encode } from '../../wire/frame.js'
 import { HEADER } from '../../wire/header.js'
@@ -102,7 +101,7 @@ class SseServerTransport {
     // and should answer with a Node `Readable` so it pipes straight to the socket. Web
     // adapters get `request.body` (no `readable`) and want a `ReadableStream` back.
     const useNodeStream = readable !== undefined
-    const reader = new BodyReader(source, clientLeft, queueMemory)
+    const reader = new BodyReader(source, clientLeft)
     let metadata: SseRequestMetadata
     try {
       const rawMetadata = await reader.readFrame(SSE_METADATA_MAX_BYTES)
@@ -162,7 +161,7 @@ class SseServerTransport {
       bodies: new Set([reader]),
     }
     this.mux.onWireOpen(wire, this.transport, takesUpgrades, request)
-    reader.onChunk = () => this.mux.onWireBytes(wire)
+    reader.onBytes = () => this.mux.onWireBytes(wire)
     this.resolvePendingWires(connId, wire)
     void this.runStreamResponse(wire, reader)
 
@@ -182,7 +181,7 @@ class SseServerTransport {
   private async handleStreamRequestPost(connId: string, reader: BodyReader): Promise<SseChannelHttpResponse> {
     const wire = await this.resolveWire(connId)
     if (!wire) return refuse(REFUSED.noWire)
-    reader.onChunk = () => this.mux.onWireBytes(wire)
+    reader.onBytes = () => this.mux.onWireBytes(wire)
     // The open-ack is the client's duplex probe (ACK ⇒ its upload bytes reached the server) and must
     // not wait on reconcile settlement, or a slow attach would falsely demote a healthy duplex wire to
     // sticky batch. Dispatch safety is owned by `runStreamResponse` releasing `ready` only after
@@ -227,7 +226,7 @@ class SseServerTransport {
   private async handleBatchPost(connId: string, reader: BodyReader): Promise<SseChannelHttpResponse> {
     const wire = await this.resolveWire(connId)
     if (!wire) return refuse(REFUSED.noWire)
-    reader.onChunk = () => this.mux.onWireBytes(wire)
+    reader.onBytes = () => this.mux.onWireBytes(wire)
     if (!(await this.waitReady(wire))) return refuse(REFUSED.notReady)
     const drain = this.drain(wire, reader, (outcome) => {
       if (shouldSendReconciled(outcome, wire)) this.mux.sendReconciled(outcome)

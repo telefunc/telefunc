@@ -1,4 +1,4 @@
-export { onBroadcastKeys, onUnreadSends, onKeptUpload, onUnreadEventStream, onHello }
+export { onBroadcastKeys, onUnreadSends, onUnreadEventStream }
 
 import { Channel, BroadcastChannel } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
@@ -60,30 +60,6 @@ function sendToUnread() {
   }
 }
 
-async function onKeptUpload(first: File, second: File, third: File) {
-  const reader = first.stream().getReader()
-  try {
-    const { value } = await reader.read()
-    if (!value?.length || value.length >= first.size) throw new Error('expected a partial read of the first file')
-    await reader.cancel()
-  } finally {
-    reader.releaseLock()
-  }
-  const channel = new Channel<(msg: 'answer' | 'second' | 'third') => string, never>()
-  channel.listen(async (msg) => {
-    if (msg === 'answer') return 'x'.repeat(512 * 1024)
-    try {
-      const bytes = new Uint8Array(await (msg === 'second' ? second : third).arrayBuffer())
-      return bytes.length === 768 * 1024 && bytes.every((byte, i) => byte === i % 251)
-        ? 'bytes match'
-        : `read ${bytes.length} bytes`
-    } catch (err) {
-      return err instanceof Error ? err.message : String(err)
-    }
-  })
-  return channel.client
-}
-
 /** A channel for a page of the test's own, which reads nothing of its event stream. How it ends goes in
  *  `cleanupState.unreadEventStream_<id>`; the test's `channelMemory` action puts what the server's channel memory holds,
  *  and the most it held since this call, in `cleanupState.channelMemory`. */
@@ -98,8 +74,4 @@ async function onUnreadEventStream() {
     { once: false },
   )
   return { channel: channel.client, channelId: id }
-}
-
-async function onHello() {
-  return 'hello'
 }

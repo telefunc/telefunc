@@ -6,7 +6,7 @@ import { serve as honoServe } from '@hono/node-server'
 import { Hono } from 'hono'
 import { Telefunc } from './node.js'
 import { getChannelMux } from '../wire-protocol/channel/server/ChannelMux.js'
-import { ServerChannel, ATTACHABLE_NOW } from '../wire-protocol/channel/server/ServerChannel.js'
+import { ServerChannel } from '../wire-protocol/channel/server/ServerChannel.js'
 import { ClientChannel } from '../wire-protocol/channel/client/ClientChannel.js'
 
 // Its own file, so its own process: on Node 22 the first `AsyncLocalStorage.run()` of a process turns on an async hook
@@ -48,7 +48,7 @@ test('an app on `serve({ request })` that calls `installWebSocket()` turns on no
   expect(page).toBe('the app')
   const serverChannel = new ServerChannel<string, string>()
   serverChannel.listen((data) => `ack:${data}`)
-  getChannelMux().registerChannel(serverChannel, ATTACHABLE_NOW)
+  getChannelMux().registerChannel(serverChannel)
   const client = new ClientChannel<string, string>({
     channelId: serverChannel.id,
     connection: {

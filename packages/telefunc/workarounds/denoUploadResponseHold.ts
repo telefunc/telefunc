@@ -1,12 +1,8 @@
-// Workaround: two `Deno.serve` behaviors lose the upload of a call that answers before its upload is over. The hold
-// goes to each binary request on Deno whose `clientGone` is its own `request.signal`, a `node:http` framework's
-// `Request` too, whose response then ends only once its upload is over, as a browser's answer does anyway; a raw
-// `node:http` `serve({ readable })` passes its socket's signal, and is never held.
-// - In both signal modes, a streamed response that ends before the upload is over can stall the body's pending read
-//   and every later one (the issue below): a held streamed response ends only once the upload is over.
-// - Unless Deno runs with `--unstable-no-legacy-abort`, `request.signal`, the only sign its client left, also aborts at
-//   the response's end: once the upload is over, or a string answer went out, its aborts stop counting, and a failed
-//   read of the body says the client left.
+// Work around two Deno.serve behaviors when the response finishes while the upload is still open.
+// A streamed response can stall pending and later reads of the upload at EOF, so defer closing its stream until the
+// upload ends. A text response can carry channels the client needs to attach before reading from the upload.
+// In legacy abort mode, Deno can abort request.signal on a successful response. Ignore that signal once the upload
+// ends or a text response is sent. A failed body read can still report a disconnect.
 // TODO: remove the signal's unhook once https://github.com/denoland/deno/pull/35733 is released and Telefunc drops
 // legacy abort mode, and the held body once a fix of https://github.com/denoland/deno/issues/36966 is released.
 export { holdUploadResponse }

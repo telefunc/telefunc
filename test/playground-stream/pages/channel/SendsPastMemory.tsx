@@ -2,7 +2,7 @@ export { ChannelsQueued, AcksWaiting, initialSendsPastMemoryState, type SendsPas
 
 import React from 'react'
 import { onChannelAcksWaiting, onChannelsQueuedBeforeReturn } from './Channel.telefunc'
-import { onUnreadSends, onKeptUpload, onHello } from './SmallPendingExtra.telefunc'
+import { onUnreadSends } from './SmallPendingExtra.telefunc'
 import { openChannel } from './openChannel'
 
 type SendsPastMemoryState = {
@@ -12,14 +12,12 @@ type SendsPastMemoryState = {
     | { error: string }
     | null
   unreadSends: { opened: true } | null
-  keptUpload: { next: string; answer: string; second: string; third: string } | null
 }
 
 const initialSendsPastMemoryState: SendsPastMemoryState = {
   channelsQueued: null,
   acksWaiting: null,
   unreadSends: null,
-  keptUpload: null,
 }
 
 type Show = (state: Partial<SendsPastMemoryState>) => void
@@ -82,7 +80,6 @@ function AcksWaiting({ show }: { show: Show }) {
         10,000 Acknowledged Sends Wait For Their Answers
       </button>
       <UnreadSends show={show} />
-      <KeptUpload show={show} />
     </>
   )
 }
@@ -138,39 +135,6 @@ function UnreadSends({ show }: { show: Show }) {
       className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
     >
       Server Sends To A Page That Reads Nothing
-    </button>
-  )
-}
-
-function KeptUpload({ show }: { show: Show }) {
-  async function testKeptUpload() {
-    show({ keptUpload: null })
-    const channel = await openChannel(() =>
-      onKeptUpload(
-        new File([new Uint8Array(1536 * 1024).fill(1)], 'cancelled.bin'),
-        new File([new Uint8Array(768 * 1024).map((_, i) => i % 251)], 'kept.bin'),
-        new File([new Uint8Array(1536 * 1024).fill(3)], 'refused.bin'),
-      ),
-    )
-    const next = await onHello()
-    const answer = await channel.send('answer', { ack: true }).then(
-      (text) => `${text.length} bytes`,
-      (err: Error) => err.name,
-    )
-    const second = await channel.send('second', { ack: true }).catch((err: Error) => err.name)
-    const third = await channel.send('third', { ack: true }).catch((err: Error) => err.name)
-    channel.close()
-    show({ keptUpload: { next, answer, second, third } })
-  }
-
-  return (
-    <button
-      id="channel-test-kept-upload"
-      type="button"
-      onClick={testKeptUpload}
-      className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
-    >
-      Cancel The First File And Keep The Other Uploads
     </button>
   )
 }

@@ -1,6 +1,5 @@
 // The telefunctions of serve/deno.clientLeft.spec.ts, which its Deno server (deno.clientLeft.server.fixture.mjs) loads
-// as an app's: a call that keeps its File and returns a Channel, a plain call that reads its File after it returned; and
-// what each row's call saw, which the server reads in its own process (`seen`).
+// as an app's. The server reads what each call saw in its own process (`seen`).
 
 import { Channel } from '../wire-protocol/channel/server/ServerChannel.js'
 
@@ -14,13 +13,6 @@ export async function keepsFile(file, row, readAfterMs) {
   channel.onClose((err) => kept.set({ closed: `closed: ${err?.message ?? 'no error'}` }))
   if (readAfterMs !== null) setTimeout(() => readInto(kept, file), readAfterMs)
   return channel
-}
-
-/** Answers, and reads its File `readAfterMs` later: nothing holds the call past its answer. */
-export async function readsFileLater(file, row, readAfterMs) {
-  const kept = record(row, 'pending', 'no channel')
-  setTimeout(() => readInto(kept, file), readAfterMs)
-  return 'answered'
 }
 
 /** How `row`'s File read and channel ended: once neither is under way any more, or as they are `withinMs` from now. */

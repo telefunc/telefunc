@@ -15,6 +15,6 @@ function carryChannel<ClientToServer, ServerToClient>(
   // callbacks, and an `Abort()` in one aborts the response.
   channel._setResponseAbort(requestContext.responseAbort.abort)
   if (ServerBroadcast.isServerBroadcast(channel)) channel._carriedBy = requestContext.request
-  getChannelMux().registerChannel(channel, requestContext.page, getSessionToken(requestContext.request))
+  getChannelMux().registerChannel(channel, getSessionToken(requestContext.request))
   channel.onClose(requestContext.trackPending())
 }

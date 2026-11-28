@@ -55,7 +55,6 @@ type SmallPendingState = {
   } | null
   broadcastKeys: { publish: string; firstClosed: string; secondReceived: string[]; secondClosed: boolean } | null
   unreadSends: { opened: true } | null
-  keptUpload: { next: string; answer: string; second: string; third: string } | null
 }
 
 /** The channel page's state. */
@@ -368,26 +367,6 @@ function testSmallPending() {
           firstClosed: 'ChannelOverflowError',
           secondReceived: ['after the oversized publish'],
           secondClosed: false,
-        })
-      },
-      { timeout: 30_000 },
-    )
-  })
-
-  test('channel: a retained upload drops the cancelled first file and the refused tail, keeping the second file and room for an answer', async () => {
-    await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-kept-upload')
-    await autoRetry(
-      async () => {
-        const result = defined((await stateOf()).keptUpload, 'keptUpload')
-        expect({
-          ...result,
-          third: result.third.includes('the rest was dropped.') ? 'refused' : result.third,
-        }).deep.equal({
-          next: 'hello',
-          answer: `${512 * 1024} bytes`,
-          second: 'bytes match',
-          third: 'refused',
         })
       },
       { timeout: 30_000 },

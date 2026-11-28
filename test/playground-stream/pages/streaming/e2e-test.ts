@@ -333,38 +333,24 @@ function testStreaming(inDocker = false) {
     })
   })
 
-  // Half-duplex: browser withholds the response until upload completes,
-  // so progress updates arrive simultaneously on the client side.
-  // When full duplex is supported, client duration will exceed server duration
-  // and the assertion below should be inverted.
-  if (false)
-    test('streaming: upload with progress (half duplex)', async () => {
-      if (channelTransport === 'ws') {
-        return skip(
-          'WS transport returns the HTTP response before the request body is fully consumed, breaking lazy file streaming (ERR_CONNECTION_RESET)',
-        )
-      }
-
+  if (process.env.PUBLIC_ENV__STREAM_TRANSPORT === 'binary-inline') {
+    test('streaming: upload with progress reports the bytes read after a pause', async () => {
       await page.click('#test-upload-progress')
       await autoRetry(async () => {
         const result = await getResult('#streaming-result')
         expect(result.done).toBe(true)
-        expect(result.updates.length).greaterThanOrEqual(1)
-        const last = result.updates[result.updates.length - 1]
-        expect(last.bytesRead).toBe(10_000_000)
-        expect(last.totalSize).toBe(10_000_000)
-        expect(result.updates.length).greaterThan(1)
-        for (let i = 1; i < result.updates.length; i++) {
-          expect(result.updates[i].bytesRead).greaterThan(result.updates[i - 1].bytesRead)
-        }
-        const firstMs: number = result.updates[0].clientMs
-        const lastMs: number = result.updates[result.updates.length - 1].clientMs
-        // Half-duplex: browser buffers the full response before delivering any chunk,
-        // so both updates arrive nearly simultaneously on the client.
-        // Client duration must be less than server duration to prove no real-time delivery.
-        expect(lastMs - firstMs).lessThan(last.duration)
+        expect(
+          result.updates.map(({ bytesRead, totalSize }: { bytesRead: number; totalSize: number }) => [
+            bytesRead,
+            totalSize,
+          ]),
+        ).deep.equal([
+          [0, 10_000_000],
+          [10_000_000, 10_000_000],
+        ])
       })
     })
+  }
 
   if (process.env.PUBLIC_ENV__STREAM_TRANSPORT !== 'channel') {
     test('streaming: an unread returned stream past 1 MiB stops the other, until it is read too', async () => {

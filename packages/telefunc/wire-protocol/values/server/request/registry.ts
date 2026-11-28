@@ -59,7 +59,6 @@ function resolveDeferredRevivals(
     value: unknown
     close: () => Promise<void> | void
     abort: (abortError: AbortError) => void
-    onEnd?: (callback: () => void) => void
   }) => unknown,
 ): void {
   for (const entry of deferreds) {

@@ -48,8 +48,7 @@ function telefunc(): TelefuncServe {
       }
 
       // Deno.serve aborts `request.signal` once its client leaves while the response is open, and, in its legacy abort
-      // mode, at every response's end: workarounds/denoUploadResponseHold.ts holds a call's response until its upload
-      // is over.
+      // mode, at every response's end. See workarounds/denoUploadResponseHold.ts.
       const httpResponse = await serveRuntimeRequest(context ? { request, context } : { request }, {
         clientLeft: (err) => isDenoConnectionError(err, globalThis),
         clientGone: request.signal,

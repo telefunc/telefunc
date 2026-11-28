@@ -21,15 +21,12 @@ export {
   onUploadConcurrent,
   onUploadProps,
   onUploadIgnored,
-  onKeepFile,
-  onReadKeptFile,
-  onReturnChannelIgnoringFile,
+  onLeaveFileUnread,
+  onReadDiscardedFile,
   onIgnoreFile,
   onGreet,
   onTransferFirstFile,
 }
-
-import { Channel } from 'telefunc'
 
 const onUploadFile = async (file: File, description: string) => {
   const content = await file.text()
@@ -43,8 +40,7 @@ const onUploadFile = async (file: File, description: string) => {
 }
 
 const onUploadMultiple = async (file1: File, file2: File) => {
-  const text1 = await file1.text()
-  const text2 = await file2.text()
+  const [text1, text2] = await Promise.all([file1.text(), file2.text()])
   return {
     file1: { name: file1.name, content: text1 },
     file2: { name: file2.name, content: text2 },
@@ -137,10 +133,12 @@ const onUploadOutOfOrder = async (file1: File, file2: File) => {
   }
 }
 
-// The second file cancelled as it is asked for, before anything read the first: the third reads its own bytes
 const onUploadCancelSecond = async (file1: File, file2: File, file3: File) => {
   await file2.stream().cancel()
-  return { text3: await file3.text() }
+  const first = file1.stream().getReader()
+  const { value } = await first.read()
+  await first.cancel()
+  return { firstBytes: value?.byteLength ?? 0, text3: await file3.text() }
 }
 
 // The first file read after the second skipped it fails, and the third still reads its own bytes
@@ -245,30 +243,22 @@ const onUploadIgnored = async (_file1: File, _file2: File) => {
   return { ok: true }
 }
 
-// A File kept past its call, read by a later call: the rows that call these send the calls themselves (e2e-test.ts).
-let kept: File | undefined
+let unreadFile: File | undefined
 
-/** Answers without reading its File, which `onReadKeptFile` reads once this call is done. */
-const onKeepFile = async (file: File) => {
-  kept = file
-  return 'kept'
+const onLeaveFileUnread = async (file: File) => {
+  unreadFile = file
+  return 'ignored'
 }
 
-/** How the read of the File `onKeepFile` kept ends. */
-const onReadKeptFile = async () => {
-  if (!kept) return 'nothing kept'
-  return kept.text().then(
-    (text) => `read ${text.length} bytes`,
-    (err: unknown) => `failed: ${err instanceof Error ? err.message : String(err)}`,
-  )
-}
-
-/** Returns a Channel that says `open` once the page attaches, and never reads its File: the channel holds the call's
- *  request while it lives. */
-const onReturnChannelIgnoringFile = async (_file: File) => {
-  const channel = new Channel<never, string>()
-  void channel.send('open').catch(() => {})
-  return channel
+const onReadDiscardedFile = async () => {
+  const file = unreadFile
+  unreadFile = undefined
+  if (!file) return 'no file'
+  try {
+    return await file.text()
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err)
+  }
 }
 
 const onIgnoreFile = async (_file: File) => 'ignored'

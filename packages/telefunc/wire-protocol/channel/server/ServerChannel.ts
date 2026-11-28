@@ -1,5 +1,4 @@
-export { ATTACHABLE_NOW, Channel, ServerChannel }
-export type { CallPage }
+export { Channel, ServerChannel }
 
 const SERVER_CHANNEL_BRAND = Symbol.for('telefunc.ServerChannel')
 
@@ -125,19 +124,6 @@ type LossySend = { data: EntryData; held: number }
 type LossyBehind = { tag: typeof TAG.TEXT | typeof TAG.BINARY; data: EntryData; bytes: number; held: number }
 /** A send that waits for room, with the lossy send behind it, and how its promise settles if the channel ends first. */
 type WaitingSend = { wait: RoomWait<LossyBehind>; reject: (err: Error) => void }
-
-/** The page that is to attach to a channel its call returned, as the channel's `connectTtl` window waits for it: each
- *  chunk of the call's upload still arriving restarts the window, so a slow upload isn't taken for a page that left. */
-type CallPage = {
-  /** When the page last showed it is on its way (a `performance.now()` time): each byte of the call's upload is such a
-   *  sign. The window counts from the later of it and the channel's registration. */
-  lastSign: () => number
-  /** The window ran out: the page isn't coming, and what its call's upload still owes is given up on. */
-  neverCame: () => void
-}
-
-/** What a channel's registration takes where a page can attach at once: its call's upload, if any, has been sent. */
-const ATTACHABLE_NOW: CallPage = { lastSign: () => Number.NEGATIVE_INFINITY, neverCame: () => {} }
 
 type ChannelOptions = { ack?: boolean; id?: string }
 
@@ -619,10 +605,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.lossySends?.flush()
   }
 
-  /** @internal — Prepare channel state so the mux can register it. Called by
-   *  `ChannelMux.registerChannel`; external code should call that instead. `page`: the page the channel's connect
-   *  window waits for. */
-  _registerChannel(page: CallPage, mux?: ChannelMux): void {
+  /** @internal Registers the channel with its mux and starts its connect timeout. */
+  _registerChannel(mux?: ChannelMux): void {
     this.mux = mux ?? null
     if (this.peer || this.didRegister) return
     // Off the ledger until now: a channel whose telefunction threw never gets here, and just goes.
@@ -645,23 +629,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     if (this._phase === 'ended') return // the mux lets an ended channel go
     const { connectTtl } = getChannelConfig()
-    const registeredAt = performance.now()
-    // Each time it runs out, the window counts again from the page's last sign, until a whole one passed without any.
-    const waitForPage = (ms: number) => {
-      this.pageWait = unrefTimer(
-        setTimeout(() => {
-          this.pageWait = null
-          const waited = performance.now() - Math.max(registeredAt, page.lastSign())
-          if (waited < connectTtl) return waitForPage(connectTtl - waited)
-          page.neverCame()
-          this.shutdown(
-            new NetworkError('Channel timed out: no client connected within TTL after response was sent', true),
-            { pageGone: true },
-          )
-        }, ms),
-      )
-    }
-    waitForPage(connectTtl)
+    this.pageWait = unrefTimer(
+      setTimeout(() => {
+        this.pageWait = null
+        this.shutdown(
+          new NetworkError('Channel timed out: no client connected within TTL after response was sent', true),
+          { pageGone: true },
+        )
+      }, connectTtl),
+    )
   }
 
   /** @internal Attaches the page's wire. An ended channel only sends what it produced while no page was attached;

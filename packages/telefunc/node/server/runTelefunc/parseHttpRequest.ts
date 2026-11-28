@@ -29,7 +29,6 @@ import { buildShieldValidators, getArgumentShields, type ShieldLogConfig } from 
 import { toPathKey } from '../../../utils/pathKey.js'
 import type { Telefunction } from '../types.js'
 import { getServerExtensionTypes } from '../serverConfig.js'
-import { handleTelefunctionBug } from './validateTelefunctionError.js'
 import { holdUploadResponse } from '../../../workarounds/denoUploadResponseHold.js'
 import { node22AbortSignalLag } from '../../../workarounds/node22AbortSignalLag.js'
 
@@ -153,7 +152,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
           ...baseContext,
           validators: buildShieldValidators(shields[toPathKey(segments)] ?? {}, shieldCtx),
         }),
-        ({ value, close, abort, onEnd }) => {
+        ({ value, close, abort }) => {
           assert(isObjectOrFunction(value))
           // Holder side: the telefunction gets a GC-anchor wrapper; once it drops it, the
           // underlying channel/stream closes and the client releases the original.
@@ -164,11 +163,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
           // It must NOT be created per-request: a per-request closure hung on the (rooted) request context
           // pins that request's `envelope.args` via the V8 scope chain, so the stub is never collected.
           const forget = getGcRegistry().register(wrapper, close)
-          // Forgotten once nothing is left for `close` to do, so the scan doesn't wait for a collection to stop: at the
-          // value's end where it has one (a File's, once its bytes are gone, which may be past the call), else once the
-          // call's channels have closed.
-          if (onEnd) onEnd(forget)
-          else requestContext.onClose(forget)
+          requestContext.onClose(forget)
           requestContext.onCallFailed(close)
           requestContext.responseAbort.onAbort(abort)
           return wrapper
@@ -187,9 +182,8 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
 /** Reads the HTTP body and returns the metadata text plus the file handlers appropriate for the
  *  request kind. Binary requests frame files after the JSON envelope; text requests carry no files. A binary request
  *  whose metadata declares more than the server reads (`CALL_METADATA_MAX_BYTES`) is malformed, refused before any of its metadata is read,
- *  and so is one whose body ends before its envelope is complete. A
- *  binary request's body is read off to its end at the call's answer where a returned value holds the request
- *  (`keepRest`), else at its end (`readOffBody`), kept for the files a File can still read. */
+ *  and so is one whose body ends before its envelope is complete. When the request closes, the rest of the binary
+ *  body is drained so the connection can be reused. */
 async function readBody(
   request: Request,
   readable: Readable | undefined,
@@ -211,40 +205,28 @@ async function readBody(
       logParseError('The binary request ends before its envelope is complete.', runContext)
       return { isMalformedRequest: true }
     }
-    const reader = new BodyReader(source, clientLeft, queueMemory)
-    reader.onEnd = runContext.onBodyRead
+    const reader = new BodyReader(source, clientLeft)
     // On Deno, the hold keeps the response open until the upload is over (workarounds/denoUploadResponseHold.ts).
     const hold = holdUploadResponse(request, runContext.clientGone, reader.restRead)
     runContext.requestContext.responseHold = hold
     const clientGone = hold?.clientGone ?? runContext.clientGone
-    // While an unattached channel's upload is still arriving (for example on half-duplex clients that read the response
-    // only after the upload finishes), each chunk resets its connectTtl inactivity window. An upload that stops, at its
-    // end or as its client goes silent, leaves its last byte as the sign; one that stopped short for a whole connect
-    // window is given up on, with its files.
-    let lastByteAt = performance.now()
-    reader.onChunk = () => {
-      lastByteAt = performance.now()
-    }
-    runContext.requestContext.page = { lastSign: () => lastByteAt, neverCame: () => reader.clientGaveUp() }
-    // From the answer on, a read of the body may not end where its client leaves (Node no longer watches the request):
-    // the adapter's evidence says it. Watched again, it adds nothing.
     const leftByClient = () => reader.leftByClient(clientGone.reason)
-    const watchClient = () => {
-      clientGone.removeEventListener('abort', leftDuringCall)
-      if (clientGone.aborted) leftByClient()
-      else clientGone.addEventListener('abort', leftByClient, { once: true })
+    if (clientGone.aborted) leftByClient()
+    else clientGone.addEventListener('abort', leftByClient, { once: true })
+    const unwatch = () => clientGone.removeEventListener('abort', leftByClient)
+    reader.onEnd = () => {
+      unwatch()
+      runContext.onBodyRead?.()
     }
-    // While the call runs, the file reads end as the client leaves, once a read of the body under way took its failure.
-    const leftDuringCall = () => void giveUpOnceReadSettled(reader)
-    clientGone.addEventListener('abort', leftDuringCall, { once: true })
-    // Half-duplex clients deliver the answer only once they have sent the whole body: where a returned value holds the
-    // request on, the rest of the body is read now, and kept for the call's files within what the channels' memory
-    // allows.
-    runContext.requestContext.onAnswered(() => {
-      reader.keepRest()
-      watchClient()
+    runContext.requestContext.onClose(async () => {
+      // On Node 22.0 the socket's abort listeners run before its combined signal updates.
+      if (!clientGone.aborted) await node22AbortSignalLag()
+      try {
+        await reader.discardRest(clientGone.aborted ? 'client' : 'server')
+      } finally {
+        unwatch()
+      }
     })
-    runContext.requestContext.onClose(() => void readOffBody(reader, clientGone, watchClient))
     const metadata = await reader
       .readFrame(CALL_METADATA_MAX_BYTES)
       .catch((err: unknown): 'oversize' | StreamTruncatedError => {
@@ -277,41 +259,12 @@ async function readBody(
   return {
     isMalformedRequest: false,
     text,
-    registerFile: () => ({
-      stream: () =>
-        new ReadableStream<Uint8Array<ArrayBuffer>>({
-          start(controller) {
-            controller.error(new Error('No binary frame'))
-          },
-        }),
-      letGo() {},
-      onGone: (callback) => callback(),
-    }),
-  }
-}
-
-/** Ends the file reads of `reader`, whose client left, once the read of the body under way took its failure. */
-async function giveUpOnceReadSettled(reader: BodyReader): Promise<void> {
-  await reader.readSettled()
-  reader.clientGaveUp()
-}
-
-/** At the call's end, reads the rest of its body, kept for each File the app can still read and else dropped: a
- *  connection the client keeps alive carries its next request only after this one's body (Node's HTTP server parses it
- *  from there). On Node, the server's `requestTimeout` bounds the read; Bun and Deno let a client that trickles its body
- *  hold the connection as long as it sends, as they do without Telefunc. A failure that is the app's own error is a bug;
- *  a client that left ends it quietly. `watchClient`: from now on, the client's leaving ends the read. */
-async function readOffBody(reader: BodyReader, signal: AbortSignal, watchClient: () => void): Promise<void> {
-  // A client that left (on Node 22.0, the Node adapter's `AbortSignal.any()` signal says so only once its source's
-  // `abort` listeners ran, so the wait lets that dispatch finish) fails the read under way, which settles first to keep
-  // its own failure; an answered call's read may wait on the client, so it isn't awaited.
-  if (!signal.aborted) await node22AbortSignalLag()
-  if (signal.aborted) await reader.readSettled()
-  watchClient()
-  try {
-    await reader.endCall(signal.aborted ? 'client' : 'server')
-  } catch (err: unknown) {
-    handleTelefunctionBug(err)
+    registerFile: () => () =>
+      new ReadableStream<Uint8Array<ArrayBuffer>>({
+        start(controller) {
+          controller.error(new Error('No binary frame'))
+        },
+      }),
   }
 }
 

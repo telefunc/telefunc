@@ -88,13 +88,19 @@ type HttpResponseParts = {
   err?: unknown
 }
 
-/** The response. With a Deno upload's `hold`, a streamed body ends only once the upload is over; a string `body` tells
- *  the hold it went out. */
+/** A Deno upload may outlive its response. Keep actual response streams open until their uploads end. */
 function createHttpResponse(
   { statusCode, contentType, headers, body: responseBody, err }: HttpResponseParts,
   hold: ResponseHold | null,
 ): HttpResponse {
-  const sent = (): ResponseBody => (hold === null ? responseBody : hold.heldBody(getStreamReadableWeb(responseBody)))
+  const sent = (): ResponseBody => {
+    if (typeof responseBody === 'string') {
+      // The client needs the complete text response to attach channels that may still read the upload.
+      hold?.answeredAsString()
+      return responseBody
+    }
+    return hold === null ? responseBody : hold.heldBody(getStreamReadableWeb(responseBody))
+  }
   return {
     statusCode,
     headers: [...headers, ['Content-Type', contentType]],
