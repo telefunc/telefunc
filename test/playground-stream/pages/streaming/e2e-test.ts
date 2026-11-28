@@ -1,5 +1,6 @@
 export { testStreaming, testStreamingRequestContext }
 
+import { readFileSync } from 'node:fs'
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import {
   resetCleanupState,
@@ -31,15 +32,17 @@ function testStreaming(isDev: boolean, inDocker = false) {
   if (!isDev) {
     test("streaming: a call whose streams code can't load rejects with ConnectionError, and the next call loads it", async () => {
       await navigate(`${getServerUrl()}/streaming`)
-      // The hydrated page has the code it imports: the next chunk it asks for is the one a returned stream needs.
-      const chunk = /\/assets\/chunks\/[^/]+\.js$/
-      const requested: string[] = []
+      const manifest: Record<string, { file: string }> = JSON.parse(
+        readFileSync(new URL('./dist/nested/assets.json', import.meta.url), 'utf8'),
+      )
+      const streams = Object.entries(manifest).find(([key]) =>
+        key.endsWith('/wire-protocol/values/client/streams.js'),
+      )?.[1]
+      if (!streams) throw new Error('The manifest has no streams chunk')
+      let requests = 0
       await withRoute(
-        chunk,
-        (route) => {
-          requested.push(route.request().url())
-          return requested.length === 1 ? route.fulfill({ status: 503 }) : route.fallback()
-        },
+        `**/${streams.file}`,
+        (route) => (++requests === 1 ? route.fulfill({ status: 503 }) : route.fallback()),
         async () => {
           await page.click('#test-readable-stream')
           await autoRetry(async () => {
@@ -51,7 +54,7 @@ function testStreaming(isDev: boolean, inDocker = false) {
           })
         },
       )
-      expect(requested.filter((url) => url === requested[0]).length).toBe(2)
+      expect(requests).toBe(2)
       expectLog('the server responded with a status of 503')
     })
   }

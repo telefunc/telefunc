@@ -82,9 +82,9 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   })
 
   if (!isDev) {
-    test("a plain call's page loads no code for channels, broadcasts or streams, and the call loads no script", async () => {
-      const onDemand = onDemandCode('/pages/index')
-      // The page's code requests the call once it runs: each script it requests from then on is the call's.
+    test('a plain call loads no script and a stream-only call loads only streams code', async () => {
+      const { onDemand, streams } = onDemandCode('/pages/index')
+      // The page makes the plain call during hydration.
       const requested: string[] = []
       const onRequest = (request: { url(): string }) => {
         const { pathname } = new URL(request.url())
@@ -96,11 +96,17 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
         await autoRetry(async () => {
           expect(await page.textContent('body')).toContain('Welcome Eva')
         })
+        expect(requested.filter((script) => onDemand.has(script)).join(' ')).toBe('')
+        expect(requested.slice(requested.indexOf('/_telefunc')).join(' ')).toBe('/_telefunc')
+
+        await page.getByRole('button', { name: 'Read stream' }).click()
+        await autoRetry(async () => {
+          expect(await page.textContent('output')).toBe('hello stream')
+        })
+        expect([...new Set(requested.filter((script) => onDemand.has(script)))].sort()).deep.equal(streams)
       } finally {
         page.off('request', onRequest)
       }
-      expect(requested.filter((script) => onDemand.has(script)).join(' ')).toBe('')
-      expect(requested.slice(requested.indexOf('/_telefunc')).join(' ')).toBe('/_telefunc')
     })
 
     test('shield() generation', async () => {
@@ -141,7 +147,7 @@ type Chunk = { file: string; imports?: string[]; dynamicImports?: string[] }
 
 /** The scripts of channels, broadcasts and streams that Telefunc's client imports when a call needs them, by the page's
  *  client build (Vike's manifest): the page's own code imports none of them. */
-function onDemandCode(pageId: string): Set<string> {
+function onDemandCode(pageId: string) {
   const manifest: Record<string, Chunk> = JSON.parse(
     readFileSync(new URL('./dist/nested/assets.json', import.meta.url), 'utf8'),
   )
@@ -168,6 +174,15 @@ function onDemandCode(pageId: string): Set<string> {
       .sort()
       .join(' '),
   ).toBe('broadcasts.js channels.js streams.js')
-  for (const feature of features) expect(scripts.has(`/${chunk(feature).file}`)).toBe(false)
-  return new Set([...closure(features)].filter((script) => !scripts.has(script)))
+  const streamEntry = features.find((key) => key.endsWith('/wire-protocol/values/client/streams.js'))
+  if (!streamEntry) throw new Error('The manifest has no streams chunk')
+  const streamScripts = closure([streamEntry])
+  for (const feature of features) {
+    const file = `/${chunk(feature).file}`
+    expect(scripts.has(file)).toBe(false)
+    if (feature !== streamEntry) expect(streamScripts.has(file)).toBe(false)
+  }
+  const onDemand = new Set([...closure(features)].filter((script) => !scripts.has(script)))
+  const streams = [...streamScripts].filter((script) => onDemand.has(script)).sort()
+  return { onDemand, streams }
 }
