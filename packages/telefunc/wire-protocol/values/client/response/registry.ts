@@ -62,7 +62,7 @@ class ResponseValues {
 
         const type = responseType(wire, extensions)
         if (!type) return undefined
-        // An extension's value creates what its own client code loaded (`telefunc/__internal`).
+        // An extension's value creates what its own client code loaded.
         if ('feature' in type) {
           const features = (this.features ??= new Set())
           features.add(type.feature)
@@ -104,17 +104,14 @@ class ResponseValues {
 
 function responseType(wire: string, extensions: ClientResponseType[]): TagType | undefined {
   if (wire.startsWith(SERIALIZER_PREFIX_STEM)) {
-    const prefix = wire.slice(0, wire.indexOf(':') + 1)
-    if (isBuiltInPrefix(prefix)) return { prefix, feature: FEATURE_OF_PREFIX[prefix] }
+    const prefix = wire.slice(0, wire.indexOf(':') + 1) as BuiltInPrefix
+    if (Object.prototype.hasOwnProperty.call(FEATURE_OF_PREFIX, prefix)) {
+      return { prefix, feature: FEATURE_OF_PREFIX[prefix] }
+    }
   }
   for (const extension of extensions) {
     if (wire.startsWith(extension.prefix)) return { prefix: extension.prefix, extension }
   }
-}
-
-/** `prefix` is empty or starts with the stem, neither a name `Object.prototype` has. */
-function isBuiltInPrefix(prefix: string): prefix is BuiltInPrefix {
-  return prefix in FEATURE_OF_PREFIX
 }
 
 function builtInReviver<F extends Feature>(

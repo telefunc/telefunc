@@ -7,7 +7,6 @@ import type { ClientReviverContext, ReviverType, TypeContract } from '../../type
 import { setAbortController } from '../../../../client/abort.js'
 import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../../../../client/close.js'
 import {
-  abortable,
   makeAbortError,
   throwAbortError,
   throwBugError,
@@ -22,12 +21,12 @@ import { GcRegistry } from '../../../../utils/GcRegistry.js'
 import { STREAMING_ERROR_TYPE } from '../../../constants.js'
 import { getGlobalObject } from '../../../../utils/getGlobalObject.js'
 import { ResponseValues } from './registry.js'
+import { readTextResponse } from './readTextResponse.js'
 import { loadFeatures, loadedFeatures, loadedFeature } from '../loadFeatures.js'
 
 const globalObject = getGlobalObject('wire-protocol/values/client/response/parse.ts', {
   gcRegistry: new GcRegistry(),
 })
-const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype)
 
 // ===== Types =====
 
@@ -67,7 +66,7 @@ async function parseResponse(
     }
 
     // Text response: plain or channel-pump streaming (each streaming value owns its own channel).
-    const body = await readText(response, callContext)
+    const body = await readTextResponse(response, callContext)
     return await reviveResponse(body, callContext, connection, null)
   } catch (err) {
     for (const close of callContext.requestCloseHandlers) void closeOnFailure(close)
@@ -102,55 +101,6 @@ async function parseStreamedResponse(
     else body.cancel().catch(() => {})
     throw err
   }
-}
-
-/** A text body, read as `response.text()` reads it, but that the call's abort cancels: an app's `config.fetch` may
- *  return a body the call's signal doesn't end. */
-async function readText(response: Response, callContext: CallContext): Promise<string> {
-  const { body } = response
-  // `whatwg-fetch` and other Fetch polyfills give no body stream to cancel: an abort ends the wait for their `.text()`.
-  if (!body) return abortable(callContext, () => response.text())
-  // A reader checks only the lock, where `.text()` also refuses a body read before.
-  if (response.bodyUsed) throw new TypeError('Body has already been used')
-  const { signal } = callContext.abortController
-  const reader = body.getReader()
-  const cancel = () => {
-    reader.cancel().catch(() => {})
-  }
-  signal.addEventListener('abort', cancel, { once: true })
-  if (signal.aborted) cancel()
-  const decoder = new TextDecoder()
-  let text = ''
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (signal.aborted) break
-      if (done) return text + decoder.decode()
-      // The intrinsic tag getter checks the type of the array across realms.
-      if (Reflect.get(typedArrayPrototype, Symbol.toStringTag, value) !== 'Uint8Array') {
-        throw new TypeError('Response body chunks must be Uint8Array')
-      }
-      const { buffer } = value
-      if ((buffer as ArrayBuffer).detached) throw new TypeError('Response body chunk buffer is detached')
-      // TextDecoder in browsers requires a non-shared buffer.
-      const bytes =
-        !(buffer instanceof ArrayBuffer) && Object.prototype.toString.call(buffer) === '[object SharedArrayBuffer]'
-          ? new Uint8Array(value)
-          : value
-      text += decoder.decode(bytes, { stream: true })
-    }
-  } catch (err) {
-    // Fetch can error the body on abort. For other failures, attempt cancellation and keep the read error.
-    if (!signal.aborted) {
-      cancel()
-      throw err
-    }
-  } finally {
-    signal.removeEventListener('abort', cancel)
-    reader.releaseLock()
-  }
-  // The read ends early only on the call's abort.
-  throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, undefined)
 }
 
 // ===== Response revival =====

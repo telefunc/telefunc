@@ -1,5 +1,6 @@
 export { throwAbortError, throwIfAborted, abortable, makeAbortError, throwBugError, makeBugError }
 
+import { createDeferred } from '../../utils/createDeferred.js'
 import { createAbortError } from '../../shared/Abort.js'
 import { callOnAbortListeners } from './onAbort.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
@@ -36,14 +37,12 @@ async function abortable<T>(
 ): Promise<Awaited<T>> {
   throwIfAborted(call)
   const { signal } = call.abortController
-  let onAbort = () => {}
-  const aborted = new Promise<typeof ABORTED>((resolve) => {
-    onAbort = () => resolve(ABORTED)
-    signal.addEventListener('abort', onAbort, { once: true })
-  })
+  const aborted = createDeferred<typeof ABORTED>()
+  const onAbort = () => aborted.resolve(ABORTED)
+  signal.addEventListener('abort', onAbort, { once: true })
   let result: Awaited<T> | typeof ABORTED
   try {
-    result = await Promise.race([start(), aborted])
+    result = await Promise.race([start(), aborted.promise])
   } catch (err) {
     // A rejection that the abort caused ends the call as aborted.
     if (!signal.aborted) throw err
