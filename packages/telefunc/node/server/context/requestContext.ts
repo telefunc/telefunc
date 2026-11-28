@@ -7,7 +7,6 @@ import type { AbortError } from '../Abort.js'
 import { handleCallbackBug } from '../runTelefunc/validateTelefunctionError.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
-import type { ResponseHold } from '../../../workarounds/denoUploadResponseHold.js'
 
 const REQUEST_CONTEXT: unique symbol = Symbol.for('telefunc.requestContext')
 
@@ -39,8 +38,11 @@ type RequestContext = {
   onClose: (cb: () => void) => void
   /** Releases the call's own hold once it has answered. */
   markComplete: () => void
-  /** On Deno, keeps the response open until the call's binary upload ends. */
-  responseHold: ResponseHold | null
+  /** Lets an adapter hold the response open while it still needs the request to finish. */
+  responseHold: {
+    heldBody: (body: ReadableStream<Uint8Array<ArrayBuffer>>) => ReadableStream<Uint8Array<ArrayBuffer>>
+    answeredAsString: () => void
+  } | null
   /** Take a hold (a channel, a stream pump, an inline body) and return its one-shot release.
    *  onClose callbacks fire once no hold is left. */
   trackPending: () => () => void

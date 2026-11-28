@@ -2,7 +2,7 @@ export { blobDownloadReplacer }
 
 import type { StreamingReplacerType, BlobDownloadResponseContract, ServerReplacerContext } from '../../types.js'
 import { SERIALIZER_PREFIX_BLOB_DOWNLOAD } from '../../../constants.js'
-import { createStreamProducer } from './createStreamProducer.js'
+import { producerOfStream } from '../../producerOfStream.js'
 import { isBlobDownload, getBlobDownloadInternal } from '../../download.js'
 
 const blobDownloadReplacer: StreamingReplacerType<BlobDownloadResponseContract, ServerReplacerContext> = {
@@ -22,5 +22,5 @@ const blobDownloadReplacer: StreamingReplacerType<BlobDownloadResponseContract, 
     }
     return { metadata, close, abort }
   },
-  createProducer: (value) => createStreamProducer(getBlobDownloadInternal(value).stream),
+  createProducer: (value) => producerOfStream(getBlobDownloadInternal(value).stream),
 }

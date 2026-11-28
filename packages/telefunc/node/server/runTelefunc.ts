@@ -36,7 +36,6 @@ import {
 import { STREAM_TRANSPORT } from '../../wire-protocol/constants.js'
 import { createRequestContext, type RequestContext } from './context/requestContext.js'
 import { getChannelMux } from '../../wire-protocol/channel/server/ChannelMux.js'
-import type { ResponseHold } from '../../workarounds/denoUploadResponseHold.js'
 
 type StreamWritableWeb = WritableStream
 type StreamReadableWeb = ReadableStream
@@ -89,7 +88,7 @@ type HttpResponseParts = {
 /** A Deno upload may outlive its response. Keep actual response streams open until their uploads end. */
 function createHttpResponse(
   { statusCode, contentType, headers, body: responseBody, err }: HttpResponseParts,
-  hold: ResponseHold | null,
+  hold: RequestContext['responseHold'],
 ): HttpResponse {
   const sent = (): ResponseBody => {
     if (typeof responseBody === 'string') {

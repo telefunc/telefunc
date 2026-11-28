@@ -6,24 +6,13 @@
 // TODO: remove the signal's unhook once https://github.com/denoland/deno/pull/35733 is released and Telefunc drops
 // legacy abort mode, and the held body once a fix of https://github.com/denoland/deno/issues/36966 is released.
 export { holdUploadResponse }
-export type { ResponseHold }
 
 import { hasProp } from '../utils/hasProp.js'
-
-/** The hold of a Deno upload's response, over once the read-off of the body settles or its client left. */
-type ResponseHold = {
-  /** Aborts only for the client's leaving. */
-  clientGone: AbortSignal
-  /** `body`, ending only once the upload is over. */
-  heldBody: (body: ReadableStream<Uint8Array<ArrayBuffer>>) => ReadableStream<Uint8Array<ArrayBuffer>>
-  /** The answer goes out as a string, which ends at once: the request's signal stops counting. */
-  answeredAsString: () => void
-}
 
 /** On Deno, where `clientGone` is the request's own signal: the hold of its response until the upload's read-off
  *  settles (`restRead`) or its client left. Elsewhere, no hold: `clientGone` itself stays valid after the response, as a
  *  Node adapter's socket signal does, under Deno's `node:http` too. */
-function holdUploadResponse(request: Request, clientGone: AbortSignal, restRead: Promise<void>): ResponseHold | null {
+function holdUploadResponse(request: Request, clientGone: AbortSignal, restRead: Promise<void>) {
   if (!hasProp(globalThis, 'Deno', 'object') || clientGone !== request.signal) return null
   const gone = new AbortController()
   const abort = () => gone.abort(clientGone.reason)
@@ -35,7 +24,7 @@ function holdUploadResponse(request: Request, clientGone: AbortSignal, restRead:
   void unwatchOnceOver(over, unwatch)
   return {
     clientGone: gone.signal,
-    heldBody: (body) =>
+    heldBody: (body: ReadableStream<Uint8Array<ArrayBuffer>>) =>
       body.pipeThrough(new TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>({ flush: () => over })),
     answeredAsString: unwatch,
   }

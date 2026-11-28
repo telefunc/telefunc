@@ -13,7 +13,7 @@ import {
   validateTelefunctionError,
 } from '../../../../node/server/runTelefunc/validateTelefunctionError.js'
 import type { ResponseAbortSource } from '../../../../node/server/context/requestContext.js'
-import type { TelefuncId } from '../../../../node/server/runTelefunc/serializeTelefunctionResult.js'
+import type { TelefuncId } from '../../../../shared/TelefuncId.js'
 import { restoreContext } from '../../../../node/server/context/context.js'
 import type { Context } from '../../../../node/server/context/context.js'
 import { createPushReadable } from '../../../../utils/pushReadable.js'

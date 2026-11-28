@@ -1,7 +1,7 @@
 export { parseHttpRequest }
 
 import type { Readable } from 'node:stream'
-import { parseTransform, type Reviver } from '@brillout/json-serializer/parse'
+import { parseTransform } from '@brillout/json-serializer/parse'
 import { assertUsage, getProjectError, assert } from '../../../utils/assert.js'
 import { getTelefunctionKey } from '../../../utils/getTelefunctionKey.js'
 import { getRequestPathname } from '../../../utils/getUrlPathname.js'
@@ -108,33 +108,50 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
 
   // Routing must be known before the target telefunc module can load. Parse JSON structure only;
   // leave serializer-encoded values untouched until that module has registered its wire types.
-  const envelope = parseEnvelope(text, runContext)
-  if (envelope.isMalformedRequest) return envelope
+  let envelope: unknown
+  try {
+    envelope = JSON.parse(text)
+  } catch (err) {
+    logParseException(err, runContext)
+    return { isMalformedRequest: true }
+  }
+  if (!isRequestEnvelope(envelope, runContext)) return { isMalformedRequest: true }
 
-  const wants = wantsOf(envelope.raw)
+  const wants = wantsOf(envelope)
   if (wants === null) {
     logParseError('Telefunc request body has unexpected `wants`', runContext)
     return { isMalformedRequest: true }
   }
 
   return {
-    telefuncFilePath: envelope.telefuncFilePath,
-    telefunctionName: envelope.telefunctionName,
-    telefunctionKey: envelope.telefunctionKey,
+    telefuncFilePath: envelope.file,
+    telefunctionName: envelope.name,
+    telefunctionKey: getTelefunctionKey(envelope.file, envelope.name),
     wants,
     isSseRequest: false,
     isMalformedRequest: false,
     resolveRequest(telefunction) {
       const { requestTypes } = getServerExtensionTypes()
       const { reviver, deferreds } = createRequestReviver(requestTypes)
-      const resolvedEnvelope = transformEnvelope(envelope.raw, reviver, runContext)
-      if (resolvedEnvelope.isMalformedRequest) return resolvedEnvelope
+      let resolvedEnvelope: unknown
+      try {
+        resolvedEnvelope = parseTransform(envelope, { reviver })
+      } catch (err) {
+        logParseException(err, runContext)
+        return { isMalformedRequest: true }
+      }
+      if (!isRequestEnvelope(resolvedEnvelope, runContext)) return { isMalformedRequest: true }
+      const streamTransport = resolveStreamTransport(resolvedEnvelope, runContext.serverConfig.stream.transport)
+      const requestExtensions =
+        hasProp(resolvedEnvelope, 'extensions', 'object') && resolvedEnvelope.extensions !== null
+          ? (resolvedEnvelope.extensions as Record<string, Record<string, unknown>>)
+          : {}
       // Shield metadata is attached by the generated code at module load. It's absent only when
       // the telefunction has no declared shields — in that case we revive without validators.
       const shields = getArgumentShields(telefunction) ?? {}
       const shieldCtx = {
-        telefunctionName: resolvedEnvelope.telefunctionName,
-        telefuncFilePath: resolvedEnvelope.telefuncFilePath,
+        telefunctionName: resolvedEnvelope.name,
+        telefuncFilePath: resolvedEnvelope.file,
         shieldErrors: runContext.serverConfig.log.shieldErrors,
       }
       resolveDeferredRevivals(
@@ -164,8 +181,8 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
       return {
         isMalformedRequest: false,
         telefunctionArgs: resolvedEnvelope.args,
-        streamTransport: resolvedEnvelope.streamTransport,
-        requestExtensions: resolvedEnvelope.requestExtensions,
+        streamTransport,
+        requestExtensions,
       }
     },
   }
@@ -253,64 +270,14 @@ async function readBody(
   }
 }
 
-type Envelope =
-  | {
-      isMalformedRequest: false
-      telefuncFilePath: string
-      telefunctionName: string
-      telefunctionKey: string
-      raw: object
-      args: unknown[]
-      streamTransport: StreamTransport
-      requestExtensions: Record<string, Record<string, unknown>>
-    }
-  | { isMalformedRequest: true }
+type RequestEnvelope = { file: string; name: string; args: unknown[] }
 
-/** Parse only enough of the request envelope to route it. Serializer transformation happens after
- *  the target module loads, using the extension types registered by that module. */
-function parseEnvelope(text: string, runContext: RunContext): Envelope {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch (err: unknown) {
-    logParseException(err, runContext)
-    return { isMalformedRequest: true }
+function isRequestEnvelope(parsed: unknown, runContext: RunContext): parsed is RequestEnvelope {
+  if (hasProp(parsed, 'file', 'string') && hasProp(parsed, 'name', 'string') && hasProp(parsed, 'args', 'array')) {
+    return true
   }
-
-  return envelopeFrom(parsed, runContext)
-}
-
-function transformEnvelope(raw: object, reviver: Reviver, runContext: RunContext): Envelope {
-  let parsed: unknown
-  try {
-    parsed = parseTransform(raw, { reviver })
-  } catch (err: unknown) {
-    logParseException(err, runContext)
-    return { isMalformedRequest: true }
-  }
-
-  return envelopeFrom(parsed, runContext)
-}
-
-function envelopeFrom(parsed: unknown, runContext: RunContext): Envelope {
-  if (!hasProp(parsed, 'file', 'string') || !hasProp(parsed, 'name', 'string') || !hasProp(parsed, 'args', 'array')) {
-    logParseError('Telefunc request body has unexpected content', runContext)
-    return { isMalformedRequest: true }
-  }
-
-  return {
-    isMalformedRequest: false,
-    telefuncFilePath: parsed.file,
-    telefunctionName: parsed.name,
-    telefunctionKey: getTelefunctionKey(parsed.file, parsed.name),
-    raw: parsed,
-    args: parsed.args,
-    streamTransport: resolveStreamTransport(parsed, runContext.serverConfig.stream.transport),
-    requestExtensions:
-      hasProp(parsed, 'extensions', 'object') && parsed.extensions !== null
-        ? (parsed.extensions as Record<string, Record<string, unknown>>)
-        : {},
-  }
+  logParseError('Telefunc request body has unexpected content', runContext)
+  return false
 }
 
 /** The call's `wants`, of the page's broadcasts on all its connections: null where they're malformed. */

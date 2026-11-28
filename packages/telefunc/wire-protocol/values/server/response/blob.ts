@@ -2,7 +2,7 @@ export { blobReplacer }
 
 import type { StreamingReplacerType, BlobResponseContract, ServerReplacerContext } from '../../types.js'
 import { SERIALIZER_PREFIX_BLOB } from '../../../constants.js'
-import { createStreamProducer } from './createStreamProducer.js'
+import { producerOfStream } from '../../producerOfStream.js'
 
 const blobReplacer: StreamingReplacerType<BlobResponseContract, ServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_BLOB,
@@ -20,5 +20,5 @@ const blobReplacer: StreamingReplacerType<BlobResponseContract, ServerReplacerCo
     }
     return { metadata, close, abort }
   },
-  createProducer: (value) => createStreamProducer(value.stream() as ReadableStream<Uint8Array<ArrayBuffer>>),
+  createProducer: (value) => producerOfStream(value.stream() as ReadableStream<Uint8Array<ArrayBuffer>>),
 }

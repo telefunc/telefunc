@@ -598,7 +598,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** @internal Registers the channel with its mux and starts its connect timeout. */
-  _registerChannel(mux?: ChannelMux): void {
+  _registerChannel(mux?: ChannelMux, _request?: Request): void {
     this.mux = mux ?? null
     if (this.peer || this.didRegister) return
     // Off the ledger until now: a channel whose telefunction threw never gets here, and just goes.

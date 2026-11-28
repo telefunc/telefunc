@@ -217,9 +217,10 @@ class ChannelMux implements UpgradeStagesOwner {
   // ── Channel registry ──────────────────────────────────────────
 
   /** Makes a channel available for the client to attach. */
-  registerChannel(channel: ServerChannel<any, any>, session?: string): void {
+  registerChannel(channel: ServerChannel<any, any>, request?: Request): void {
     // Registered before any waiter attaches it: its `onOpen` may end it, and it tells this mux when it does.
-    channel._registerChannel(this)
+    channel._registerChannel(this, request)
+    const session = request && getSessionToken(request)
     this.channels.set(channel.id, { channel, session })
     // A channel that ended before a response carried it waits for its page, as any ended channel does.
     if (channel._phase === 'ended') this.ended.keep(channel, this.options.reconnectTimeout)

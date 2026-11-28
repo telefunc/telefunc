@@ -2,7 +2,7 @@ export { fileReplacer }
 
 import type { StreamingReplacerType, FileResponseContract, ServerReplacerContext } from '../../types.js'
 import { SERIALIZER_PREFIX_FILE } from '../../../constants.js'
-import { createStreamProducer } from './createStreamProducer.js'
+import { producerOfStream } from '../../producerOfStream.js'
 
 const fileReplacer: StreamingReplacerType<FileResponseContract, ServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_FILE,
@@ -22,5 +22,5 @@ const fileReplacer: StreamingReplacerType<FileResponseContract, ServerReplacerCo
     }
     return { metadata, close, abort }
   },
-  createProducer: (value) => createStreamProducer(value.stream() as ReadableStream<Uint8Array<ArrayBuffer>>),
+  createProducer: (value) => producerOfStream(value.stream() as ReadableStream<Uint8Array<ArrayBuffer>>),
 }

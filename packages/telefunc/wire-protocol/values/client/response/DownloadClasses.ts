@@ -39,7 +39,7 @@ class FileDownload extends LazyFile {
   }
 
   get loaded(): number {
-    return this.core.state.loaded
+    return this.core.loaded
   }
   onProgress(cb: DownloadProgress): void {
     this.core.onProgress(cb)
@@ -83,7 +83,7 @@ class BlobDownload extends LazyBlob {
   }
 
   get loaded(): number {
-    return this.core.state.loaded
+    return this.core.loaded
   }
   onProgress(cb: DownloadProgress): void {
     this.core.onProgress(cb)
@@ -121,7 +121,9 @@ class BlobDownload extends LazyBlob {
 /** Holds the state, source, and methods shared by FileDownload and BlobDownload —
  *  everything except `saveToMemory` (return type differs) and the brand. */
 class DownloadCore {
-  readonly state: ProgressState
+  loaded = 0
+  private readonly total: number | undefined
+  private readonly callbacks: DownloadProgress[] = []
   private readonly source: StreamSource
   private readonly name: string
   private readonly type: string
@@ -132,12 +134,17 @@ class DownloadCore {
     this.name = name
     this.type = type
     this.markConsumed = markConsumed
-    this.state = makeState(total)
+    this.total = total
   }
 
   onProgress(cb: DownloadProgress): void {
-    this.state.callbacks.push(cb)
-    if (this.state.loaded > 0) cb(this.state.loaded, this.state.total)
+    this.callbacks.push(cb)
+    if (this.loaded > 0) cb(this.loaded, this.total)
+  }
+
+  private readonly onChunk = (size: number): void => {
+    this.loaded += size
+    for (const cb of this.callbacks) cb(this.loaded, this.total)
   }
 
   cancel(): void {
@@ -148,7 +155,7 @@ class DownloadCore {
    *  cancel/truncation. Inherited `bytes`/`text`/`arrayBuffer` flow through this. */
   stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
     this.markConsumed()
-    return this.source.stream({ expectedSize: this.state.total, onChunk: (n) => this.state.fire(n) })
+    return this.source.stream({ expectedSize: this.total, onChunk: this.onChunk })
   }
 
   async saveToDisk(opts: { mode?: 'picker' | 'memory' | 'opfs' } = {}): Promise<File> {
@@ -160,42 +167,62 @@ class DownloadCore {
         throw new Error('saveToDisk({ mode: "picker" }) requires window.showSaveFilePicker')
       }
       const handle = await openPickerHandle(showPicker, this.name, this.type)
-      return pipeAndGetFile(this.source, this.state, handle)
+      return this.pipeAndGetFile(handle)
     }
     if (mode === 'opfs') {
-      return streamToOpfsThenTrigger(this.source, this.state, this.name)
+      return this.streamToOpfsThenTrigger()
     }
-    return bufferThenTrigger(this.source, this.state, this.name, this.type)
+    const bytes = await this.source.bytes({ expectedSize: this.total, onChunk: this.onChunk })
+    const file = new File([bytes.buffer], this.name, { type: this.type })
+    triggerDownload(file, this.name)
+    return file
   }
 
   async saveToOpfs(path?: string): Promise<File> {
     this.markConsumed()
     const finalPath = path ?? `__telefunc_opfs/${randomUuid()}${this.name ? `-${this.name}` : ''}`
     const handle = await openOpfsHandle(finalPath)
-    return pipeAndGetFile(this.source, this.state, handle)
+    return this.pipeAndGetFile(handle)
   }
-}
 
-// ─── Progress state ────────────────────────────────────────────────────────────────
-
-type ProgressState = {
-  loaded: number
-  total: number | undefined
-  callbacks: DownloadProgress[]
-  fire(chunkSize: number): void
-}
-
-function makeState(total: number | undefined): ProgressState {
-  const state: ProgressState = {
-    loaded: 0,
-    total,
-    callbacks: [],
-    fire(chunkSize) {
-      state.loaded += chunkSize
-      for (const cb of state.callbacks) cb(state.loaded, total)
-    },
+  /** Pipes the source's instrumented stream to a writable file handle, returns the
+   *  resulting disk-backed `File`. `pipeTo` auto-aborts the writable if the source errors
+   *  (consumer-cancel mid-flight or size mismatch — the source's `stream(opts)` errors
+   *  the stream) so no partial file is left on disk. */
+  private async pipeAndGetFile(handle: FileSystemFileHandle): Promise<File> {
+    const writable = await handle.createWritable()
+    await this.source.stream({ expectedSize: this.total, onChunk: this.onChunk }).pipeTo(writable)
+    return handle.getFile()
   }
-  return state
+
+  /** Streams `source` into a temp OPFS file, triggers a native browser download via blob URL,
+   *  schedules per-temp cleanup. Cross-browser fallback when `showSaveFilePicker` isn't
+   *  available. Returns the OPFS-backed `File` (valid until the cleanup timer fires —
+   *  enough for the browser to consume the blob URL).
+   *
+   *  Cleanup is per-temp only (no directory-wide wipe) — multiple tabs may have in-flight
+   *  downloads under the same `TEMP_DIR`, and a wipe would yank the rug from a sibling tab.
+   *  Cost: a tab crash before the timer fires leaks one OPFS file until storage-quota
+   *  eviction. The leak is browser-private and bounded. */
+  private async streamToOpfsThenTrigger(): Promise<File> {
+    const filename = this.name
+    const tempName = `${randomUuid()}-${filename || 'download'}`
+    const handle = await openOpfsHandle(`${TEMP_DIR}/${tempName}`)
+    let file: File
+    try {
+      file = await this.pipeAndGetFile(handle)
+    } catch (err) {
+      // Pipe failed (cancel/truncate/source error) — getFileHandle already created an empty
+      // entry on disk; remove it so we don't leak. Fire-and-forget; the original error wins.
+      void removeOpfsTemp(tempName)
+      throw err
+    }
+    triggerDownload(file, filename)
+    // Per-temp cleanup after the browser has had time to consume the blob URL — see file
+    // header for the multi-tab safety rationale (no directory-wide wipe).
+    setTimeout(() => void removeOpfsTemp(tempName), TEMP_RETENTION_MS)
+    return file
+  }
 }
 
 // ─── File-handle helpers ───────────────────────────────────────────────────────────
@@ -234,33 +261,8 @@ async function openPickerHandle(
 
 // ─── Pipe + cross-browser download trigger ─────────────────────────────────────────
 
-/** Pipes the source's instrumented stream to a writable file handle, returns the
- *  resulting disk-backed `File`. `pipeTo` auto-aborts the writable if the source errors
- *  (consumer-cancel mid-flight or size mismatch — the source's `stream(opts)` errors
- *  the stream) so no partial file is left on disk. */
-async function pipeAndGetFile(source: StreamSource, state: ProgressState, handle: FileSystemFileHandle): Promise<File> {
-  const writable = await handle.createWritable()
-  await source.stream({ expectedSize: state.total, onChunk: (n) => state.fire(n) }).pipeTo(writable)
-  return handle.getFile()
-}
-
 const TEMP_DIR = '__telefunc_temp'
 const TEMP_RETENTION_MS = 60_000
-
-/** Buffers the source fully into memory, builds a File from the bytes, triggers a native
- *  browser download via blob URL. Default `saveToDisk` fallback when no picker — RAM-bounded
- *  but no OPFS leak risk. */
-async function bufferThenTrigger(
-  source: StreamSource,
-  state: ProgressState,
-  filename: string,
-  type: string,
-): Promise<File> {
-  const bytes = await source.bytes({ expectedSize: state.total, onChunk: (n) => state.fire(n) })
-  const file = new File([bytes.buffer], filename, { type })
-  triggerDownload(file, filename)
-  return file
-}
 
 function triggerDownload(file: File, filename: string): void {
   const url = URL.createObjectURL(file)
@@ -269,34 +271,6 @@ function triggerDownload(file: File, filename: string): void {
   a.download = filename
   a.click()
   setTimeout(() => URL.revokeObjectURL(url), TEMP_RETENTION_MS)
-}
-
-/** Streams `source` into a temp OPFS file, triggers a native browser download via blob URL,
- *  schedules per-temp cleanup. Cross-browser fallback when `showSaveFilePicker` isn't
- *  available. Returns the OPFS-backed `File` (valid until the cleanup timer fires —
- *  enough for the browser to consume the blob URL).
- *
- *  Cleanup is per-temp only (no directory-wide wipe) — multiple tabs may have in-flight
- *  downloads under the same `TEMP_DIR`, and a wipe would yank the rug from a sibling tab.
- *  Cost: a tab crash before the timer fires leaks one OPFS file until storage-quota
- *  eviction. The leak is browser-private and bounded. */
-async function streamToOpfsThenTrigger(source: StreamSource, state: ProgressState, filename: string): Promise<File> {
-  const tempName = `${randomUuid()}-${filename || 'download'}`
-  const handle = await openOpfsHandle(`${TEMP_DIR}/${tempName}`)
-  let file: File
-  try {
-    file = await pipeAndGetFile(source, state, handle)
-  } catch (err) {
-    // Pipe failed (cancel/truncate/source error) — getFileHandle already created an empty
-    // entry on disk; remove it so we don't leak. Fire-and-forget; the original error wins.
-    void removeOpfsTemp(tempName)
-    throw err
-  }
-  triggerDownload(file, filename)
-  // Per-temp cleanup after the browser has had time to consume the blob URL — see file
-  // header for the multi-tab safety rationale (no directory-wide wipe).
-  setTimeout(() => void removeOpfsTemp(tempName), TEMP_RETENTION_MS)
-  return file
 }
 
 async function removeOpfsTemp(tempName: string): Promise<void> {

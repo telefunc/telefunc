@@ -2,7 +2,7 @@ export { fileDownloadReplacer }
 
 import type { StreamingReplacerType, FileDownloadResponseContract, ServerReplacerContext } from '../../types.js'
 import { SERIALIZER_PREFIX_FILE_DOWNLOAD } from '../../../constants.js'
-import { createStreamProducer } from './createStreamProducer.js'
+import { producerOfStream } from '../../producerOfStream.js'
 import { isFileDownload, getFileDownloadInternal } from '../../download.js'
 
 const fileDownloadReplacer: StreamingReplacerType<FileDownloadResponseContract, ServerReplacerContext> = {
@@ -24,5 +24,5 @@ const fileDownloadReplacer: StreamingReplacerType<FileDownloadResponseContract, 
     }
     return { metadata, close, abort }
   },
-  createProducer: (value) => createStreamProducer(getFileDownloadInternal(value).stream),
+  createProducer: (value) => producerOfStream(getFileDownloadInternal(value).stream),
 }

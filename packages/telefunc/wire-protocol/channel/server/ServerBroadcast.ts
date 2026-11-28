@@ -13,6 +13,7 @@ import type {
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 import { Outcome, makePublishInfo, neverOpened, stringifyValue, unsubscribeOf, type Unsubscribe } from '../channel.js'
 import { broadcastMessages } from '../channelMessages.js'
+import type { ChannelMux } from './ChannelMux.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import { getBroadcastAdapter } from '../../broadcast/broadcastAdapter.js'
@@ -74,8 +75,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private readonly broadcastListeners = new Listeners<BroadcastListener<T>>()
   private readonly broadcastBinaryListeners = new Listeners<BroadcastBinaryListener>()
   private adapter: BroadcastAdapter | null = null
-  /** @internal The request of the call that carried it, whose server its page is on till it attaches. */
-  _carriedBy: Request | undefined = undefined
+  private originRequest: Request | undefined
   /** Its subscription to the key's publishes on its backend, while its page or a subscriber of it wants them. */
   private textListening: Listening | null = null
   private binaryListening: Listening | null = null
@@ -400,9 +400,14 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     )
   }
 
-  /** The request whose server its page is on: its wire's, else, till its page attaches, the call's that carried it. */
+  override _registerChannel(mux?: ChannelMux, request?: Request): void {
+    this.originRequest = request
+    super._registerChannel(mux)
+  }
+
+  /** The request whose server its page is on: its wire's, or the call's that carried it. */
   private get ownerRequest(): Request | undefined {
-    return this.wireRequest ?? this._carriedBy
+    return this.wireRequest ?? this.originRequest
   }
 
   private get owner(): string | undefined {
@@ -557,6 +562,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   override _release(): void {
     this.owesAbort = false
     this.endedOn = null
+    this.originRequest = undefined
     super._release()
   }
 

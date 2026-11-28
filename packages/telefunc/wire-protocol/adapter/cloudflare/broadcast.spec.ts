@@ -1032,9 +1032,7 @@ describe('cloudflare broadcast routing', () => {
     const call = new Request('https://telefunc.test/_telefunc?session=page', { method: 'POST' })
     transport.attachRequest(call, 'telefunc-shard-weur-0')
     const broadcast = new ServerBroadcast<string>({ key: 'room:test' })
-    // As `carryChannel` registers the broadcast a call returns.
-    broadcast._carriedBy = call
-    getChannelMux().registerChannel(broadcast, 'page')
+    getChannelMux().registerChannel(broadcast, call)
     await getChannelMux().applyCallWants(call, [{ channel: broadcast.id, version: 1, text: true, binary: false }])
     expect(broadcast.isClosed).toBe(false)
     expect(kvWrites).toEqual([`put tfps:${encodeURIComponent('room:test')}:weur:telefunc-shard-weur-0`])

@@ -1,13 +1,14 @@
 export { producerOfStream }
 
+import { assertUsage } from '../../utils/assert.js'
 import type { StreamingProducer } from './types.js'
 
-/** The producer of `stream`'s chunks, each passed to `checkChunk`, if given, before it goes. The reader is taken at
+/** The producer of `stream`'s chunks, each validated by `checkChunk` before it goes. The reader is taken at
  *  once, so that `cancel()` can interrupt a pending `reader.read()`: `chunks.return()` alone can't resolve a suspended
  *  await. */
 function producerOfStream(
   stream: ReadableStream<Uint8Array<ArrayBuffer>>,
-  checkChunk?: (chunk: unknown) => void,
+  checkChunk = checkResponseChunk,
 ): StreamingProducer {
   const reader = stream.getReader()
   /** `ended`: its last read found the stream's end, so no `cancel()` is due. */
@@ -31,7 +32,7 @@ function producerOfStream(
           if (phase === 'reading') phase = 'ended'
           break
         }
-        checkChunk?.(chunk)
+        checkChunk(chunk)
         yield chunk
       }
     } finally {
@@ -46,4 +47,8 @@ function producerOfStream(
       chunks.return(undefined).catch(() => {})
     },
   }
+}
+
+function checkResponseChunk(chunk: unknown): void {
+  assertUsage(chunk instanceof Uint8Array, 'Stream chunks returned by a telefunction must be Uint8Array.')
 }

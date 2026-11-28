@@ -1,5 +1,4 @@
 export { parseResponse }
-export { BaseStreamReader } from './BaseStreamReader.js'
 
 import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertWarning } from '../../../../utils/assert.js'
@@ -12,10 +11,8 @@ import type { StreamSource, ClientReviverContext, ReviverType, TypeContract } fr
 import { setAbortController } from '../../../../client/abort.js'
 import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../../../../client/close.js'
 import { makeAbortError, throwAbortError, throwBugError } from '../../../../client/remoteTelefunctionCall/errors.js'
-import { BaseStreamReader } from './BaseStreamReader.js'
+import { InlineStreamReader } from './InlineStreamReader.js'
 import { PendingValue, resolvePendingValues } from './PendingValue.js'
-import { StreamReader } from './StreamReader.js'
-import { SseStreamReader } from './SseStreamReader.js'
 import { ClientChannel, type ConnectionOptions } from '../../../channel/client/ClientChannel.js'
 import { ClientBroadcast } from '../../../channel/client/ClientBroadcast.js'
 import { wrapProxy } from '../../../../utils/wrapProxy.js'
@@ -59,11 +56,7 @@ async function parseResponse(
   if (isStreaming) {
     assert(response.body)
     const reader = response.body.getReader() as ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
-    const isSSE = contentType.includes('text/event-stream')
-    const streamReader = isSSE
-      ? //
-        new SseStreamReader(reader, callContext)
-      : new StreamReader(reader, callContext)
+    const streamReader = new InlineStreamReader(reader, callContext, contentType.includes('text/event-stream'))
     const metaLen = await streamReader.readU32()
     const metaBytes = await streamReader.readExact(metaLen)
     const metaText = textDecoder.decode(metaBytes)
@@ -81,7 +74,7 @@ async function reviveResponse(
   body: string,
   callContext: CallContext,
   connection: ConnectionOptions,
-  bodyStreamReader: BaseStreamReader | null,
+  bodyStreamReader: InlineStreamReader | null,
 ): Promise<unknown> {
   const { extensionResponseTypes } = callContext
   const closeHandlers = new WeakMap<object, () => void>()
@@ -204,7 +197,7 @@ const STALL_WARNING_MS = 5_000
  *  The upstream reader is cancelled once every consumer is terminal and at least one cancelled. */
 class FrameDemuxer {
   private static readonly MAX_BUFFER_BYTES_PER_INDEX = 1024 * 1024 // 1 MB
-  private streamReader: BaseStreamReader
+  private streamReader: InlineStreamReader
   private telefunctionName: string
   private pendingFrames = new Map<number, Fifo<Uint8Array<ArrayBuffer>>>()
   private pendingBytes = new Map<number, number>()
@@ -225,7 +218,7 @@ class FrameDemuxer {
   /** The stall warning's timer, while reading stopped with a consumer waiting; `'warned'` once it warned. */
   private stallWarning: ReturnType<typeof setTimeout> | 'warned' | undefined
 
-  constructor(streamReader: BaseStreamReader, telefunctionName: string) {
+  constructor(streamReader: InlineStreamReader, telefunctionName: string) {
     this.streamReader = streamReader
     this.telefunctionName = telefunctionName
   }
