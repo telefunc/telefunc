@@ -60,7 +60,7 @@ async function run(
   on: Served | undefined,
   entry: string,
   row: Row,
-): Promise<{ sent: string; read: string; closed: string }> {
+): Promise<{ sent: string; read: string; closed: string; closedBeforeUploadEnd: boolean }> {
   if (on === undefined) throw new Error('no Deno server')
   const response = await fetch(`http://127.0.0.1:${on.control}/run`, {
     method: 'POST',
@@ -71,10 +71,11 @@ async function run(
     !isObject(seen) ||
     typeof seen.sent !== 'string' ||
     typeof seen.read !== 'string' ||
-    typeof seen.closed !== 'string'
+    typeof seen.closed !== 'string' ||
+    typeof seen.closedBeforeUploadEnd !== 'boolean'
   )
     throw new Error(`no row result: ${JSON.stringify(seen)}`)
-  return { sent: seen.sent, read: seen.read, closed: seen.closed }
+  return { sent: seen.sent, read: seen.read, closed: seen.closed, closedBeforeUploadEnd: seen.closedBeforeUploadEnd }
 }
 
 const closedByTtl = 'closed: Channel timed out: no client connected within TTL after response was sent'
@@ -82,15 +83,26 @@ const closedByTtl = 'closed: Channel timed out: no client connected within TTL a
 for (const mode of ['legacy', 'modern'] as const) {
   describe(`Deno, ${mode === 'legacy' ? 'its signal aborted at every response' : '`--unstable-no-legacy-abort`'}`, () => {
     for (const [entry, through] of Object.entries(entries)) {
-      test(`a call that returns a Channel and keeps its File, most of it sent after the answer, read after 120 ms: the File is read whole, and the channel closes by its connect window (${through})`, async () => {
+      const slowUpload = mode === 'modern' && entry === 'adapter'
+      const uploadTest = slowUpload
+        ? `an unattached channel closes by its connect window while its File is still uploading (${through})`
+        : `a call that returns a Channel and keeps its File, most of it sent after the answer, read after 120 ms: the File is read whole, and the channel closes by its connect window (${through})`
+      test(uploadTest, async () => {
         const seen = await run(served[mode], entry, {
           telefunction: 'keepsFile',
           row: `${mode}-${entry}-late`,
-          parts: 8,
+          parts: slowUpload ? 40 : 8,
           readAfterMs: 120,
           rest: { pacedMs: 40 },
         })
-        expect(seen).toEqual({ sent: 'all sent', read: `read ${8 * PART} bytes`, closed: closedByTtl })
+        if (slowUpload) expect(seen.closedBeforeUploadEnd).toBe(true)
+        expect(seen).toMatchObject({
+          sent: 'all sent',
+          read: slowUpload
+            ? 'failed: The server answered before reading the request body to its end'
+            : `read ${8 * PART} bytes`,
+          closed: closedByTtl,
+        })
       }, 15_000)
 
       test(`a call that returns a Channel and leaves its 32 MiB File unread: the server takes the whole upload, and the channel closes by its connect window (${through})`, async () => {
@@ -101,7 +113,7 @@ for (const mode of ['legacy', 'modern'] as const) {
           readAfterMs: null,
           rest: { pacedMs: 0 },
         })
-        expect(seen).toEqual({ sent: 'all sent', read: 'not read', closed: closedByTtl })
+        expect(seen).toMatchObject({ sent: 'all sent', read: 'not read', closed: closedByTtl })
       }, 15_000)
 
       test(`a call that returns a Channel and reads its File, whose client leaves after the answer: the read fails, and the channel closes by its connect window (${through})`, async () => {
@@ -117,7 +129,7 @@ for (const mode of ['legacy', 'modern'] as const) {
           entry === 'framework'
             ? 'failed: The server answered before reading the request body to its end'
             : 'failed: The client disconnected before the end of the request body'
-        expect(seen).toEqual({
+        expect(seen).toMatchObject({
           sent: 'left',
           read,
           closed: closedByTtl,

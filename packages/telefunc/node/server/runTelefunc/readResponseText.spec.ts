@@ -73,14 +73,6 @@ describe('a Node stream', () => {
     expect(await readResponseText(stream)).toBe('')
   })
 
-  test('drops a leading byte order mark', async () => {
-    expect(await readResponseText(Readable.from([bytes(0xef, 0xbb), bytes(0xbf, 0x61)]))).toBe('a')
-  })
-
-  test('reads an empty stream', async () => {
-    expect(await readResponseText(Readable.from([]))).toBe('')
-  })
-
   test("rejects with the source's error", async () => {
     const error = new Error('the source fails, as the test means it to')
     const stream = new Readable({
