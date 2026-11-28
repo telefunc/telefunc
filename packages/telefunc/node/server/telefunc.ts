@@ -8,7 +8,6 @@ import { isObject } from '../../utils/isObject.js'
 import { nodeReadableToWebRequest, normalizeHeaders } from '../../utils/nodeReadableToWebRequest.js'
 import type { Readable, Writable } from 'node:stream'
 import { noTransportEvidence, socketShowsClientLeft, type ClientLeft } from './runTelefunc/clientLeft.js'
-import { noUpgrades, upgradesOfSocketServer, type TakesUpgrades } from './runTelefunc/takesUpgrades.js'
 
 type HttpRequestResolved = {
   request: Request
@@ -24,8 +23,6 @@ type HttpRequestResolved = {
   /** Aborts once the client left, and only then, on the same evidence: from the answer on, a read of the body may not end
    *  by itself where its client leaves. */
   clientGone: AbortSignal
-  /** Whether the server that received the request takes WebSocket upgrades. */
-  takesUpgrades: TakesUpgrades
   /** Called once the request's body is read, or, where it streams for as long as the call's channels live, once that
    *  stream opens: from then on, telefunc alone ends the request. */
   onBodyRead?: () => void
@@ -100,11 +97,10 @@ async function serveNode(
 }
 
 /** `serve()` for the adapters handed a `Request` with what its server shows: how its client left (`Bun.serve`,
- *  `Deno.serve`), whether it takes WebSocket upgrades (those two, a Durable Object, and on Node the server
- *  `serve({ request })` runs on), and what it does once the body is read (`Bun.serve`). */
+ *  `Deno.serve`), and what it does once the body is read (`Bun.serve`). */
 async function serveRuntimeRequest(
   httpRequest: Extract<HttpRequest, { request: Request }>,
-  server: Pick<HttpRequestResolved, 'clientLeft' | 'clientGone' | 'takesUpgrades' | 'onBodyRead'>,
+  server: Pick<HttpRequestResolved, 'clientLeft' | 'clientGone' | 'onBodyRead'>,
 ): Promise<HttpResponse> {
   assertHttpRequest(httpRequest, 1)
   assertRequestSignalFlag()
@@ -131,7 +127,6 @@ async function resolveHttpRequest(
       context: httpRequest.context,
       clientLeft: noTransportEvidence,
       clientGone: httpRequest.request.signal,
-      takesUpgrades: noUpgrades,
     }
   }
   // `url` is either the full URL (e.g. `request.url`) or only its pathname (e.g. `req.originalUrl`)
@@ -150,7 +145,6 @@ async function resolveHttpRequest(
       context: httpRequest.context,
       clientLeft: socketShowsClientLeft(httpRequest.readable),
       clientGone,
-      takesUpgrades: upgradesOfSocketServer(httpRequest.readable),
       unwatch,
     }
   }
@@ -165,7 +159,6 @@ async function resolveHttpRequest(
     context: httpRequest.context,
     clientLeft: noTransportEvidence,
     clientGone: request.signal,
-    takesUpgrades: noUpgrades,
   }
 }
 

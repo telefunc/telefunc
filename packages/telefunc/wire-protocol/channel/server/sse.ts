@@ -17,7 +17,7 @@ import { parseSseRequestMetadata, type SseRequestMetadata } from '../../wire/env
 import { OversizeFrameError, BodyReader, StreamTruncatedError } from '../../wire/BodyReader.js'
 import { getChannelMux } from './ChannelMux.js'
 import { EventStream } from './EventStream.js'
-import type { Fault, ReconcileOutcome, ServerTransport, SessionHold, TakesUpgrades, WireClose } from './ChannelMux.js'
+import type { Fault, ReconcileOutcome, ServerTransport, SessionHold, WireClose } from './ChannelMux.js'
 import { channelOf, encode } from '../../wire/frame.js'
 import { HEADER } from '../../wire/header.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
@@ -82,13 +82,12 @@ class SseServerTransport {
   }
 
   /** `clientLeft` says whether a failed read of the upload is its client leaving, as the server that received it does,
-   *  or null where it can't say; `takesUpgrades`, whether that server takes WebSocket upgrades; `onBodyRead`, what it
+   *  or null where it can't say; `onBodyRead`, what the server
    *  does once the body is read. */
   async handleRequest(
     request: Request,
     readable: Readable | undefined,
     clientLeft: (err: unknown) => boolean | null,
-    takesUpgrades: TakesUpgrades,
     onBodyRead?: () => void,
   ): Promise<SseChannelHttpResponse> {
     if (!getServerConfig().channel.transports.includes(CHANNEL_TRANSPORT.SSE)) return refuse(REFUSED.notServed)
@@ -119,7 +118,7 @@ class SseServerTransport {
     try {
       switch (metadata.kind) {
         case 'streamResponse':
-          return await this.handleStreamResponsePost(connId, reader, useNodeStream, request, takesUpgrades)
+          return await this.handleStreamResponsePost(connId, reader, useNodeStream, request)
         case 'streamRequest':
           return await this.handleStreamRequestPost(connId, reader)
         case 'close':
@@ -142,7 +141,6 @@ class SseServerTransport {
     reader: BodyReader,
     useNodeStream: boolean,
     request: Request,
-    takesUpgrades: TakesUpgrades,
   ): Promise<SseChannelHttpResponse> {
     const existing = this.mux.getWireByConnId<SseWire>(connId)
     if (existing) this.mux.endFault(existing, { scope: 'loss' })
@@ -160,7 +158,7 @@ class SseServerTransport {
       pendingDispatches: new Set(),
       bodies: new Set([reader]),
     }
-    this.mux.onWireOpen(wire, this.transport, takesUpgrades, request)
+    this.mux.onWireOpen(wire, this.transport, request)
     reader.onBytes = () => this.mux.onWireBytes(wire)
     this.resolvePendingWires(connId, wire)
     void this.runStreamResponse(wire, reader)
@@ -498,9 +496,8 @@ async function handleSseChannelRequest(
   request: Request,
   readable: Readable | undefined,
   clientLeft: (err: unknown) => boolean | null,
-  takesUpgrades: TakesUpgrades,
   onBodyRead?: () => void,
 ): Promise<SseChannelHttpResponse> {
   globalObject.sseTransport ??= new SseServerTransport()
-  return globalObject.sseTransport.handleRequest(request, readable, clientLeft, takesUpgrades, onBodyRead)
+  return globalObject.sseTransport.handleRequest(request, readable, clientLeft, onBodyRead)
 }

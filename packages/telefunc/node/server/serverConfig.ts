@@ -8,7 +8,7 @@ export { setAdapterMaxFrameBytes }
 export { setAdapterMaxMemory }
 export { getAdapterMaxFrameBytes }
 export { setRootFromVite }
-export { getChannelConfig }
+export { getChannelConfig, enableWebSocket, isWebSocketEnabled }
 export { getAllowedOrigins }
 export { reconnectWindow }
 export type {
@@ -246,6 +246,7 @@ type ServerConfigState = {
   adapterMaxMemory: number | undefined
   defaultMaxMemory: number | undefined
   channelConfigInUse: boolean
+  webSocketEnabled: boolean
   allowedOrigins: readonly AllowedOrigin[]
 }
 
@@ -261,6 +262,7 @@ const globalObject = getGlobalObject<ServerConfigState>('node/server/serverConfi
   defaultMaxMemory: undefined,
   /** A channel read `config.channel`, whose values each of its parts then relies on staying as they are. */
   channelConfigInUse: false,
+  webSocketEnabled: false,
   /** The entries of `config.channel.allowedOrigins`, parsed when it was assigned. */
   allowedOrigins: [],
 })
@@ -421,6 +423,14 @@ function defaultMaxMemory(): number {
 function getChannelConfig(): ChannelConfigResolved {
   globalObject.channelConfigInUse = true
   return resolveChannelConfig(configState.channel)
+}
+
+function enableWebSocket(): void {
+  globalObject.webSocketEnabled = true
+}
+
+function isWebSocketEnabled(): boolean {
+  return globalObject.webSocketEnabled
 }
 
 /** The entries of `config.channel.allowedOrigins`, as a WebSocket upgrade reads them: reading them neither marks

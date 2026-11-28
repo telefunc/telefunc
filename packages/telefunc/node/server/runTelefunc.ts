@@ -36,7 +36,6 @@ import {
 import { STREAM_TRANSPORT } from '../../wire-protocol/constants.js'
 import { createRequestContext, type RequestContext } from './context/requestContext.js'
 import type { ClientLeft } from './runTelefunc/clientLeft.js'
-import type { TakesUpgrades } from './runTelefunc/takesUpgrades.js'
 import { getChannelMux } from '../../wire-protocol/channel/server/ChannelMux.js'
 import type { ResponseHold } from '../../workarounds/denoUploadResponseHold.js'
 
@@ -293,7 +292,6 @@ async function runTelefunc_(
     context,
     clientLeft,
     clientGone,
-    takesUpgrades,
     onBodyRead,
   }: {
     request: Request
@@ -301,7 +299,6 @@ async function runTelefunc_(
     context?: Telefunc.Context
     clientLeft: ClientLeft
     clientGone: AbortSignal
-    takesUpgrades: TakesUpgrades
     onBodyRead?: () => void
   },
   requestContext: RequestContext,
@@ -316,7 +313,6 @@ async function runTelefunc_(
       readable,
       clientLeft,
       clientGone,
-      takesUpgrades,
       onBodyRead,
       serverConfig,
       appRootDir: serverConfig.root,

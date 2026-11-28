@@ -95,7 +95,6 @@ vi.mock('./broadcast.js', () => ({
 }))
 
 import { Telefunc } from '../../../serve/cloudflare.js'
-import { upgradesTakenHere } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 function createMockKV(): KVNamespace {
   const store = new Map<string, { value: string; expirationTtl?: number }>()
@@ -283,10 +282,9 @@ describe('cloudflare adapter entrypoint', () => {
         headers: { 'x-telefunc-shard': 'telefunc-shard-weur-1', 'x-telefunc-broadcast-bucket': 'weur' },
       }),
     )
-    // The Durable Object answers the upgrade itself, so its pages are offered WebSocket.
     expect(mocks.telefuncMock).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ clientGone: expect.any(AbortSignal), takesUpgrades: upgradesTakenHere }),
+      expect.objectContaining({ clientGone: expect.any(AbortSignal) }),
     )
     expect(response.headers.get('x-telefunc-home')).toBe('weur')
     expect(mocks.transportInstances[0]?.attachIsolateInfo).toHaveBeenCalledWith('weur')

@@ -6,10 +6,14 @@ export type { CloudflareOptions }
 import { DurableObject } from 'cloudflare:workers'
 import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelOptions } from '../wire-protocol/channel/server/ws.js'
-import { getServerConfig, setAdapterMaxFrameBytes, setAdapterMaxMemory } from '../node/server/serverConfig.js'
+import {
+  getServerConfig,
+  getTelefuncUrl,
+  setAdapterMaxFrameBytes,
+  setAdapterMaxMemory,
+} from '../node/server/serverConfig.js'
 import { serveRuntimeRequest } from '../node/server/telefunc.js'
 import { noTransportEvidence } from '../node/server/runTelefunc/clientLeft.js'
-import { upgradesTakenHere } from '../node/server/runTelefunc/takesUpgrades.js'
 import { installBroadcastAdapter } from '../wire-protocol/broadcast/broadcastAdapter.js'
 import {
   CloudflareBroadcastAuthorityState,
@@ -27,7 +31,7 @@ import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale } from '../wire-protocol/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT, SESSION_HOME_HEADER, STATUS_CODE_WIRE_VERSION } from '../wire-protocol/constants.js'
-import { getTelefuncRequestUrl } from './shared.js'
+import { readRequestUrl } from '../utils/getUrlPathname.js'
 import { REQUEST_KIND, getRequestKind, namesWireVersion } from '../wire-protocol/wire/requestKind.js'
 import { STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
 import { REQUEST_KIND_REFUSAL, WIRE_VERSION_REFUSAL, refusalContentType } from '../wire-protocol/refusal.js'
@@ -146,7 +150,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         const httpResponse = await serveRuntimeRequest(context ? { request, context } : { request }, {
           clientLeft: noTransportEvidence,
           clientGone: request.signal,
-          takesUpgrades: upgradesTakenHere,
         })
         const headers = new Headers(httpResponse.headers)
         // The page names it from then on, so it reaches this Durable Object from any region.
@@ -181,8 +184,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
   return {
     async serve({ request, env }: ServeInput): Promise<Response | undefined> {
-      const url = getTelefuncRequestUrl(request)
-      if (url === null) return undefined
+      const url = readRequestUrl(request.url)
+      if (url?.pathname !== getTelefuncUrl()) return undefined
       const config = getServerConfig()
 
       const binding = getBinding(env)

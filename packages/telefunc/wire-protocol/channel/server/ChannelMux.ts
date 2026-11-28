@@ -1,19 +1,9 @@
 export { ChannelMux, getChannelMux }
-export type {
-  Fault,
-  WireEntry,
-  ReconcileOutcome,
-  ServerEnd,
-  ServerTransport,
-  SessionHold,
-  TakesUpgrades,
-  Wire,
-  WireClose,
-}
+export type { Fault, WireEntry, ReconcileOutcome, ServerEnd, ServerTransport, SessionHold, Wire, WireClose }
 
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import { getAdapterMaxFrameBytes, getChannelConfig } from '../../../node/server/serverConfig.js'
+import { getAdapterMaxFrameBytes, getChannelConfig, isWebSocketEnabled } from '../../../node/server/serverConfig.js'
 import { DeadlineTimer } from '../DeadlineTimer.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
@@ -139,7 +129,6 @@ type MuxServerOptions = {
   connectTtl: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
-  /** What `config.channel.transports` allows, and the same less `'ws'` for a wire whose server takes no upgrades. */
   transports: ChannelTransports
   transportsWithoutWs: ChannelTransports
 }
@@ -150,11 +139,6 @@ type WireClose = 'transient' | 'pageLeft' | SessionCause
 
 /** A session as one wire held it: its id, and the page's number for that wire. */
 type SessionHold = { sessionId: string; attempt: number }
-
-/** Whether the server a request arrived on takes WebSocket upgrades, asked each time the page that the request connected
- *  is offered its transports: a Node server may get its upgrade listener, or lose it, later. Only the adapter that was
- *  handed the request can say, as for `ClientLeft`. */
-type TakesUpgrades = () => boolean
 
 type DetachReason = WireClose | 'recoveryFailed'
 
@@ -189,8 +173,6 @@ type WireEntry = {
   /** How the wire closed, decided by the server or seen by its transport; null while it is open. A turn queued on the
    *  wire reads it at its start. */
   closed: WireClose | null
-  /** Whether the server that opened the wire takes WebSocket upgrades: its page is offered `'ws'` only where it does. */
-  takesUpgrades: TakesUpgrades
 }
 
 function getChannelMux(): ChannelMux {
@@ -294,12 +276,7 @@ class ChannelMux implements UpgradeStagesOwner {
 
   // ── Wire lifecycle (transport-facing) ───────────────────────────────
 
-  onWireOpen<TWire>(
-    wire: TWire,
-    transport: ServerTransport<TWire>,
-    takesUpgrades: TakesUpgrades,
-    request?: Request,
-  ): void {
+  onWireOpen<TWire>(wire: TWire, transport: ServerTransport<TWire>, request?: Request): void {
     const recvBacklog = { bytes: 0, frames: 0 }
     const deliveries = new Deliveries()
     const attaching = new Set<ServerChannel>()
@@ -330,7 +307,6 @@ class ChannelMux implements UpgradeStagesOwner {
       request,
       holds: null,
       closed: null,
-      takesUpgrades,
     }
     this.wires.set(wire, entry)
     const connId = transport.getConnId(wire)
@@ -358,7 +334,7 @@ class ChannelMux implements UpgradeStagesOwner {
           creditWindow: this.options.creditWindow,
           sseFlushThrottle: this.options.sseFlushThrottle,
           ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
-          transports: entry.takesUpgrades() ? this.options.transports : this.options.transportsWithoutWs,
+          transports: isWebSocketEnabled() ? this.options.transports : this.options.transportsWithoutWs,
         }),
       )
     }

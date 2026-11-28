@@ -2,13 +2,12 @@ export { Telefunc }
 
 import crossws from 'crossws/adapters/deno'
 import { serveRuntimeRequest } from '../node/server/telefunc.js'
-import { upgradesTakenHere } from '../node/server/runTelefunc/takesUpgrades.js'
 import { hasProp } from '../utils/hasProp.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig } from '../node/server/serverConfig.js'
 import { getTelefuncChannelOptions } from '../wire-protocol/channel/server/ws.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
-import { getTelefuncRequestUrl, toResponse } from './shared.js'
+import { isTelefuncRequest, toResponse } from './shared.js'
 import { denoHooks, terminateDenoPeer } from '../workarounds/crosswsDeno.js'
 
 type DenoWs = ReturnType<typeof crossws>
@@ -40,7 +39,7 @@ function telefunc(): TelefuncServe {
 
   return {
     async serve({ request, info, context }: ServeInput): Promise<Response | undefined> {
-      if (getTelefuncRequestUrl(request) === null) return undefined
+      if (!isTelefuncRequest(request)) return undefined
       const config = getServerConfig()
       if (request.headers.get('upgrade') === 'websocket') {
         if (!config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) return new Response(null, { status: 400 })
@@ -52,7 +51,6 @@ function telefunc(): TelefuncServe {
       const httpResponse = await serveRuntimeRequest(context ? { request, context } : { request }, {
         clientLeft: (err) => isDenoConnectionError(err, globalThis),
         clientGone: request.signal,
-        takesUpgrades: upgradesTakenHere,
       })
       return toResponse(httpResponse)
     },

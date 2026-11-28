@@ -8,7 +8,6 @@ import { TAG } from '../../wire/tags.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { config } from '../../../node/server/serverConfig.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from './sse.js'
-import { noUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 // A ping deadline of 2.5 s: two intervals, after the half interval the page may hold its PING for a POST.
 config.channel = { pingInterval: 1000 }
@@ -17,7 +16,7 @@ function post(body: BodyInit) {
   const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
   // Node's Request takes `duplex`, which the DOM's RequestInit doesn't name.
   const init = { method: 'POST', body, duplex: 'half' }
-  return handleSseChannelRequest(new Request(url, init), undefined, () => false, noUpgrades)
+  return handleSseChannelRequest(new Request(url, init), undefined, () => false)
 }
 
 /** The event stream an open POST was answered with. */
