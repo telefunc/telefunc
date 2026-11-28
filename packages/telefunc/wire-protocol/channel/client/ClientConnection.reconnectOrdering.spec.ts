@@ -12,36 +12,19 @@
 // faithfully mirroring server/sse.ts runStreamResponse + server/ChannelMux.ts (RECONCILED.lastSeq is
 // captured from _lastClientSeq at reconcile time, before the initial-batch data frames dispatch).
 
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 
-import { ClientConnection } from './ClientConnection.js'
+import { ClientConnection, type MuxChannel } from './ClientConnection.js'
 import { ServerChannel } from '../server/ServerChannel.js'
 import { decode, encode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { decodeU32, concat } from '../../wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
-import { WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
+import { fakeMuxChannel } from './fakeMuxChannel.fixture.js'
 
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
-
-function createChannel(id = crypto.randomUUID()) {
-  return {
-    id,
-    isClosed: false,
-    _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
-    _onTransportOpen() {},
-    _dispatchFrame() {},
-    _onEnded() {},
-    _attach: {
-      state: () => ({}),
-      receiveCredit: { onProbeAnswered() {}, acknowledge() {}, answered() {} },
-      fitReplays() {},
-      onBatched() {},
-      onUpgradeJoined() {},
-    },
-  }
-}
+/** Polls until `check` passes: a step waits for the event it needs, however loaded the machine. */
+const until = (check: () => void) => vi.waitFor(check, { timeout: 10_000, interval: 5 })
 
 /** SSE downstream response stream the client reads (server→client). */
 function makeSseDownstream() {
@@ -102,16 +85,47 @@ async function* readLengthPrefixed(stream: ReadableStream<Uint8Array>): AsyncGen
   }
 }
 
+const TELEFUNC_URL = 'http://test.local/_telefunc'
+
+/** What the page opens on `fetchImpl`, what it sends on wire 1 (`first`) and once that wire went (`whileReconnecting`);
+ *  the server then has seqs through `lastSeq`. */
+type Sends<Page> = {
+  open: (fetchImpl: typeof fetch) => Page
+  first: (page: Page) => void
+  whileReconnecting: (page: Page) => void
+  lastSeq: number
+}
+
+/** Seq 1, then seq 2, straight on the connection of a stub channel. */
+const plainSends: Sends<{ conn: ClientConnection; channel: MuxChannel }> = {
+  open: (fetchImpl) => {
+    const channel = fakeMuxChannel()
+    const conn = ClientConnection.getOrCreate(TELEFUNC_URL, channel, {
+      transports: ['sse'],
+      fetchImpl,
+      connectionKey: crypto.randomUUID(),
+    })
+    return { conn, channel }
+  },
+  first: ({ conn, channel }) => void conn.sendSequenced(channel, 'data', encode.text, stringify(1)),
+  whileReconnecting: ({ conn, channel }) => void conn.sendSequenced(channel, 'data', encode.text, stringify(2)),
+  lastSeq: 2,
+}
+
 /**
  * Connect, send seq 1, sever the wire (optionally losing seq 1 in flight), send seq 2 while
  * reconnecting, then let the reconnect settle. Returns what the server channel actually received.
  */
-async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wire2Upstream: number[] }> {
-  const received: number[] = []
-  const serverCh = new ServerChannel<(n: number) => void, never>()
-  serverCh.listen((n) => void received.push(n))
+async function runScenarioWith<Page>(
+  loseSeq1: boolean,
+  sends: Sends<Page>,
+): Promise<{ received: unknown[]; wire2Upstream: number[] }> {
+  const received: unknown[] = []
+  const serverCh = new ServerChannel<(value: unknown) => void, never>()
+  serverCh.listen((value) => void received.push(value))
 
   const upstreamSeqsByPost: number[][] = []
+  const upstreamEnded: boolean[] = []
   let streamReqCount = 0
   let dropUpstream = loseSeq1 // wire 1's upstream is "lost" only in the lost-frame case
   let wire = 0 // count of SSE downstream POSTs (connect attempts)
@@ -139,10 +153,7 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
         idleTimeout: 60_000,
         pingInterval: 100_000,
         maxFrameBytes: 64 * 1024 * 1024,
-        serverReplayBuffer: 1_000_000,
-        serverReplayBufferBinary: 2_000_000,
-        clientReplayBuffer: 1_000_000,
-        clientReplayBufferBinary: 2_000_000,
+        creditWindow: 1_000_000,
         sseFlushThrottle: 300,
         ssePostIdleFlushDelay: 50,
         transports: ['sse'],
@@ -175,7 +186,14 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
     upstreamSeqsByPost[postIx] = seen
     const stream = body as ReadableStream<Uint8Array>
     return await new Promise<Response>((resolve, reject) => {
-      init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
+      init.signal?.addEventListener(
+        'abort',
+        () => {
+          upstreamEnded[postIx] = true
+          reject(new DOMException('aborted', 'AbortError'))
+        },
+        { once: true },
+      )
       ;(async () => {
         let first = true
         for await (const chunk of readLengthPrefixed(stream)) {
@@ -189,42 +207,39 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
             if (!dropUpstream) serverCh._dispatchFrame(f) // wire 1 dropped in the lost-frame case
           }
         }
+        upstreamEnded[postIx] = true
         resolve(new Response('', { status: 200 }))
       })().catch(reject)
     })
   }) as unknown as typeof fetch
 
-  const channel = createChannel()
-  const conn = ClientConnection.getOrCreate('http://test.local/_telefunc', channel as never, {
-    transports: ['sse'],
-    fetchImpl,
-    connectionKey: crypto.randomUUID(),
-  })
+  const page = sends.open(fetchImpl)
 
-  // 1) First connect + reconcile.
-  await delay(120)
+  // 1) First connect + reconcile, which opens wire 1's streamRequest.
+  await until(() => expect(upstreamSeqsByPost[1]).toBeDefined())
   expect(wire).toBe(1)
 
   // 2) Send seq 1 — goes onto wire 1's streamRequest (delivered, or "lost" in flight).
-  conn.sendSequenced(channel as never, 'data', encode.text, stringify(1))
-  await delay(40)
-  expect(upstreamSeqsByPost[1]).toContain(1) // client always emits seq 1 on wire 1
+  sends.first(page)
+  await until(() => expect(upstreamSeqsByPost[1]).toContain(1)) // client always emits seq 1 on wire 1
 
   // 3) Sever wire 1 → client reconnects. From here upstream is delivered to the server.
   dropUpstream = false
   downstream!.close()
-  await delay(20)
+  await until(() => expect(upstreamEnded[1]).toBe(true))
 
   // 4) Send seq 2 while reconnecting → buffered, picked up by the reconnect.
-  conn.sendSequenced(channel as never, 'data', encode.text, stringify(2))
+  sends.whileReconnecting(page)
 
-  // 5) Wait out the reconnect (CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500ms) + settle.
-  await delay(900)
+  // 5) Wait out the reconnect (CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500ms) until the server has taken seq 2.
+  await until(() => expect(serverCh._lastClientSeq).toBe(sends.lastSeq))
   expect(wire).toBe(2)
-  await delay(50)
 
   return { received, wire2Upstream: upstreamSeqsByPost[2] ?? [] }
 }
+
+/** `runScenarioWith` on the connection of a stub channel. */
+const runScenario = (loseSeq1: boolean) => runScenarioWith(loseSeq1, plainSends)
 
 describe('SSE reconnect preserves client→server seq order (exactly-once)', () => {
   test('an earlier send that survived the wire, then a buffered send → both delivered, in order', async () => {

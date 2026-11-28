@@ -1,7 +1,8 @@
-export { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl, getRequestKind, namesWireVersion }
+export { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl, getRequestKind, getSessionToken, namesWireVersion }
 export type { RequestKind }
 
 import { WIRE_VERSION } from '../constants.js'
+import { readRequestUrl } from '../../utils/getUrlPathname.js'
 
 const REQUEST_KIND_PARAM = '_telefunc'
 const REQUEST_KIND_HEADER = 'x-telefunc-request'
@@ -10,7 +11,6 @@ const REQUEST_KIND = {
   TEXT: 'txt',
   SSE: 'sse',
   BINARY: 'bin',
-  FLOW: 'flow',
   INVALID: 'invalid',
 } as const
 
@@ -27,18 +27,14 @@ function getRequestKind(
   request: Pick<Request, 'url' | 'headers'>,
   telefuncUrl: string,
 ): RequestKind | typeof REQUEST_KIND.INVALID {
-  const url = new URL(request.url)
+  const url = readRequestUrl(request.url)
+  if (url === null) return REQUEST_KIND.INVALID
   const telefunc = new URL(telefuncUrl, url)
   if (url.pathname !== telefunc.pathname) return REQUEST_KIND.INVALID
 
   // Required, never inferred from the URL: a cross-site page can't send a custom header without a CORS preflight.
   const headerKind = request.headers.get(REQUEST_KIND_HEADER)
-  if (
-    headerKind !== REQUEST_KIND.TEXT &&
-    headerKind !== REQUEST_KIND.SSE &&
-    headerKind !== REQUEST_KIND.BINARY &&
-    headerKind !== REQUEST_KIND.FLOW
-  ) {
+  if (headerKind !== REQUEST_KIND.TEXT && headerKind !== REQUEST_KIND.SSE && headerKind !== REQUEST_KIND.BINARY) {
     return REQUEST_KIND.INVALID
   }
   const urlKind = url.searchParams.get(REQUEST_KIND_PARAM)
@@ -48,5 +44,10 @@ function getRequestKind(
 
 /** Whether a channel request names this server's `WIRE_VERSION`, as the page's `getWireUrl` does. */
 function namesWireVersion(request: Pick<Request, 'url'>): boolean {
-  return new URL(request.url, 'http://localhost').searchParams.get('wire') === String(WIRE_VERSION)
+  return readRequestUrl(request.url)?.searchParams.get('wire') === String(WIRE_VERSION)
+}
+
+/** The session token the page's `getSessionUrl` names on its calls and its wire. */
+function getSessionToken(request: Pick<Request, 'url'>): string | undefined {
+  return readRequestUrl(request.url)?.searchParams.get('session') ?? undefined
 }

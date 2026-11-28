@@ -1,19 +1,40 @@
-export { testChannel, testChannelApi }
+export {
+  testAbortUnsendable,
+  testSseOpenAnsweredWithHtml,
+  testSseRefusals,
+  testSseRecoveryRefused,
+  testSseStalledChannel,
+  testChannel,
+}
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import type { Request, Response, WebSocket, WebSocketRoute } from 'playwright-chromium'
+import type { Page, Request, Response, WebSocket, WebSocketRoute } from 'playwright-chromium'
 import {
   navigate,
+  withPacedLink,
   getResult,
   getCleanupState,
   restartProxy,
   stopProxy,
   startProxy,
   countConnections,
+  sleep,
+  defined,
+  cutWire,
+  closeAllConnections,
+  serverRuntime,
+  withRoute,
 } from '../../e2e-utils'
-import { newCDPSession, sendsOutrunWarning, withNetworkConditions } from '../../../utils'
+import { newCDPSession, sendRefusedWarning, withNetworkConditions } from '../../../utils'
+import { parseChannelTransports } from '../../channelTransports'
+import { WIRE_VERSION } from '../../../../packages/telefunc/wire-protocol/constants'
+import { messageFrames } from '../../../../packages/telefunc/wire-protocol/wire/frame'
+import { TAG } from '../../../../packages/telefunc/wire-protocol/wire/tags'
 
 type ChannelState = {
+  heldBytes: number | null
+  lateAnswerAsked: boolean
+  listenerAborted: boolean
   connected: boolean
   onOpenFired: boolean
   mainChannelOnCloseFiredClean: boolean | null
@@ -70,6 +91,7 @@ type ChannelState = {
   shieldServerAckValid: { ok: boolean; value?: string; error?: string } | null
   shieldServerAckInvalid: { ok: boolean; value?: string; error?: string } | null
   selfRemovingListener: { pageSeen: string[]; serverSeen: string[] } | null
+  sendOrder: { id: string; sent: boolean } | null
   unserializableAnswer: { channelId: string; pageSend: string; pageFollowUp: string; isClosed: boolean } | null
   oversize: {
     channelId: string
@@ -79,7 +101,6 @@ type ChannelState = {
     broadcastIsClosed: boolean
   } | null
   heldBinary: number[][] | null
-  unattachedFlood: Record<'text' | 'binary', Record<string, number>> | null
   durationLimits: { withContext: string; close: string; ack: string } | null
   endedValuesReady: boolean
   endedValuesCollected: boolean[] | null
@@ -87,7 +108,7 @@ type ChannelState = {
   binaryBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
   paced: { channelId: string; receivedBytes: number; closeErr: string | null; ended: boolean } | null
   textBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
-  awaitedFromOffline: { channelId: string; received: number; closeErr: string | null } | null
+  textBurstProgress: { received: number; reconnects: number } | null
   openBurstReceived: number | null
   freshBinaryEchoed: number | null
   helloBesideBurst: boolean
@@ -95,6 +116,32 @@ type ChannelState = {
   manyListenersMs: { page: number; server: number | null } | null
   lateCallbacks: { channelId: string; onOpen: boolean; onCloseAbortValue: unknown } | null
   openAbort: { channelId: string; abortValue: unknown } | null
+}
+
+/** The page's text burst once it ended; until then, a failure that says where the page got to. */
+async function endedTextBurst() {
+  const { textBurst, textBurstProgress } = await getResult<ChannelState>('#channel-state')
+  if (textBurst === null) throw new Error(`The page's text burst hasn't ended: ${JSON.stringify(textBurstProgress)}`)
+  return textBurst
+}
+
+/** The page's text burst once it ended, however long that takes on the machine's link, as long as the page gets further:
+ *  one that got no further in `stalledAfter` ms fails, saying where it got to. */
+async function textBurstEnded(stalledAfter: number) {
+  let progress = ''
+  let progressedAt = Date.now()
+  while (true) {
+    const { textBurst, textBurstProgress } = await getResult<ChannelState>('#channel-state')
+    if (textBurst !== null) return textBurst
+    const now = JSON.stringify(textBurstProgress)
+    if (now !== progress) {
+      progress = now
+      progressedAt = Date.now()
+    } else if (Date.now() - progressedAt > stalledAfter) {
+      throw new Error(`The page's text burst got no further in ${stalledAfter} ms: ${now}`)
+    }
+    await sleep(500)
+  }
 }
 
 function testChannel(isDev: boolean, inDocker = false) {
@@ -125,7 +172,19 @@ function testChannel(isDev: boolean, inDocker = false) {
     throw new Error(`Unsupported channel transport in e2e: ${channelTransport}`)
   }
 
+  /** Waits for the page to reconnect once `proxyCall`, a `docker compose` call, returned. The call blocks the event loop, so
+   *  the wait is armed as it returns, in the same tick: what the page did meanwhile still reaches the wait, and its 15 s
+   *  count the page's time, not `docker compose`'s. */
+  function reconnectAfter(proxyCall: () => void): Promise<void> {
+    proxyCall()
+    return waitForTransportReconnectSignal()
+  }
+
+  // Each navigates to a page of its own; the tests from the connect test on share the page that one connects.
   testChannelApi()
+  testAbortUnsendable()
+  if (channelTransports[0] === 'sse') testSseOpenAnsweredWithHtml()
+  if (channelTransports[0] === 'sse') testSseRefusals(isDev, inDocker)
 
   // ── Basic connection ─────────────────────────────────────────────────
 
@@ -254,7 +313,7 @@ function testChannel(isDev: boolean, inDocker = false) {
 
   // ── close() — isClosed property + client onClose fires clean ─────────
 
-  test('channel: close() — isClosed is true immediately; client onClose fires with err=undefined', async () => {
+  test('channel: close() — isClosed is true immediately; client onClose fires with err=null', async () => {
     // Reconnect so we have an open channel to test close() on
     await page.click('#channel-connect')
     await autoRetry(async () => {
@@ -269,7 +328,7 @@ function testChannel(isDev: boolean, inDocker = false) {
       // channel.isClosed was true immediately after channel.close() was called
       expect(state.isClosedAfterClose).toBe(true)
       expect(state.connected).toBe(false)
-      // Client's onClose callback fired with err===undefined (clean close)
+      // Client's onClose callback fired with err===null (clean close)
       expect(state.mainChannelOnCloseFiredClean).toBe(true)
     })
 
@@ -281,7 +340,7 @@ function testChannel(isDev: boolean, inDocker = false) {
 
   // ── Full hook instrumentation (onOpen + onClose, client + server) ─────
 
-  test('channel: hooks — server onOpen and onClose both fire; client onClose fires with err=undefined', async () => {
+  test('channel: hooks — server onOpen and onClose both fire; client onClose fires with err=null', async () => {
     await page.click('#channel-test-hooks')
 
     // Wait for:
@@ -338,49 +397,56 @@ function testChannel(isDev: boolean, inDocker = false) {
 
   // ── Binary sendBinary / listenBinary round-trip ───────────────────────
 
+  // Whichever wire carries the ACK_RES, the WebSocket or the SSE stream, the page gets it with its value corrupted, for
+  // OK and ABORT: the send rejects, and the parse failure is reported as uncaught, the same on both.
+  test('channel: a malformed acknowledgement rejects its send with the parse failure', async () => {
+    const context = await defined(page.context().browser(), 'the browser').newContext()
+    const routed = await context.newPage()
+    try {
+      let status = 0
+      let corrupted = 0
+      const failures: string[] = []
+      routed.on('pageerror', (err) => failures.push(err.name))
+      await routed.addInitScript(corruptSseAcks, PER_SEND_ACK)
+      await routed.routeWebSocket(/\/_telefunc/, (ws) => {
+        const server = ws.connectToServer()
+        ws.onMessage((message) => server.send(message))
+        server.onMessage((message) => {
+          if (typeof message !== 'string') {
+            const payload = message.indexOf(Buffer.from(PER_SEND_ACK))
+            if (payload !== -1) {
+              message = Buffer.from(message)
+              // Keep the ACK_RES envelope valid; corrupt its serialized value.
+              message[payload - 1] = status
+              message[payload] = '{'.charCodeAt(0)
+              corrupted++
+            }
+          }
+          ws.send(message)
+        })
+      })
+      for (status of [0, 2]) {
+        await navigate(`${getServerUrl()}/channel`, undefined, routed)
+        await routed.evaluate((s) => (window.ackStatus = s), status)
+        await routed.click('#channel-test-per-send-ack')
+        await autoRetry(async () => {
+          const state: ChannelState = JSON.parse(
+            defined(await routed.textContent('#channel-state'), 'the channel state'),
+          )
+          expect(state.perSendAck).toBe('SyntaxError')
+        })
+        corrupted += await routed.evaluate(() => window.acksCorrupted ?? 0)
+      }
+      expect(corrupted).toBe(2)
+      expect(failures).deep.equal(['SyntaxError', 'SyntaxError'])
+    } finally {
+      await context.close()
+    }
+  })
+
   // The page's first wire is the WebSocket, whose RECONCILE names the channel. In `vike dev` the channel is the
   // telefunction's copy of telefunc, not the server's: the server tells the violation it raises by its brand.
   if (channelTransports[0] === 'ws') {
-    test('channel: a malformed acknowledgement rejects its send with the parse failure', async () => {
-      const context = await page.context().browser()!.newContext()
-      const routed = await context.newPage()
-      try {
-        let status = 0
-        let corrupted = 0
-        const failures: string[] = []
-        routed.on('pageerror', (err) => failures.push(err.name))
-        await routed.routeWebSocket(/\/_telefunc/, (ws) => {
-          const server = ws.connectToServer()
-          ws.onMessage((message) => server.send(message))
-          server.onMessage((message) => {
-            if (typeof message !== 'string') {
-              const payload = message.indexOf(Buffer.from('"ack:per-send-test"'))
-              if (payload !== -1) {
-                message = Buffer.from(message)
-                // Keep the ACK_RES envelope valid; corrupt its serialized value for OK and ABORT.
-                message[payload - 1] = status
-                message[payload] = '{'.charCodeAt(0)
-                corrupted++
-              }
-            }
-            ws.send(message)
-          })
-        })
-        for (status of [0, 2]) {
-          await navigate(`${getServerUrl()}/channel`, undefined, routed)
-          await routed.click('#channel-test-per-send-ack')
-          await autoRetry(async () => {
-            const state = JSON.parse((await routed.textContent('#channel-state'))!)
-            expect(state.perSendAck).toBe('SyntaxError')
-          })
-        }
-        expect(corrupted).toBe(2)
-        expect(failures).deep.equal(['SyntaxError', 'SyntaxError'])
-      } finally {
-        await context.close()
-      }
-    })
-
     test("channel: a text message the server can't parse, on a channel a telefunction returned, closes the page's WebSocket", async () => {
       // A page of its own: its WebSocket stays routed through the test for as long as the page lives.
       const context = await page.context().browser()!.newContext()
@@ -456,13 +522,11 @@ function testChannel(isDev: boolean, inDocker = false) {
       const ticksBefore = stateBefore.tickCount
       const serverCountBefore = stateBefore.lastTickServerCount!
 
-      const reconnectSignalPromise = waitForTransportReconnectSignal()
-      if (inDocker) {
-        // Docker setup uses streamRequest; browser offline mode doesn't sever in-flight
-        // chunked POST bodies, so the only reliable disconnect is killing Caddy at the
-        // TCP layer. `grace_period 1s` in the Caddyfile bounds the shutdown window.
-        restartProxy()
-      } else {
+      // Docker setup uses streamRequest; browser offline mode doesn't sever in-flight
+      // chunked POST bodies, so the only reliable disconnect is killing Caddy at the
+      // TCP layer. `grace_period 1s` in the Caddyfile bounds the shutdown window.
+      const reconnectSignalPromise = inDocker ? reconnectAfter(restartProxy) : waitForTransportReconnectSignal()
+      if (!inDocker) {
         // dev/preview: single-instance, no proxy to restart — setOffline still works
         // because batch-only SSE without streamRequest gets blocked by Chromium's offline
         // mode, and WS also gets severed.
@@ -512,7 +576,7 @@ function testChannel(isDev: boolean, inDocker = false) {
       })
 
       // Go offline
-      if (inDocker) stopProxy()
+      if (inDocker) await stopProxy()
       else await page.context().setOffline(true)
       await page.waitForTimeout(3000)
 
@@ -522,9 +586,8 @@ function testChannel(isDev: boolean, inDocker = false) {
       await page.click('#channel-test-upstream-send')
 
       // Arm reconnect watcher, then come back online.
-      const reconnectSignalPromise = waitForTransportReconnectSignal()
-      if (inDocker) startProxy()
-      else await page.context().setOffline(false)
+      const reconnectSignalPromise = inDocker ? reconnectAfter(startProxy) : waitForTransportReconnectSignal()
+      if (!inDocker) await page.context().setOffline(false)
       await reconnectSignalPromise
 
       // Server must have received all 5 messages exactly once, in order, with no gaps
@@ -596,7 +659,7 @@ function testChannel(isDev: boolean, inDocker = false) {
         expect(state.serverPendingAckCloseReconnectClientOnCloseClean).toBe(true)
         const ss = await getCleanupState()
         expect(ss[`serverClose_${channelId}_ackResult`]).toBe('ack:offline-close')
-        expect(ss[`serverClose_${channelId}_closeResult`]).toBe('0')
+        expect(ss[`serverClose_${channelId}_closeResult`]).toBe('clean')
         expect(ss[`serverClose_${channelId}_serverOnCloseErr`]).toBe('none')
       })
     })
@@ -621,15 +684,14 @@ function testChannel(isDev: boolean, inDocker = false) {
         channelId = state.clientPendingAckCloseReconnectChannelId
       })
 
-      if (inDocker) stopProxy()
+      if (inDocker) await stopProxy()
       else await page.context().setOffline(true)
       await page.waitForTimeout(3000)
 
       await page.click('#channel-test-client-pending-ack-close-reconnect')
 
-      const reconnectSignalPromise = waitForTransportReconnectSignal()
-      if (inDocker) startProxy()
-      else await page.context().setOffline(false)
+      const reconnectSignalPromise = inDocker ? reconnectAfter(startProxy) : waitForTransportReconnectSignal()
+      if (!inDocker) await page.context().setOffline(false)
       await reconnectSignalPromise
 
       await autoRetry(async () => {
@@ -690,6 +752,22 @@ function testChannel(isDev: boolean, inDocker = false) {
       expect(state.ackListenerAbortErr!.isAbort).toBe(true)
       expect(state.ackListenerAbortErr!.abortValue).deep.equal({ reason: 'listener-abort', code: 7 })
     })
+  })
+
+  test("channel: a message whose listener throws Abort isn't held once the channel ended", async () => {
+    await page.click('#channel-test-listener-abort-holds')
+    await autoRetry(async () => {
+      expect((await getResult<ChannelState>('#channel-state')).listenerAborted).toBe(true)
+    })
+    await expectHoldsNothingOnceLeft()
+  })
+
+  test("channel: an answer that comes after its page left isn't held", async () => {
+    await page.click('#channel-test-late-answer-holds')
+    await autoRetry(async () => {
+      expect((await getResult<ChannelState>('#channel-state')).lateAnswerAsked).toBe(true)
+    })
+    await expectHoldsNothingOnceLeft()
   })
 
   test('channel: ack listener bug — send({ ack: true }) rejects but channel stays open for a follow-up ack', async () => {
@@ -884,6 +962,55 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
+  // The test holds what goes to the server on the page's channels' wire, SSE's POSTs and the WebSocket's messages, while
+  // the page gets two channels: the RECONCILE naming the first can't be answered before the page sent on both.
+  test("channel: a page's sends on a channel it just got and on an older one reach the server in the order it made them", async () => {
+    const context = await defined(page.context().browser(), 'the browser').newContext()
+    const routed = await context.newPage()
+    try {
+      let holding = false
+      const held: (() => void)[] = []
+      const hold = (go: () => void) => (holding ? held.push(go) : go())
+      await routed.route(/\/_telefunc/, (route) => {
+        // The telefunction calls go through.
+        if (route.request().headers()['x-telefunc-request'] === 'sse') hold(() => void route.continue())
+        else void route.continue()
+      })
+      await routed.routeWebSocket(/\/_telefunc/, (ws) => {
+        const server = ws.connectToServer()
+        ws.onMessage((message) => hold(() => server.send(message)))
+        server.onMessage((message) => ws.send(message))
+      })
+      const sendOrder = async () => {
+        const state: ChannelState = JSON.parse(defined(await routed.textContent('#channel-state'), 'the channel state'))
+        return state.sendOrder
+      }
+      await routed.goto(`${getServerUrl()}/channel`)
+      // A new context loads every asset cold: under load it hydrates later than `navigate` waits.
+      await routed.locator('#hydrated').waitFor({ state: 'attached' })
+      await routed.click('#channel-test-send-order')
+      await autoRetry(async () => {
+        expect(await sendOrder()).not.toBe(null)
+      })
+      holding = true
+      await routed.evaluate(() => window.sendOrderGo?.(undefined))
+      await autoRetry(async () => {
+        expect(defined(await sendOrder(), 'the send order').sent).toBe(true)
+      })
+      holding = false
+      for (const go of held.splice(0)) go()
+      const { id } = defined(await sendOrder(), 'the send order')
+      let received = ''
+      await autoRetry(async () => {
+        received = (await getCleanupState())[`sendOrder_${id}`] ?? ''
+        expect(received.split(' ').length).toBe(2)
+      })
+      expect(received).toBe('c1 a2')
+    } finally {
+      await context.close()
+    }
+  })
+
   test("channel: a listener that stops listening itself doesn't make the next one miss a message, on either end", async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-self-removing-listener')
@@ -929,6 +1056,43 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
+  test("channel: a channel its page left open at a navigation can't touch the next page's timers", async () => {
+    await navigate(`${getServerUrl()}/`)
+    await page.evaluate(async () => {
+      const frame = document.createElement('iframe')
+      frame.src = '/channel'
+      document.body.append(frame)
+      await new Promise((resolve) => (frame.onload = resolve))
+    })
+    const frame = page.frameLocator('iframe')
+    await frame.locator('#hydrated').waitFor({ state: 'attached' })
+    await frame.locator('#channel-test-left-open').click()
+    await autoRetry(async () => {
+      expect(await frame.locator('#channel-state').textContent()).toContain('"leftOpen":true')
+    })
+    await page.evaluate(
+      async ({ timers, delay }) => {
+        const frame = document.querySelector('iframe')
+        if (!frame?.contentWindow) throw new Error('Expected the left page in an iframe')
+        // Keeps the left page's realm alive past the navigation, as a browser's own references do at times.
+        window.leftPageRealm = frame.contentWindow.setTimeout
+        frame.src = '/'
+        await new Promise((resolve) => (frame.onload = resolve))
+        const next = frame.contentWindow
+        if (!next) throw new Error('Expected the next page in the iframe')
+        window.timersRan = 0
+        for (let i = 0; i < timers; i++) next.setTimeout(() => (window.timersRan = (window.timersRan ?? 0) + 1), delay)
+      },
+      { timers: 100, delay: 2000 },
+    )
+    const cdp = await newCDPSession()
+    await cdp.send('HeapProfiler.collectGarbage')
+    await cdp.detach()
+    await autoRetry(async () => {
+      expect(await page.evaluate(() => window.timersRan)).toBe(100)
+    })
+  })
+
   test('channel: binary the server sends before the page attaches arrives as sent, though the server reuses the buffer', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-held-binary')
@@ -944,17 +1108,6 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
-  test('channel: a flood of empty sends to a channel no page attached to rejects the oldest with ChannelOverflowError', async () => {
-    await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-unattached-flood')
-
-    await autoRetry(async () => {
-      const state = await getResult<ChannelState>('#channel-state')
-      expect(state.unattachedFlood?.text.ChannelOverflowError).greaterThan(0)
-      expect(state.unattachedFlood?.binary.ChannelOverflowError).greaterThan(0)
-    })
-  })
-
   test('channel: a per-call idleTimeout or a close() timeout longer than a timer waits is refused, and the channel stays open', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-duration-limits')
@@ -966,6 +1119,137 @@ function testChannel(isDev: boolean, inDocker = false) {
       expect(state.durationLimits?.ack).toBe('ack:still-open')
     })
   })
+
+  /** 60 lossy sends, each its ordinal, 1000 / 30 ms apart, with the plain ones `plain` puts after the ordinal it is
+   *  given, then a plain `'done'`. */
+  function lossyStream(plain: (i: number) => string[] = () => []): string[] {
+    return [...Array.from({ length: 60 }, (_, i) => [String(i), ...plain(i)]).flat(), 'done']
+  }
+
+  /** What `lossy` promises on a link that keeps up. A busy machine may still delay the confirmations past the 600 ms a
+   *  sender waits for one (`LOSSY_CONFIRM_SLACK_MS` and the wire's wait, `WireSender.behindAfter` and the transports'
+   *  `behindAfter` on the page), and then skips. So: every plain send arrives once and in order, the lossy ones that arrive
+   *  keep their order, the newest arrives, and so do 15: nothing is skipped before the stream's first 600 ms (18 sends
+   *  at 30 a second), less 3 for a confirmation of what went before the stream that may still be on its way. */
+  function expectLossyStream(read: string[], sent: string[]) {
+    const isLossy = (value: string) => /^\d+$/.test(value)
+    expect(read.filter((value) => !isLossy(value))).deep.equal(sent.filter((value) => !isLossy(value)))
+    const order = read.map((value) => sent.indexOf(value))
+    expect(order).not.include(-1)
+    expect(order).deep.equal([...new Set(order)].sort((a, b) => a - b))
+    const lossy = read.filter(isLossy)
+    expect(lossy.at(-1)).toBe(sent.filter(isLossy).at(-1))
+    expect(lossy.length).greaterThanOrEqual(15)
+  }
+
+  test('channel: lossy sends on a channel keep only the newest before the telefunction returns, and their order, the newest and the plain ones on a link that keeps up', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-lossy-sends')
+    const sends = await autoRetry(
+      async () => {
+        const { lossySends } = await getResult<{ lossySends: string[] | null }>('#channel-state')
+        expect(lossySends?.at(-1)).toBe('done')
+        return defined(lossySends, "the lossy sends' order")
+      },
+      { timeout: 20_000 },
+    )
+    // Before the telefunction returns, nothing is sent, so which go doesn't depend on the link.
+    expect(sends.slice(0, 3)).deep.equal(['L3', 'R1', 'L4'])
+    expectLossyStream(sends.slice(3), lossyStream())
+  })
+
+  /** What the server read of the page's lossy-sends channel, once the page opened it. */
+  async function readLossyFromPage(): Promise<string[]> {
+    const { lossyFromPageChannelId } = await getResult<{ lossyFromPageChannelId: string | null }>('#channel-state')
+    expect(lossyFromPageChannelId).not.toBe(null)
+    return JSON.parse((await getCleanupState())[`lossyFromPage_${lossyFromPageChannelId}`] ?? '[]')
+  }
+
+  test('channel: lossy sends from the page keep their order around plain ones, and the newest arrives, on a link that keeps up', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-lossy-from-page')
+    let read: string[] = []
+    await autoRetry(
+      async () => {
+        read = await readLossyFromPage()
+        expect(read.at(-1)).toBe('done')
+      },
+      { timeout: 20_000 },
+    )
+    expectLossyStream(
+      read,
+      lossyStream((i) => (i % 20 === 19 ? [`R${i}`] : [])),
+    )
+  })
+
+  if (!isDev) {
+    test('channel: lossy sends from the page while it is offline arrive after the reconnect, the plain ones in order and the newest last', async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click('#channel-test-lossy-from-page-open')
+      await autoRetry(async () => expect(await readLossyFromPage()).deep.equal([]))
+
+      if (inDocker) await stopProxy()
+      else await page.context().setOffline(true)
+      await page.waitForTimeout(3000)
+      await page.click('#channel-test-lossy-from-page-send')
+      const reconnectSignalPromise = inDocker ? reconnectAfter(startProxy) : waitForTransportReconnectSignal()
+      if (!inDocker) await page.context().setOffline(false)
+      await reconnectSignalPromise
+
+      let read: string[] = []
+      await autoRetry(async () => {
+        read = await readLossyFromPage()
+        expect(read.at(-1)).toBe('L4')
+      })
+      // A page that noticed it was offline replaced L1 with L2 and L3 with L4; R1 kept L2 from passing it.
+      console.log(`[lossy-from-page] the server read ${JSON.stringify(read)}`)
+      const sent = ['L1', 'L2', 'R1', 'L3', 'L4']
+      expect(read.filter((value) => value.startsWith('R'))).deep.equal(['R1'])
+      // Each once, in the order sent.
+      const order = read.map((value) => sent.indexOf(value))
+      expect(order).not.include(-1)
+      expect(order).deep.equal([...new Set(order)].sort((a, b) => a - b))
+    })
+  }
+
+  // 100 messages of 4 KiB in one go, each way, on a link that keeps up.
+  test('channel: a lossy broadcast on a link that keeps up delivers every message of a burst, from the server and from the page', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-lossy-keeps-up')
+    await autoRetry(
+      async () => {
+        const { lossyKeepsUp } = await getResult<{
+          lossyKeepsUp: { fromServer: number; fromPage: number; last: string } | null
+        }>('#channel-state')
+        expect(lossyKeepsUp).deep.equal({ fromServer: 100, fromPage: 100, last: '99' })
+      },
+      { timeout: 30_000 },
+    )
+  })
+
+  // The page publishes as its connection drops: the server gets the newest of ten lossy ones, the plain one after them,
+  // and the newest of the ten after that. Preview only, as the other offline tests.
+  if (!isDev)
+    test('channel: a lossy publish from a page that is away waits as the newest, and a plain one arrives after it', async () => {
+      const lossyBeforePlain = async () =>
+        (
+          await getResult<{
+            lossyBeforePlain: 'listening' | { received: unknown[]; seqsAhead: number[] } | null
+          }>('#channel-state')
+        ).lossyBeforePlain
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click('#channel-test-lossy-before-plain')
+      await autoRetry(async () => expect(await lossyBeforePlain()).toBe('listening'))
+      if (inDocker) await stopProxy()
+      else await page.context().setOffline(true)
+      await page.waitForTimeout(3000)
+      if (inDocker) await startProxy()
+      else await page.context().setOffline(false)
+      await autoRetry(
+        async () => expect(await lossyBeforePlain()).deep.equal({ received: [10, 'plain', 20], seqsAhead: [0, 1, 2] }),
+        { timeout: 30_000 },
+      )
+    })
 
   test('channel: the page lets go of a channel and a broadcast it closed and a generator it read to the end', async () => {
     await navigate(`${getServerUrl()}/channel`)
@@ -982,38 +1266,44 @@ function testChannel(isDev: boolean, inDocker = false) {
     await cdp.detach()
   })
 
-  // With two transports the page opens an SSE stream, then a WebSocket: wire-e2e-test.ts covers that lane.
-  if (channelTransports.length === 1) {
+  // With two transports the page opens an SSE stream, then a WebSocket: wire-e2e-test.ts covers that lane. Preview
+  // only, as `testSlowLink`: the page loads through a proxy in the test process.
+  if (!isDev && !inDocker && channelTransports.length === 1) {
     test('channel: a 1 MB message to the page, 8 s at 1 Mbit/s, arrives over the connection it left on', async () => {
-      await navigate(`${getServerUrl()}/channel`)
-      const connections = countConnections()
       // 1 Mbit/s each way.
-      await withNetworkConditions({ downloadThroughput: 125_000, uploadThroughput: 125_000 }, async () => {
-        await page.click('#channel-test-slow-link')
-        await autoRetry(
-          async () => {
-            expect((await getResult<ChannelState>('#channel-state')).slowLinkReceived).toBe(1_000_000)
-          },
-          { timeout: 40_000 },
-        )
-      })
-      expect(connections.stop()).toBe(1)
+      await withPacedLink(
+        { downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 },
+        async () => {
+          const connections = countConnections()
+          await page.click('#channel-test-slow-link')
+          await autoRetry(
+            async () => {
+              expect((await getResult<ChannelState>('#channel-state')).slowLinkReceived).toBe(1_000_000)
+            },
+            { timeout: 40_000 },
+          )
+          expect(connections.stop()).toBe(1)
+        },
+      )
     })
   }
 
   // Over SSE, a channel's registration and the message the page queued with it go in one request.
-  if (channelTransports.length === 1 && channelTransport === 'sse') {
+  if (!isDev && !inDocker && channelTransports.length === 1 && channelTransport === 'sse') {
     test("channel: at 1 Mbit/s, a channel the page opens beside another's 4 MiB burst gets the message its server sends as it opens", async () => {
-      await navigate(`${getServerUrl()}/channel`)
-      await withNetworkConditions({ downloadThroughput: 125_000, uploadThroughput: 125_000 }, async () => {
-        await page.click('#channel-test-hello-beside-burst')
-        await autoRetry(
-          async () => {
-            expect((await getResult<ChannelState>('#channel-state')).helloBesideBurst).toBe(true)
-          },
-          { timeout: 50_000 },
-        )
-      })
+      // 1 Mbit/s each way.
+      await withPacedLink(
+        { downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 },
+        async () => {
+          await page.click('#channel-test-hello-beside-burst')
+          await autoRetry(
+            async () => {
+              expect((await getResult<ChannelState>('#channel-state')).helloBesideBurst).toBe(true)
+            },
+            { timeout: 50_000 },
+          )
+        },
+      )
     })
   }
 
@@ -1028,19 +1318,21 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
-  test('channel: a burst of 300 MiB the server sends without awaiting passes maxPendingBytes and closes the channel with ChannelOverflowError', async () => {
+  test('channel: a burst of 400 MiB the server sends without awaiting: sends past the most for one channel are refused, the channel stays open, and a later send that fits goes through', async () => {
     await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-binary-burst-unawaited-300')
+    await page.click('#channel-test-binary-burst-unawaited-400')
     await autoRetry(
       async () => {
         const burst = (await getResult<ChannelState>('#channel-state')).binaryBurst!
-        expect(burst.closeErr).toBe('ChannelOverflowError')
-        expect(burst.received).lessThan(300)
+        expect(burst.closeErr).toBe(null)
+        expect(burst.received).greaterThan(0)
+        expect(burst.received).lessThan(400)
         expect(burst.inOrder).toBe(true)
-        expect((await getCleanupState())[`binaryBurst_${burst.channelId}`]).toContain('config.channel.maxPendingBytes')
+        expect((await getCleanupState())[`binaryBurst_${burst.channelId}`]).toContain('config.channel.maxMemory')
       },
       { timeout: 60_000 },
     )
+    expectLog(sendRefusedWarning)
   })
 
   test('channel: 300 MiB the server sends awaiting each send all reach the page, with no warning', async () => {
@@ -1055,10 +1347,9 @@ function testChannel(isDev: boolean, inDocker = false) {
       },
       { timeout: 60_000 },
     )
-    expect(() => expectLog(sendsOutrunWarning)).throw()
   })
 
-  test('channel: sends nobody awaits that keep outrunning a 1 MB/s page warn once, then close the channel at maxPendingBytes', async () => {
+  test('channel: sends nobody awaits that keep outrunning a 1 MB/s page are refused at maxMemory with the channel open', async () => {
     await navigate(`${getServerUrl()}/channel`)
     // 1 MiB every 50 ms to a page that takes 1 MB/s.
     await withNetworkConditions({ downloadThroughput: 1_000_000, uploadThroughput: -1 }, async () => {
@@ -1066,20 +1357,14 @@ function testChannel(isDev: boolean, inDocker = false) {
       await autoRetry(
         async () => {
           const { channelId } = (await getResult<ChannelState>('#channel-state')).paced!
-          expect((await getCleanupState())[`paced_${channelId}`]).toContain('config.channel.maxPendingBytes')
+          expect((await getCleanupState())[`paced_${channelId}`]).toContain('config.channel.maxMemory')
         },
         { timeout: 60_000 },
       )
     })
-    expectLog(sendsOutrunWarning)
-    await autoRetry(
-      async () => {
-        const paced = (await getResult<ChannelState>('#channel-state')).paced!
-        expect(paced.ended).toBe(true)
-        expect(paced.closeErr).toBe('ChannelOverflowError')
-      },
-      { timeout: 60_000 },
-    )
+    expectLog(sendRefusedWarning)
+    const paced = defined((await getResult<ChannelState>('#channel-state')).paced, 'the paced row')
+    expect(paced.ended).toBe(false)
   })
 
   test('channel: an 8 MiB burst nobody awaits, then small sends while a 1 MB/s page takes it, all reach the page with no warning', async () => {
@@ -1107,7 +1392,6 @@ function testChannel(isDev: boolean, inDocker = false) {
       },
       { timeout: 30_000 },
     )
-    expect(() => expectLog(sendsOutrunWarning)).throw()
   })
 
   test('channel: 6,000 text messages of 16 KiB the server sends in one loop without awaiting all reach a page that reads', async () => {
@@ -1115,7 +1399,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     await page.click('#channel-test-text-burst-unawaited-6000')
     await autoRetry(
       async () => {
-        const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
+        const burst = await endedTextBurst()
         expect(burst.received).toBe(6000)
         expect(burst.inOrder).toBe(true)
         expect(burst.closeErr).toBe(null)
@@ -1129,40 +1413,52 @@ function testChannel(isDev: boolean, inDocker = false) {
     await page.click('#channel-test-text-burst-awaited-6000')
     await autoRetry(
       async () => {
-        const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
+        const burst = await endedTextBurst()
         expect(burst.received).toBe(6000)
         expect(burst.inOrder).toBe(true)
         expect(burst.closeErr).toBe(null)
       },
       { timeout: 30_000 },
     )
-    expect(() => expectLog(sendsOutrunWarning)).throw()
   })
 
-  test('channel: 18,000 acknowledgement requests the server sends in one loop pass maxPendingAcks and close the channel with ChannelOverflowError', async () => {
+  test('channel: of 18,000 acknowledgement requests of 64 KiB the server sends in one loop, those past maxMemory are refused and the channel stays open', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-text-burst-acks-18000')
-    await autoRetry(
-      async () => {
-        const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
-        expect(burst.closeErr).toBe('ChannelOverflowError')
-        expect(burst.received).toBe(16384)
-        expect(burst.inOrder).toBe(true)
-        const ss = await getCleanupState()
-        expect(ss[`textBurst_${burst.channelId}_error`]).toContain('config.channel.maxPendingAcks')
-      },
-      { timeout: 60_000 },
-    )
+    // What the page receives is about 444 MB of events, so how long it takes is the link's: the card waits while the
+    // page gets further (it says so each 50 messages, about 4.4 MB).
+    const burst = await textBurstEnded(30_000)
+    expect(burst.closeErr).toBe(null)
+    expect(burst.received).greaterThan(3000)
+    expect(burst.received).lessThan(18000)
+    expect(burst.inOrder).toBe(true)
+    // The server records these before it sends the page its 'end'.
+    const ss = await getCleanupState()
+    expect(ss[`textBurst_${burst.channelId}_error`]).toContain('config.channel.maxMemory')
+    expect(ss[`textBurst_${burst.channelId}_acked`]).toBe(String(burst.received))
+    expectLog(sendRefusedWarning)
   })
 
   if (channelTransport === 'ws') {
-    test('channel: the page answers 500 small messages its server sends as the channel opens in at most 4 WebSocket messages', async () => {
-      let sent = 0
+    test('channel: the page grants credit for 2,000 small messages its server sends as the channel opens in no more WebSocket messages than they arrive in', async () => {
+      // How many WebSocket messages the server's 2,000 take, and whether a heartbeat or an upgrade's frames fall among
+      // the page's, depends on how the turns fall: so the page's messages that grant credit are counted, from the
+      // channel's open to the page's CLOSE, against the messages that bring the server's.
+      let arrivals = 0
+      let grants = 0
       let counting = false
+      const tagsOf = (payload: string | Buffer) =>
+        typeof payload === 'string' ? [] : Array.from(messageFrames(new Uint8Array(payload)), (frame) => frame[0])
       const onWebSocket = (ws: WebSocket) => {
         if (!ws.url().includes('/_telefunc')) return
-        ws.on('framesent', () => {
-          if (counting) sent++
+        ws.on('framereceived', ({ payload }) => {
+          if (counting && tagsOf(payload).includes(TAG.TEXT)) arrivals++
+        })
+        ws.on('framesent', ({ payload }) => {
+          if (!counting) return
+          const tags = tagsOf(payload)
+          if (tags.includes(TAG.WINDOW) || tags.includes(TAG.MSG_WINDOW)) grants++
+          if (tags.includes(TAG.CLOSE)) counting = false
         })
       }
       page.on('websocket', onWebSocket)
@@ -1171,7 +1467,7 @@ function testChannel(isDev: boolean, inDocker = false) {
         const run = async () => {
           await page.click('#channel-test-open-burst')
           await autoRetry(async () => {
-            expect((await getResult<ChannelState>('#channel-state')).openBurstReceived).toBe(500)
+            expect((await getResult<ChannelState>('#channel-state')).openBurstReceived).toBe(2000)
           })
         }
         // The first run opens the WebSocket, so only the second's messages count.
@@ -1181,13 +1477,14 @@ function testChannel(isDev: boolean, inDocker = false) {
       } finally {
         page.off('websocket', onWebSocket)
       }
-      expect(sent).lessThanOrEqual(4)
+      expect(arrivals).greaterThan(0)
+      expect(grants).lessThanOrEqual(arrivals)
     })
   }
 
   // A page whose channels start on SSE sends the message over SSE.
   if (channelTransports[0] === 'ws') {
-    test("channel: the page's first 32 KiB sendBinary on a fresh WebSocket goes as one WebSocket message", async () => {
+    test("channel: the page's first 32 KiB sendBinary on a fresh WebSocket goes unsplit, in one WebSocket message at least its size", async () => {
       const sizes: number[] = []
       const onWebSocket = (ws: WebSocket) => {
         if (!ws.url().includes('/_telefunc')) return
@@ -1341,13 +1638,13 @@ function testChannel(isDev: boolean, inDocker = false) {
     await navigate(`${getServerUrl()}/channel`)
     const bugs = async () => Object.keys(await getCleanupState()).filter((key) => key.startsWith('bug:'))
     const bugsBefore = await bugs()
-    const answer = await page.evaluate(async () => {
-      const resp = await fetch('/_telefunc?_telefunc=sse&wire=1', {
+    const answer = await page.evaluate(async (url) => {
+      const resp = await fetch(url, {
         method: 'POST',
         headers: { 'x-telefunc-request': 'sse' },
       })
       return { status: resp.status, text: await resp.text() }
-    })
+    }, `/_telefunc?_telefunc=sse&wire=${WIRE_VERSION}`)
     expect(answer).deep.equal({
       status: 400,
       text: 'The request has no body: an SSE channel request starts with its metadata.',
@@ -1357,20 +1654,262 @@ function testChannel(isDev: boolean, inDocker = false) {
   })
 }
 
-function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws'> {
-  const parsed: unknown = JSON.parse(value ?? '["sse"]')
-  if (
-    !Array.isArray(parsed) ||
-    parsed.length === 0 ||
-    !parsed.every((transport) => transport === 'sse' || transport === 'ws')
-  ) {
-    throw new Error(`Invalid PUBLIC_ENV__CHANNEL_TRANSPORTS: ${value ?? '(unset)'}`)
-  }
-  return parsed
+/** A first SSE open answered with a page of HTML, as an app's SPA fallback answers it, or refused with a status. */
+function testSseOpenAnsweredWithHtml() {
+  test('channel: a first SSE open answered with a page of HTML, or refused with 500, ends the channel at once, naming what it got', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    for (const [status, ended] of [
+      [200, 'The server answered the SSE connection with 200 text/html, not an event stream'],
+      [500, 'Server rejected SSE connection with 500 text/html'],
+    ] as const) {
+      await withRoute(
+        isSseUrl,
+        async (route) => {
+          if (!isSseRequest(route.request(), 'opens')) return route.fallback()
+          await route.fulfill({ status, contentType: 'text/html', body: '<!doctype html><p>The app</p>' })
+        },
+        async () => {
+          expect(await page.evaluate(() => window.openAckChannel!())).toBe(ended)
+        },
+      )
+    }
+    expectLog('the server responded with a status of 500', { filter: (log) => log.logSource === 'Browser Error' })
+  })
+}
+
+/** A request of the page's SSE wire: `opens` for the POST that opens its event stream, `posts` for the others. */
+function isSseRequest(request: Request, which: 'opens' | 'posts'): boolean {
+  const url = new URL(request.url())
+  if (!url.pathname.endsWith('/_telefunc') || url.searchParams.get('_telefunc') !== 'sse') return false
+  return (request.headers().accept === 'text/event-stream') === (which === 'opens')
+}
+const isSseUrl = (url: URL) => url.pathname.endsWith('/_telefunc') && url.searchParams.get('_telefunc') === 'sse'
+
+/** Opens a channel whose server counts its messages, over `transports`, as `name`, on the connection of
+ *  `connectionKey`, else on one of its own. */
+async function openCounted(
+  transports: ('sse' | 'ws')[],
+  slot: { name?: string; connectionKey?: string } = {},
+): Promise<string> {
+  const opened = await page.evaluate(({ transports, slot }) => window.openCounted!(transports, slot), {
+    transports,
+    slot,
+  })
+  if (!('id' in opened)) throw new Error(`The channel ended before it opened: ${opened.ended}`)
+  return opened.id
+}
+const sendCounted = (msg: string, name?: string) =>
+  page.evaluate(({ msg, name }) => window.sendCounted!(msg, name), { msg, name })
+const countedEnd = (name?: string) => page.evaluate((name) => window.countedEnd!(name), name)
+/** What the server of `openCounted()`'s channel got, in order. */
+async function countedOf(id: string): Promise<string[]> {
+  return JSON.parse((await getCleanupState())[`counted_${id}`] ?? '[]')
+}
+/** What the server recorded as a bug or an unhandled rejection (+server.ts). */
+async function serverFaults(): Promise<string[]> {
+  return Object.keys(await getCleanupState()).filter((key) => /^(bug|unhandledRejection):/.test(key))
+}
+
+/** What the page does with refusals of its SSE requests, and with a server that closes its connections. */
+function testSseRefusals(isDev: boolean, inDocker = false) {
+  // Over HTTP/2 (Caddy TLS in Docker), SSE sends on its streaming upload POST rather than batch POSTs.
+  if (!inDocker)
+    test("channel: a 409 that isn't Telefunc's to a batch POST is a loss the channel goes on after, and Telefunc's own 409 ends it as a server that was updated", async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      const id = await openCounted(['sse'])
+      for (const answer of ['plain', 'marked'] as const) {
+        let refused = 0
+        const refuseOnce: Parameters<Page['route']>[1] = async (route) => {
+          if (refused > 0 || !isSseRequest(route.request(), 'posts')) return route.fallback()
+          refused++
+          await route.fulfill(
+            answer === 'plain'
+              ? { status: 409, contentType: 'text/plain', body: 'Conflict' }
+              : {
+                  status: 409,
+                  contentType:
+                    'text/vnd.telefunc.refusal; kind=reload; reason="The server runs another wire version: reload the page."',
+                  body: 'The server runs another wire version: reload the page.',
+                },
+          )
+        }
+        await withRoute(isSseUrl, refuseOnce, async () => {
+          if (answer === 'plain') {
+            expect(await sendCounted('past a plain 409')).toBe('ack:past a plain 409')
+            expect(refused).toBe(1)
+            expect(await countedOf(id)).deep.equal(['past a plain 409'])
+          } else {
+            void sendCounted('refused with a marked 409')
+            expect(await countedEnd()).toMatch(/server was updated since this page loaded/)
+            expect(refused).toBe(1)
+          }
+        })
+      }
+      expectLog('the server responded with a status of 409', { filter: (log) => log.logSource === 'Browser Error' })
+    })
+
+  test("channel: behind a proxy that drops `x-telefunc-request`, a page with ['sse', 'ws'] is refused `route` and moves to a WebSocket at once, and its messages arrive", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    const refusals: string[] = []
+    const webSocketOpened = page.waitForEvent('websocket', { predicate: (ws) => ws.url().includes('/_telefunc') })
+    // Sent from the test process, as `route.continue({ headers })`'s headers would stay on the page's later requests.
+    const stripHeader: Parameters<Page['route']>[1] = async (route) => {
+      const headers = { ...route.request().headers() }
+      delete headers['x-telefunc-request']
+      const response = await route.fetch({ headers })
+      refusals.push(`${response.status()} ${response.headers()['content-type']}`)
+      await route.fulfill({ response })
+    }
+    await withRoute(isSseUrl, stripHeader, async () => {
+      const id = await openCounted(['sse', 'ws'])
+      await webSocketOpened
+      expect(await sendCounted('over the WebSocket')).toBe('ack:over the WebSocket')
+      expect(await countedOf(id)).deep.equal(['over the WebSocket'])
+      // The open, and the streaming upload the page may send beside it.
+      expect(refusals.length).greaterThanOrEqual(1)
+      for (const refusal of refusals)
+        expect(refusal).toBe('400 text/vnd.telefunc.refusal; kind=route; reason="Malformed Telefunc Request"')
+    })
+    expectLog('the server responded with a status of 400', { filter: (log) => log.logSource === 'Browser Error' })
+    if (isDev) {
+      expectLog('The `x-telefunc-request` header of the HTTP request is missing', {
+        filter: (log) => log.logSource === 'stderr',
+      })
+    }
+  })
+
+  // Only the Node server's `closeAllConnections()` (+server.ts), which `pnpm dev` and Caddy-fronted Docker don't serve directly.
+  if (!isDev && !inDocker && serverRuntime() === 'node')
+    test('channel: a server that closes all its connections while a page is connected over SSE prints nothing and leaves nothing uncaught, and the page reconnects', async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      const id = await openCounted(['sse'])
+      expect(await sendCounted('before')).toBe('ack:before')
+      const faultsBefore = await serverFaults()
+      await closeAllConnections()
+      // Past the close, which comes 100 ms after its answer: the next message goes on the wire the page reconnects. What
+      // the server prints on stderr, the harness fails the test on.
+      await page.waitForTimeout(500)
+      expect(await sendCounted('after')).toBe('ack:after')
+      expect(await countedOf(id)).deep.equal(['before', 'after'])
+      expect(await serverFaults()).deep.equal(faultsBefore)
+    })
+}
+
+/** A recovery whose SSE reopens a proxy refuses. Needs a short `reconnectTimeout`. */
+function testSseRecoveryRefused() {
+  test("channel: during a recovery, the page retries an SSE reopen a proxy answers with 502, and ends the channel with the 502's words once it gives up", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await openCounted(['sse'])
+    expect(await sendCounted('before')).toBe('ack:before')
+    let refused = 0
+    const badGateway: Parameters<Page['route']>[1] = async (route) => {
+      if (!isSseRequest(route.request(), 'opens')) return route.fallback()
+      refused++
+      await route.fulfill({ status: 502, contentType: 'text/html', body: '<!doctype html><p>Bad Gateway</p>' })
+    }
+    await withRoute(isSseUrl, badGateway, async () => {
+      await cutWire()
+      expect(await countedEnd()).toBe('Server rejected SSE connection with 502 text/html')
+      expect(refused).greaterThanOrEqual(2)
+    })
+    expectLog('the server responded with a status of 502', { filter: (log) => log.logSource === 'Browser Error' })
+  })
+
+  test("channel: during a recovery, an SSE reopen a proxy answers with 502, then one a server on another wire version refuses, ends the channel as a server that was updated, not with the 502's words", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await openCounted(['sse'])
+    expect(await sendCounted('before')).toBe('ack:before')
+    const answers: number[] = []
+    const badGatewayThenUpdated: Parameters<Page['route']>[1] = async (route) => {
+      if (!isSseRequest(route.request(), 'opens')) return route.fallback()
+      if (answers.length === 0) {
+        answers.push(502)
+        return route.fulfill({ status: 502, contentType: 'text/html', body: '<!doctype html><p>Bad Gateway</p>' })
+      }
+      answers.push(409)
+      await route.fulfill({
+        status: 409,
+        contentType:
+          'text/vnd.telefunc.refusal; kind=reload; reason="The server runs another wire version: reload the page."',
+        body: 'The server runs another wire version: reload the page.',
+      })
+    }
+    await withRoute(isSseUrl, badGatewayThenUpdated, async () => {
+      await cutWire()
+      expect(await countedEnd()).toMatch(/server was updated since this page loaded/)
+      expect(answers.slice(0, 2)).deep.equal([502, 409])
+    })
+    expectLog('the server responded with a status of 502', { filter: (log) => log.logSource === 'Browser Error' })
+    expectLog('the server responded with a status of 409', { filter: (log) => log.logSource === 'Browser Error' })
+  })
+}
+
+/** A channel whose batch POSTs a proxy never lets through, beside one on the same connection whose POSTs it lets
+ *  through. Needs a short `reconnectTimeout`. */
+function testSseStalledChannel() {
+  test('channel: a channel whose batch POSTs never get through ends after reconnectTimeout, naming what the page saw, and the channel beside it on its connection goes on', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    const connectionKey = crypto.randomUUID()
+    await openCounted(['sse'], { name: 'stuck', connectionKey })
+    const besideId = await openCounted(['sse'], { name: 'beside', connectionKey })
+    let cut = 0
+    const cutStuck: Parameters<Page['route']>[1] = async (route) => {
+      const request = route.request()
+      if (!isSseRequest(request, 'posts') || !request.postDataBuffer()?.includes('never through'))
+        return route.fallback()
+      cut++
+      await route.abort()
+    }
+    await withRoute(isSseUrl, cutStuck, async () => {
+      const stuckEnd = countedEnd('stuck')
+      void sendCounted('never through', 'stuck')
+      // The first cut drops the wire; from the next, the stuck data goes in POSTs of its own and the wire stays.
+      await autoRetry(() => expect(cut).greaterThanOrEqual(2))
+      expect(await sendCounted('beside it', 'beside')).toBe('ack:beside it')
+      expect(await stuckEnd).toMatch(
+        /the server hasn't confirmed what the page sent on it for over 2 s of reconnects\. The last try: The request carrying it got no answer/,
+      )
+      expect(await sendCounted('after it ended', 'beside')).toBe('ack:after it ended')
+      expect(await countedOf(besideId)).deep.equal(['beside it', 'after it ended'])
+    })
+    expectLog('net::ERR_FAILED', { filter: (log) => log.logSource === 'Browser Error' })
+  })
+}
+
+/** The server's `abort()` of a reason it can't send. */
+function testAbortUnsendable() {
+  test("channel: a server abort(value) whose value can't be sent, as JSON can't hold it or it is past what a channel holds, also before the page opened the channel, throws, and the page ends with an Abort without it", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    for (const reason of ['circular', 'oversize'] as const) {
+      for (const beforeOpen of [false, true]) {
+        const ended = await page.evaluate(({ reason, beforeOpen }) => window.abortWithUnsendable!(reason, beforeOpen), {
+          reason,
+          beforeOpen,
+        })
+        expect({ reason, beforeOpen, isAbort: ended.isAbort, abortValue: ended.abortValue }).deep.equal({
+          reason,
+          beforeOpen,
+          isAbort: true,
+          abortValue: undefined,
+        })
+        const thrown = (await getCleanupState())[`abortUnsendable_${ended.id}`]
+        if (reason === 'oversize') expect(thrown).toBe('threw ChannelOverflowError')
+        else expect(thrown).toMatch(/^threw /)
+      }
+    }
+  })
+}
+
+async function expectHoldsNothingOnceLeft() {
+  await navigate(`${getServerUrl()}/channel`)
+  await page.click('#channel-read-held-bytes')
+  await autoRetry(async () => {
+    expect((await getResult<ChannelState>('#channel-state')).heldBytes).toBe(0)
+  })
 }
 
 function testChannelApi() {
-  test('channel: cancelled iterators settle acknowledgements and preserve captured listener replies', async () => {
+  test('channel: cancelled iterators settle acknowledgements, and a later listener answers them', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-iterator-ack')
     await autoRetry(async () => {
@@ -1418,13 +1957,13 @@ function testChannelApi() {
     })
   })
 
-  test('channel: failed capacity waits reject on both ends', async () => {
+  test('channel: sends waiting for capacity at abort() resolve on both ends: their messages go ahead of the abort', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-credit')
     let id = ''
     await autoRetry(async () => {
       const result = JSON.parse((await page.textContent('#channel-credit-result'))!)
-      expect(result.rejected).toBe(true)
+      expect(result.resolved).toBe(true)
       id = result.id
     })
     await autoRetry(async () => {
@@ -1432,20 +1971,19 @@ function testChannelApi() {
     })
   })
 
-  test('channel: each opt-in byte or acknowledgement cap closes with the named error', async () => {
+  test('channel: config.channel refuses what would break it, and any change once the server has used it', async () => {
     await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-budgets')
+    await page.click('#channel-test-config-checks')
     await autoRetry(async () => {
-      const ids = JSON.parse((await page.textContent('#channel-budgets-result'))!)
-      const state = await getCleanupState()
-      expect(state[`budget_${ids.bytes}_credit`]).toBe('accepted')
-      expect(state[`budget_${ids.bytes}`]).toContain('maxPendingBytes')
-      expect(state[`budget_${ids.acks}`]).toContain('maxPendingAcks')
-      for (const error of ids.errors) {
-        expect(error).toContain('ChannelOverflowError')
-        expect(error).toContain('maxPendingBytes')
-        expect(error).toContain('maxPendingAcks')
-      }
+      const checks = await getResult('#channel-config-checks-result')
+      expect(checks.same).toBe(null)
+      expect(checks.changed).toContain("can't change once the server has used it")
+      expect(checks.reconnectTimeout).toContain('`config.channel.reconnectTimeout` should be at least 1000')
+      expect(checks.pingInterval).toContain('`config.channel.pingInterval` should be at least 1000')
+      expect(checks.maxMemory).toContain(
+        "`config.channel.maxMemory` should be a number of bytes, or a size such as '4g' or '512m', of at least 2097152",
+      )
+      expect(checks.removed).toContain('Unknown config.channel.bufferLimit')
     })
   })
 
@@ -1463,51 +2001,6 @@ function testChannelApi() {
     })
   })
 
-  test('channel: multi-byte text that fits maxPendingBytes to the byte is accepted, and one byte more closes the channel', async () => {
-    await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-at-limit')
-    await autoRetry(async () => {
-      const state = await getCleanupState()
-      for (const kind of ['twoBytes', 'threeBytes', 'fourBytes']) {
-        expect(state[`atLimit_${kind}_fits`]).toBe('accepted')
-        expect(state[`atLimit_${kind}_over`]).toContain('maxPendingBytes')
-      }
-    })
-  })
-
-  test('channel: acknowledged sends made before the page attaches close it with ChannelOverflowError once they pass maxPendingAcks or maxPendingBytes', async () => {
-    await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-offline-budgets')
-    await autoRetry(async () => {
-      const ids = JSON.parse((await page.textContent('#channel-offline-budgets-result'))!)
-      const state = await getCleanupState()
-      for (const [id, setting] of [
-        [ids.bytes, 'maxPendingBytes'],
-        [ids.acks, 'maxPendingAcks'],
-      ]) {
-        const sends: string[] = JSON.parse(state[`offline_budget_${id}`] ?? '[]')
-        expect(sends.length).toBe(3)
-        for (const send of sends)
-          expect(send).toContain(`ChannelOverflowError: Channel closed: config.channel.${setting}`)
-      }
-      for (const error of ids.errors) expect(error).toContain('ChannelOverflowError')
-    })
-  })
-
-  test('channel: a sender awaiting messages larger than maxPendingBytes, the first made before the page attaches, reaches the page without closing the channel', async () => {
-    await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-awaited-from-offline')
-    await autoRetry(
-      async () => {
-        const result = (await getResult<ChannelState>('#channel-state')).awaitedFromOffline!
-        expect(result.closeErr).toBe(null)
-        expect(result.received).toBe(3)
-        expect((await getCleanupState())[`awaitedFromOffline_${result.channelId}`]).toBe('done')
-      },
-      { timeout: 30_000 },
-    )
-  })
-
   test('channel: late onOpen Abort terminates the channel', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-late-open-abort')
@@ -1515,4 +2008,63 @@ function testChannelApi() {
       expect(await page.textContent('#channel-late-abort-result')).toBe('late-stop')
     })
   })
+}
+
+const PER_SEND_ACK = '"ack:per-send-test"'
+
+/** In the page: an SSE event carrying `needle` gets it corrupted as the WebSocket route does, its status byte set to
+ *  `window.ackStatus`; `window.acksCorrupted` counts them. */
+function corruptSseAcks(needle: string) {
+  const bytes = new TextEncoder().encode(needle)
+  const indexOf = (frame: Uint8Array) => {
+    for (let i = 0; i + bytes.length <= frame.length; i++) if (bytes.every((b, k) => frame[i + k] === b)) return i
+    return -1
+  }
+  const fromBase64url = (s: string) =>
+    Uint8Array.from(atob(s.replaceAll('-', '+').replaceAll('_', '/')), (c) => c.charCodeAt(0))
+  const toBase64url = (frame: Uint8Array) =>
+    btoa(String.fromCharCode(...frame))
+      .replaceAll('+', '-')
+      .replaceAll('/', '_')
+      .replace(/=+$/, '')
+  const corruptLine = (line: string) => {
+    if (!line.startsWith('data: ')) return line
+    const frame = fromBase64url(line.slice(6))
+    const payload = indexOf(frame)
+    if (payload === -1) return line
+    frame[payload - 1] = window.ackStatus ?? 0
+    frame[payload] = '{'.charCodeAt(0)
+    window.acksCorrupted = (window.acksCorrupted ?? 0) + 1
+    return `data: ${toBase64url(frame)}`
+  }
+  const corrupting = () => {
+    const decoder = new TextDecoder()
+    const encoder = new TextEncoder()
+    let partial = ''
+    return new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        const lines = (partial + decoder.decode(chunk, { stream: true })).split('\n')
+        partial = lines.pop() ?? ''
+        for (const line of lines) controller.enqueue(encoder.encode(`${corruptLine(line)}\n`))
+      },
+    })
+  }
+  const fetchPage = window.fetch
+  window.fetch = async (input, init) => {
+    const response = await fetchPage(input, init)
+    if (!response.body || !response.headers.get('content-type')?.includes('text/event-stream')) return response
+    return new Response(response.body.pipeThrough(corrupting()), response)
+  }
+}
+
+declare global {
+  interface Window {
+    /** The status byte a corrupted acknowledgement gets, and how many the page corrupted. */
+    ackStatus?: number
+    acksCorrupted?: number
+    /** A function of the left page's realm, which keeps it alive. */
+    leftPageRealm?: unknown
+    /** How many of the next page's timers ran. */
+    timersRan?: number
+  }
 }

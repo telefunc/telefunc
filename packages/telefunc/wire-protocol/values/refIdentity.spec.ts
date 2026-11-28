@@ -6,9 +6,11 @@ import { createStreamingReplacer } from './server/response/registry.js'
 import { createStreamingReviver } from './client/response/registry.js'
 import { ServerChannel } from '../channel/server/ServerChannel.js'
 import { ServerBroadcast } from '../channel/server/ServerBroadcast.js'
+import { ServerBroadcastEnd } from '../channel/server/ServerBroadcastEnd.js'
 import { wrapProxy } from '../../utils/wrapProxy.js'
 import { serializeTelefunctionResult } from '../../node/server/runTelefunc/serializeTelefunctionResult.js'
 import { parseHttpRequest } from '../../node/server/runTelefunc/parseHttpRequest.js'
+import { noUpgrades } from '../../node/server/runTelefunc/takesUpgrades.js'
 import { createRequestContext } from '../../node/server/context/requestContext.js'
 import { parseResponse } from './client/response/parse.js'
 import { STREAM_TRANSPORT } from '../constants.js'
@@ -52,12 +54,20 @@ function createServerHarness(extensionTypes: ReplacerType<TypeContract, ServerRe
     registerChannel(channel) {
       registeredChannels.push(channel)
     },
+    createBroadcastChannel() {
+      const end = new ServerBroadcastEnd()
+      context.registerChannel(end)
+      return end
+    },
     sendStream(createProducer) {
       const index = nextIndex++
       producers.push({ createProducer, index })
       return { metadata: { __index: index }, close() {}, abort() {} }
     },
     validators: new Map(),
+    responseState: (_key, init) => init(),
+    page: 'page',
+    maxFrameBytes: undefined,
   }
   const replacer = createStreamingReplacer(
     () => context,
@@ -76,11 +86,12 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
   const lifecycles: { value: unknown; close: () => Promise<void> | void; abort: (abortError: AbortError) => void }[] =
     []
   const context: ClientReviverContext = {
+    shareLifecycle() {},
     createChannel(opts) {
       mintedChannels.push(opts)
       return { kind: 'client-channel', ...opts, close: async () => {}, abort: () => {} } as never
     },
-    createBroadcast(opts) {
+    createBroadcastChannel(opts) {
       mintedBroadcasts.push(opts)
       return { kind: 'client-broadcast', ...opts, close: async () => {}, abort: () => {} } as never
     },
@@ -237,7 +248,7 @@ describe('reference identity — duplicates in one payload', () => {
     const broadcast = new ServerBroadcast({ key: 'room:identity' })
     const body = server.serialize({ room: broadcast, roomDupe: broadcast, roomDupe2: broadcast })
 
-    expect(server.registeredChannels).toEqual([broadcast])
+    expect(server.registeredChannels).toEqual([broadcast._end])
     expect(server.lifecycles).toHaveLength(1)
 
     const client = createClientHarness()
@@ -434,7 +445,6 @@ async function roundTrip(
       telefunctionAborted: false,
       context: {},
       requestContext,
-      abortSignal: requestContext.abortSignal,
       streamTransport: STREAM_TRANSPORT.BINARY_INLINE,
       useNodeStream: false,
       serverConfig: {
@@ -453,12 +463,10 @@ async function roundTrip(
       {
         telefunctionName: 'testFn',
         telefuncFilePath: '/pages/spec/ref-identity.telefunc.ts',
-        telefuncUrl: '/_telefunc',
-        headers: null,
-        fetch: null,
         abortController,
         requestCloseHandlers: [],
         extensionResponseTypes: opts.clientExtensions ?? [],
+        extensionLazyResponseTypes: [],
       },
       { transports: ['sse'], telefuncUrl: 'http://localhost/_telefunc' },
     )) as { ret: unknown }
@@ -648,12 +656,15 @@ describe('extension wire types registered while a telefunc module loads', () => 
 
     const parsed = await parseHttpRequest({
       request,
+      clientLeft: () => false,
+      clientGone: request.signal,
+      takesUpgrades: noUpgrades,
       requestContext,
       logMalformedRequests: false,
       serverConfig: getServerConfig(),
     })
     expect(parsed.isMalformedRequest).toBe(false)
-    if (parsed.isMalformedRequest || parsed.wireResponse) throw new Error('expected a telefunction request')
+    if (parsed.isMalformedRequest || parsed.isSseRequest) throw new Error('expected a telefunction request')
 
     // Registration happens after routing/parse — exactly the window the target module loads in.
     registerExtension()
@@ -683,7 +694,6 @@ describe('extension wire types registered while a telefunc module loads', () => 
         telefunctionAborted: false,
         context: {},
         requestContext,
-        abortSignal: requestContext.abortSignal,
         streamTransport: STREAM_TRANSPORT.BINARY_INLINE,
         useNodeStream: false,
         serverConfig: requestStartConfig,

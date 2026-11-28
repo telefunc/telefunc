@@ -1,6 +1,7 @@
 export { ConnectionError }
 
 import { NetworkError } from '../shared/NetworkError.js'
+import { markErrorClass } from '../shared/markErrorClass.js'
 
 /**
  * Thrown when a regular telefunction call can't reach the server.
@@ -17,3 +18,5 @@ class ConnectionError extends NetworkError {
     this.name = 'ConnectionError'
   }
 }
+
+markErrorClass(ConnectionError, 'ConnectionError')

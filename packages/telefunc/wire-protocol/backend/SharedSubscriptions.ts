@@ -1,0 +1,400 @@
+export { SharedSubscriptions }
+export type { BackendSubscription, SourceRules }
+
+import { assert } from '../../utils/assert.js'
+import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
+import { Fifo } from '../../utils/Fifo.js'
+import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
+import { ChannelOverflowError } from '../channel/channelErrors.js'
+import {
+  HELD_SEND_OVERHEAD_BYTES,
+  letGo,
+  releaseHolder,
+  tryHold,
+  type MemoryHolder,
+} from '../channel/server/channelMemory.js'
+import { getOrCreate } from '../../utils/getOrCreate.js'
+import { handleCallbackBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
+import { BackendError } from './BackendError.js'
+import { assertDriverOrdering } from './driverOrdering.js'
+import { stopLogged } from './stopLogged.js'
+import type {
+  AttemptState,
+  BackendListener,
+  BackendPayload,
+  BackendReceiver,
+  BroadcastPayload,
+  DriverAttempt,
+  SubscriptionDriver,
+} from './driver.js'
+import type { OrderingInfo } from './driverOrdering.js'
+import type { BroadcastKind } from '../wire/payloads.js'
+
+/** A consumer's subscription. */
+type BackendSubscription = {
+  /** Settles when the current establishment does: replaced after a loss, rejected when it ends for good. */
+  readonly ready: Promise<void>
+  state(): AttemptState
+  onStateChange(listener: (state: AttemptState) => void): () => void
+  unsubscribe(): void
+}
+
+/** How a plane's sources share attempts. */
+type SourceRules<Source> = {
+  /** Subscriptions of one key and kind on one host share an attempt. */
+  key(source: Source): string
+  /** The consumer its deliveries reach on a host (`SubscriptionDriver.subscribe`). */
+  holder(source: Source): string
+}
+
+/** Whether a payload is what a subscription of each kind delivers: a string for 'text', bytes for 'binary'. */
+const CARRIES: { readonly [Kind in BroadcastKind]: (payload: BackendPayload) => payload is BroadcastPayload<Kind> } = {
+  text: (payload) => typeof payload === 'string',
+  binary: (payload) => typeof payload !== 'string',
+}
+
+type SharedSubscriptionsOptions<Source> = {
+  driver: SubscriptionDriver<Source>
+  sources: SourceRules<Source>
+}
+
+/** A plane's subscriptions (Broadcast's, Room's): consumers of one source on one host share one driver attempt. */
+class SharedSubscriptions<Source> {
+  readonly driver: SubscriptionDriver<Source>
+  private readonly sources: SourceRules<Source>
+  /** By what they deliver, then by host and source key. */
+  private readonly slots: { readonly [Kind in BroadcastKind]: Map<string, SubscriptionSlot<Source, Kind>> } = {
+    text: new Map(),
+    binary: new Map(),
+  }
+
+  constructor({ driver, sources }: SharedSubscriptionsOptions<Source>) {
+    this.driver = driver
+    this.sources = sources
+  }
+
+  /** `listener` gets what `source` delivers: a string for `'text'`, bytes for `'binary'`. */
+  subscribe<Kind extends BroadcastKind>(
+    source: Source,
+    delivers: Kind,
+    listener: BackendListener<BroadcastPayload<Kind>>,
+  ): BackendSubscription {
+    const key = this.sources.key(source)
+    const slotKey = JSON.stringify([this.driver.hostKey?.() ?? '', key])
+    const slot = getOrCreate(
+      this.slots[delivers],
+      slotKey,
+      () => new SubscriptionSlot({ owner: this, source, key, slotKey, delivers, holder: this.sources.holder(source) }),
+    )
+    return slot.attach(listener)
+  }
+
+  /** Stops what is live and waits on none of it. */
+  dispose(): void {
+    for (const slot of [...this.slots.text.values(), ...this.slots.binary.values()]) slot.stop()
+  }
+
+  /** Unmaps `slot`, if it is still the one its key maps. */
+  unmapSlot<Kind extends BroadcastKind>(slot: SubscriptionSlot<Source, Kind>): void {
+    const slots = this.slots[slot.delivers]
+    if (slots.get(slot.slotKey) === slot) slots.delete(slot.slotKey)
+  }
+}
+
+/** A message the attempt delivered before it was ready, and the consumers it would have reached then. */
+type EarlyMessage<Kind extends BroadcastKind> = {
+  payload: BroadcastPayload<Kind>
+  ordering: OrderingInfo
+  targets: readonly Consumer<Kind>[]
+  bytes: number
+}
+
+type SubscriptionSlotOptions<Source, Kind extends BroadcastKind> = {
+  owner: SharedSubscriptions<Source>
+  source: Source
+  /** The source's key, and the key of the source on its host. */
+  key: string
+  slotKey: string
+  delivers: Kind
+  holder: string
+}
+
+/** One driver attempt, shared by the consumers of its source on its host. */
+class SubscriptionSlot<Source, Kind extends BroadcastKind> implements BackendReceiver {
+  readonly slotKey: string
+  readonly delivers: Kind
+  private readonly owner: SharedSubscriptions<Source>
+  private readonly source: Source
+  private readonly key: string
+  private readonly carries: (payload: BackendPayload) => payload is BroadcastPayload<Kind>
+  private readonly holder: string
+  private readonly attached = new Set<Consumer<Kind>>()
+  /** Taken at a delivery or a state change and dropped when a consumer comes or goes, so each reaches the consumers
+   *  it started with. */
+  private snapshot: readonly Consumer<Kind>[] | null = null
+  private current: AttemptState = 'establishing'
+  private latestReadiness: Deferred<void> = createReadiness()
+  private attempt: DriverAttempt | null = null
+  private unobserve: (() => void) | null = null
+  /** Allocated on the first early message. Null once startup ends, including the drain of messages listeners add. */
+  private early: { messages: Fifo<EarlyMessage<Kind>>; memory: MemoryHolder } | null | undefined
+  private drainingStartup = false
+  /** It stopped or closed: what the attempt says from here on is ignored. */
+  private finished = false
+
+  constructor({ owner, source, key, slotKey, delivers, holder }: SubscriptionSlotOptions<Source, Kind>) {
+    this.owner = owner
+    this.source = source
+    this.key = key
+    this.slotKey = slotKey
+    this.delivers = delivers
+    this.carries = CARRIES[delivers]
+    this.holder = holder
+  }
+
+  get state(): AttemptState {
+    return this.current
+  }
+
+  /** Settles when the current establishment does. */
+  get readiness(): Promise<void> {
+    return this.latestReadiness.promise
+  }
+
+  attach(listener: BackendListener<BroadcastPayload<Kind>>): BackendSubscription {
+    const consumer = new Consumer({ slot: this, listener })
+    this.attached.add(consumer)
+    this.snapshot = null
+    if (this.attempt === null && !this.finished) this.start()
+    return consumer
+  }
+
+  detach(consumer: Consumer<Kind>): void {
+    this.attached.delete(consumer)
+    this.snapshot = null
+    if (this.attached.size === 0) this.stop()
+  }
+
+  /** The last consumer left, or the plane is disposed. Called now, not deferred: a subscribe in the same tick starts the
+   *  source's next attempt after this one let go. */
+  stop(): void {
+    if (this.finished) return
+    const attempt = this.attempt
+    this.finish()
+    this.latestReadiness.resolve()
+    this.enter('closed')
+    if (attempt !== null) stopLogged(() => attempt.unsubscribe())
+  }
+
+  deliver(delivered: BackendPayload, ordering: OrderingInfo): void {
+    if (this.finished) return
+    const payload = this.checked(delivered, ordering)
+    if (payload === null) return
+    const targets = this.targets()
+    if (this.early === null) return this.dispatch(payload, ordering, targets)
+    const early = (this.early ??= { messages: new Fifo(), memory: { heldBytes: 0 } })
+
+    // Account for the payload, queue entry and the references in its snapshot before copying the driver's bytes.
+    const bytes =
+      (typeof payload === 'string' ? utf8ByteLength(payload) : payload.byteLength) +
+      HELD_SEND_OVERHEAD_BYTES +
+      targets.length * 8
+    if (!tryHold(early.memory, bytes)) {
+      return this.failStartup(
+        new ChannelOverflowError('Backend subscription closed: its startup messages exceeded the channel memory limit'),
+      )
+    }
+    try {
+      const owned = typeof payload === 'string' ? payload : new Uint8Array(payload)
+      const { seq, timestamp, rewound } = ordering
+      early.messages.push({
+        payload: owned as BroadcastPayload<Kind>,
+        ordering: { seq, timestamp, rewound },
+        targets,
+        bytes,
+      })
+    } catch (error) {
+      this.failStartup(error)
+    }
+  }
+
+  private dispatch(payload: BroadcastPayload<Kind>, ordering: OrderingInfo, targets: readonly Consumer<Kind>[]): void {
+    for (const consumer of targets) {
+      // A consumer or the slot itself may stop in an earlier listener.
+      if (this.finished) return
+      if (!consumer.attached) continue
+      // Consumers are isolated from each other: one that throws is reported.
+      try {
+        consumer.listener(payload, ordering)
+      } catch (error) {
+        console.error(error)
+      }
+    }
+  }
+
+  private start(): void {
+    let attempt: DriverAttempt
+    try {
+      attempt = this.owner.driver.subscribe(this.source, this, this.holder)
+    } catch (error) {
+      if (!this.finished) this.close(error)
+      return
+    }
+    // A driver can deliver synchronously inside subscribe(), before there is an attempt to stop.
+    if (this.finished) {
+      if (attempt.state() !== 'closed') stopLogged(() => attempt.unsubscribe())
+      return
+    }
+    this.attempt = attempt
+    this.unobserve = attempt.onStateChange((state, reason) => this.attemptChanged(state, reason))
+    const state = attempt.state()
+    // What it said before `subscribe()` returned.
+    if (state !== 'establishing') this.attemptChanged(state, undefined)
+  }
+
+  private attemptChanged(state: Exclude<AttemptState, 'establishing'>, reason: unknown): void {
+    if (this.finished) return
+    if (state === 'ready') return this.becameReady()
+    if (state === 'lost') return this.lost()
+    this.close(reason)
+  }
+
+  private becameReady(): void {
+    if (this.current === 'ready') return
+    const drain = this.early !== null && !this.drainingStartup
+    if (drain) this.drainingStartup = true
+    this.latestReadiness.resolve()
+    this.enter('ready')
+    if (!drain) return
+    const early = this.early
+    while (early && !this.finished) {
+      const message = early.messages.shift()
+      if (message === undefined) break
+      const { payload, ordering, targets, bytes } = message
+      letGo(early.memory, bytes)
+      this.dispatch(payload, ordering, targets)
+    }
+    this.clearEarly()
+  }
+
+  private failStartup(error: unknown): void {
+    const attempt = this.attempt
+    try {
+      this.close(error)
+    } finally {
+      if (attempt !== null) stopLogged(() => attempt.unsubscribe())
+    }
+  }
+
+  private clearEarly(): void {
+    if (this.early) releaseHolder(this.early.memory)
+    this.early = null
+  }
+
+  private lost(): void {
+    if (this.current === 'lost') return
+    if (this.current === 'ready') this.latestReadiness = createReadiness()
+    this.enter('lost')
+  }
+
+  /** Its consumers' `ready` rejects: with the store's `BackendError` itself where the store refused it, else with this
+   *  error, the driver's `reason` as its cause. Closed with a `reason`, it failed, which is reported once as this error,
+   *  however many consumers share it; without one, the backend ended it on purpose. */
+  private close(reason: unknown): void {
+    const failure = new Error(`Backend subscription closed: ${this.key}`, reason === undefined ? {} : { cause: reason })
+    this.finish()
+    // A resolved readiness can't carry the failure, so `ready` read from here on is a fresh, rejected one.
+    if (this.current === 'ready') this.latestReadiness = createReadiness()
+    this.enter('closed')
+    this.latestReadiness.reject(reason instanceof BackendError ? reason : failure)
+    if (reason !== undefined) handleCallbackBug(failure)
+  }
+
+  /** Checked once for all consumers; one that fails is reported and dropped. */
+  private checked(payload: BackendPayload, ordering: OrderingInfo): BroadcastPayload<Kind> | null {
+    try {
+      assertDriverOrdering(ordering)
+      assert(this.carries(payload))
+      return payload
+    } catch (error) {
+      console.error(error)
+      return null
+    }
+  }
+
+  /** Stops listening first: the attempt's own `closed` on its unsubscribe is no end. */
+  private finish(): void {
+    this.finished = true
+    this.clearEarly()
+    this.unobserve?.()
+    this.unobserve = null
+    this.attempt = null
+    this.owner.unmapSlot(this)
+  }
+
+  private enter(state: AttemptState): void {
+    this.current = state
+    for (const consumer of this.targets()) consumer.notify(state)
+  }
+
+  private targets(): readonly Consumer<Kind>[] {
+    return (this.snapshot ??= [...this.attached])
+  }
+}
+
+type ConsumerOptions<Kind extends BroadcastKind> = {
+  slot: SubscriptionSlot<unknown, Kind>
+  listener: BackendListener<BroadcastPayload<Kind>>
+}
+
+/** One consumer's subscription on a slot. */
+class Consumer<Kind extends BroadcastKind> implements BackendSubscription {
+  readonly listener: BackendListener<BroadcastPayload<Kind>>
+  /** False from its `unsubscribe()` on: the slot calls its listener no more. */
+  attached = true
+  private readonly slot: SubscriptionSlot<unknown, Kind>
+  private readonly stateListeners = new Set<(state: AttemptState) => void>()
+
+  constructor({ slot, listener }: ConsumerOptions<Kind>) {
+    this.slot = slot
+    this.listener = listener
+  }
+
+  get ready(): Promise<void> {
+    return this.attached ? this.slot.readiness : Promise.resolve()
+  }
+
+  state(): AttemptState {
+    return this.attached ? this.slot.state : 'closed'
+  }
+
+  onStateChange(listener: (state: AttemptState) => void): () => void {
+    assert(this.attached)
+    this.stateListeners.add(listener)
+    return () => this.stateListeners.delete(listener)
+  }
+
+  unsubscribe(): void {
+    if (!this.attached) return
+    this.attached = false
+    if (this.slot.state !== 'closed') this.notify('closed')
+    this.stateListeners.clear()
+    this.slot.detach(this)
+  }
+
+  notify(state: AttemptState): void {
+    for (const listener of this.stateListeners) {
+      try {
+        listener(state)
+      } catch (error) {
+        console.error(error)
+      }
+    }
+  }
+}
+
+function createReadiness(): Deferred<void> {
+  const readiness = createDeferred()
+  void readiness.promise.catch(() => {})
+  return readiness
+}

@@ -2,12 +2,14 @@ export { runTelefunc }
 export type { HttpResponse }
 
 import { assert, assertUsage, assertWarning } from '../../utils/assert.js'
+import { refusalContentType, type RefusalContentType } from '../../wire-protocol/refusal.js'
 import { isProduction } from '../../utils/isProduction.js'
 import { objectAssign } from '../../utils/objectAssign.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { Telefunc, PROVIDED_CONTEXT } from './context/getContext.js'
 import { REQUEST_CONTEXT } from './context/requestContext.js'
 import { loadTelefuncFiles } from './runTelefunc/loadTelefuncFiles.js'
+import { loadServerProductionEntry } from './runTelefunc/loadTelefuncFilesUsingVite.js'
 import { parseHttpRequest } from './runTelefunc/parseHttpRequest.js'
 // import { getEtag } from './runTelefunc/getEtag.js'
 import { executeTelefunction } from './runTelefunc/executeTelefunction.js'
@@ -16,6 +18,7 @@ import { handleTelefunctionBug } from './runTelefunc/validateTelefunctionError.j
 import { handleError } from './runTelefunc/handleError.js'
 import { applyShield } from './runTelefunc/applyShield.js'
 import { findTelefunction } from './runTelefunc/findTelefunction.js'
+import { readResponseText } from './runTelefunc/readResponseText.js'
 import { resolveReturnShields } from './shield.js'
 import { getServerConfig } from './serverConfig.js'
 import { isShieldValidationError } from '../../shared/ShieldValidationError.js'
@@ -32,7 +35,11 @@ import {
   STATUS_CODE_SUCCESS,
 } from '../../shared/constants.js'
 import { STREAM_TRANSPORT } from '../../wire-protocol/constants.js'
-import { createRequestContext } from './context/requestContext.js'
+import { createRequestContext, type RequestContext } from './context/requestContext.js'
+import type { ClientLeft } from './runTelefunc/clientLeft.js'
+import type { TakesUpgrades } from './runTelefunc/takesUpgrades.js'
+import { getChannelMux } from '../../wire-protocol/channel/server/ChannelMux.js'
+import type { ResponseHold } from '../../workarounds/denoUploadResponseHold.js'
 
 type StreamWritableWeb = WritableStream
 type StreamReadableWeb = ReadableStream
@@ -64,7 +71,7 @@ type HttpResponse = {
   err?: unknown
 }
 
-type ContentType = 'text/plain' | 'application/octet-stream' | 'text/event-stream'
+type ContentType = 'text/plain' | 'application/octet-stream' | 'text/event-stream' | RefusalContentType
 /** A response body is either a literal string or a concrete stream of the
  *  matching runtime (Node `Readable` when the adapter passed a Node
  *  `IncomingMessage`, Web `ReadableStream` otherwise). Producers commit to one
@@ -73,19 +80,22 @@ type ContentType = 'text/plain' | 'application/octet-stream' | 'text/event-strea
  *  middleman on the hot path. */
 type ResponseBody = string | StreamReadableNode | ReadableStream<Uint8Array<ArrayBuffer>>
 
-function createHttpResponse({
-  statusCode,
-  contentType,
-  headers,
-  body: responseBody,
-  err,
-}: {
+/** What a response is made of, as the call ends. */
+type HttpResponseParts = {
   statusCode: HttpResponse['statusCode']
   contentType: ContentType
   headers: [string, string][]
   body: ResponseBody
   err?: unknown
-}): HttpResponse {
+}
+
+/** The response. With a Deno upload's `hold`, a streamed body ends only once the upload is over; a string `body` tells
+ *  the hold it went out. */
+function createHttpResponse(
+  { statusCode, contentType, headers, body: responseBody, err }: HttpResponseParts,
+  hold: ResponseHold | null,
+): HttpResponse {
+  const sent = (): ResponseBody => (hold === null ? responseBody : hold.heldBody(getStreamReadableWeb(responseBody)))
   return {
     statusCode,
     headers: [...headers, ['Content-Type', contentType]],
@@ -110,33 +120,27 @@ function createHttpResponse({
         typeof responseBody === 'string',
         "httpResponse.body can't be used for streaming responses. Use httpResponse.pipe() or httpResponse.getReadableWebStream() instead.",
       )
+      hold?.answeredAsString()
       return responseBody
     },
     pipe(writable: StreamWritableWeb | StreamWritableNode): Promise<void> {
-      if (isStreamWritableWeb(writable)) return pipeToStreamWritableWeb(responseBody, writable)
-      if (isStreamWritableNode(writable)) return pipeToStreamWritableNode(responseBody, writable)
+      if (isStreamWritableWeb(writable)) return pipeToStreamWritableWeb(sent(), writable)
+      if (isStreamWritableNode(writable)) return pipeToStreamWritableNode(sent(), writable)
       assertUsage(
         false,
         "The argument `writable` passed to `httpResponse.pipe(writable)` doesn't seem to be a Web WritableStream nor a Node.js Writable.",
       )
     },
     getReadableWebStream() {
-      return getStreamReadableWeb(responseBody)
+      return getStreamReadableWeb(sent())
     },
     getReadableNodeStream() {
-      return getStreamReadableNode(responseBody)
+      return getStreamReadableNode(sent())
     },
     async getBody() {
-      if (typeof responseBody === 'string') return responseBody
-      const decoder = new TextDecoder()
-      let result = ''
-      // A `ReadableStream` is iterable on modern runtimes; the cast is just to
-      // satisfy `lib.dom.d.ts` which doesn't declare `[Symbol.asyncIterator]`.
-      for await (const chunk of responseBody as AsyncIterable<Uint8Array<ArrayBuffer>>) {
-        result += decoder.decode(chunk, { stream: true })
-      }
-      result += decoder.decode()
-      return result
+      const body = sent()
+      if (typeof body === 'string') return body
+      return readResponseText(body)
     },
     err,
   }
@@ -261,28 +265,45 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
   // No-op on subsequent calls and a silent no-op on Workers (load fails,
   // sync access guarded by `useNodeStream`).
   await loadStreamNodeModuleOnce()
+  const requestContext = createRequestContext(httpRequestResolved.request)
+  let response: HttpResponseParts | undefined
   try {
-    return await runTelefunc_(httpRequestResolved)
+    response = await runTelefunc_(httpRequestResolved, requestContext)
   } catch (err: unknown) {
     handleTelefunctionBug(err)
-    return createHttpResponse({
-      ...serverError,
-      err,
-    })
+    response = { ...serverError, err }
+  } finally {
+    // A call that answers without a value ends the live values it was passed as arguments.
+    if (response?.statusCode !== STATUS_CODE_SUCCESS) requestContext.markCallFailed()
+    // However the call ended: what its response still sends, a stream or a channel, holds the request from here on.
+    requestContext.markComplete()
   }
+  return createHttpResponse(response, requestContext.responseHold)
 }
 
-async function runTelefunc_({
-  request,
-  readable,
-  context,
-}: {
-  request: Request
-  readable?: StreamReadableNode
-  context?: Telefunc.Context
-}): Promise<HttpResponse> {
-  const requestContext = createRequestContext(request)
+async function runTelefunc_(
+  {
+    request,
+    readable,
+    context,
+    clientLeft,
+    clientGone,
+    takesUpgrades,
+    onBodyRead,
+  }: {
+    request: Request
+    readable?: StreamReadableNode
+    context?: Telefunc.Context
+    clientLeft: ClientLeft
+    clientGone: AbortSignal
+    takesUpgrades: TakesUpgrades
+    onBodyRead?: () => void
+  },
+  requestContext: RequestContext,
+): Promise<HttpResponseParts> {
   const runContext = { requestContext }
+
+  await loadServerProductionEntry()
 
   {
     // TO-DO/eventually: remove? Since `serverConfig` is global I don't think we need to set it to `runContext`, see for example https://github.com/telefunc/telefunc/commit/5e3367d2d463b72e805e75ddfc68ef7f177a35c0
@@ -290,6 +311,10 @@ async function runTelefunc_({
     objectAssign(runContext, {
       request,
       readable,
+      clientLeft,
+      clientGone,
+      takesUpgrades,
+      onBodyRead,
       serverConfig,
       appRootDir: serverConfig.root,
       telefuncFilesManuallyProvidedByUser: serverConfig.telefuncFiles,
@@ -310,10 +335,11 @@ async function runTelefunc_({
   {
     const parsed = await parseHttpRequest(runContext)
     if (parsed.isMalformedRequest) {
-      return createHttpResponse({ ...malformedRequest })
+      const contentType = parsed.refusal ? refusalContentType(parsed.refusal) : malformedRequest.contentType
+      return { ...malformedRequest, contentType }
     }
-    if (parsed.wireResponse) {
-      return createHttpResponse(parsed.wireResponse)
+    if (parsed.isSseRequest) {
+      return parsed.sseResponse
     }
     const { telefunctionKey, telefuncFilePath, telefunctionName } = parsed
     objectAssign(runContext, {
@@ -321,6 +347,7 @@ async function runTelefunc_({
       telefuncFilePath,
       telefunctionName,
       resolveRequest: parsed.resolveRequest,
+      wants: parsed.wants,
     })
   }
 
@@ -333,7 +360,7 @@ async function runTelefunc_({
   {
     const telefunction = await findTelefunction(runContext)
     if (!telefunction) {
-      return createHttpResponse({ ...malformedRequest })
+      return { ...malformedRequest }
     }
     objectAssign(runContext, { telefunction })
   }
@@ -343,7 +370,7 @@ async function runTelefunc_({
   {
     const resolved = runContext.resolveRequest(runContext.telefunction)
     if (resolved.isMalformedRequest) {
-      return createHttpResponse({ ...malformedRequest })
+      return { ...malformedRequest }
     }
     const { telefunctionArgs, streamTransport, requestExtensions } = resolved
     objectAssign(runContext, { telefunctionArgs, streamTransport, requestExtensions })
@@ -357,9 +384,12 @@ async function runTelefunc_({
         telefunctionAborted: true,
         telefunctionReturn: undefined,
       })
-      return createHttpResponse({ ...shieldValidationError })
+      return { ...shieldValidationError }
     }
   }
+
+  // Each subscription the page made before this call is in effect, or its broadcast ended, before the telefunction runs.
+  if (runContext.wants) await getChannelMux().applyCallWants(request, runContext.wants)
 
   {
     assert(runContext.isValidRequest)
@@ -380,28 +410,21 @@ async function runTelefunc_({
     })
   }
 
-  if (runContext.telefunctionHasErrored || runContext.telefunctionAborted) {
-    runContext.requestContext.markTopLevelError()
-  }
-
   if (runContext.telefunctionHasErrored) {
     if (isShieldValidationError(runContext.telefunctionTopLevelError)) {
-      return createHttpResponse({ ...shieldValidationError })
+      return { ...shieldValidationError }
     }
     throw runContext.telefunctionTopLevelError
   }
 
   {
-    objectAssign(runContext, {
-      abortSignal: runContext.requestContext.abortSignal,
-      useNodeStream: readable !== undefined,
-    })
+    objectAssign(runContext, { useNodeStream: readable !== undefined })
     const result = serializeTelefunctionResult(runContext)
 
     if (result.type === 'streaming') {
       const contentType =
         result.streamTransport === STREAM_TRANSPORT.SSE_INLINE ? 'text/event-stream' : 'application/octet-stream'
-      return createHttpResponse({
+      return {
         statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,
         contentType,
         headers: [
@@ -409,16 +432,16 @@ async function runTelefunc_({
           ['X-Accel-Buffering', 'no'],
         ],
         body: result.body,
-      })
+      }
     }
 
     objectAssign(runContext, { httpResponseBody: result.body })
   }
 
-  return createHttpResponse({
+  return {
     statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,
     contentType: 'text/plain',
     headers: [],
     body: runContext.httpResponseBody,
-  })
+  }
 }

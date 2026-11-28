@@ -1,7 +1,7 @@
 export { onNewTodo }
 export { onLoad }
+export { onProfile }
 
-// TO-DO/soon
 import { getContext } from 'telefunc'
 
 const database: {
@@ -15,6 +15,11 @@ async function onLoad() {
   // Simulate slow network
   await sleep(3 * 1000)
   return todoItems
+}
+
+async function onProfile() {
+  await Promise.resolve()
+  return getContext<{ name: string }>().name
 }
 
 async function onNewTodo({ text }) {

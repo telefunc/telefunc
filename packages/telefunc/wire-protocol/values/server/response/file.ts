@@ -8,7 +8,11 @@ const fileReplacer: StreamingReplacerType<FileResponseContract, ServerReplacerCo
   prefix: SERIALIZER_PREFIX_FILE,
   detect: (value): value is File => value instanceof File,
   replace: (value, context) => {
-    const { metadata: streamMetadata, close, abort } = context.sendStream(() => fileReplacer.createProducer(value))
+    const {
+      metadata: streamMetadata,
+      close,
+      abort,
+    } = context.sendStream(() => fileReplacer.createProducer(value), { eager: true })
     const metadata = {
       ...streamMetadata,
       name: value.name,

@@ -6,18 +6,64 @@
 // fires the same 'websocket' event on its probe socket, but that socket only carries the tiny
 // PREPARE/READY/PING exchange before closing — so a frame threshold, not the event alone, separates
 // commit from abort. The paired sse-only run is the control: no `/_telefunc` WebSocket may ever open.
-export { testUpgrade }
+export { testUpgrade, testOtherWireVersionAndOrigins, testWebSocketUnanswered }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import type { WebSocket } from 'playwright-chromium'
-import { navigate, getResult, getCleanupState, resetCleanupState } from '../../e2e-utils'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import type { Page, Request, WebSocket, WebSocketRoute } from 'playwright-chromium'
+import {
+  navigate,
+  getResult,
+  getCleanupState,
+  resetCleanupState,
+  serverRuntime,
+  dropNextWebSocket,
+  holdNextWebSocket,
+} from '../../e2e-utils'
+import { parseChannelTransports } from '../../channelTransports'
+import { rawRequestStatus, upgradeStatus } from '../../../utils'
 
 type FrameCounts = { received: number }
 
-function testUpgrade() {
+/** A wire version no server of this repo runs. */
+const OLD_WIRE_VERSION = 0
+
+function testUpgrade(isDev: boolean) {
   const transports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
   const expectsUpgrade = transports.length > 1 && transports[transports.length - 1] === 'ws'
   const isSseOnly = transports.length === 1 && transports[0] === 'sse'
+
+  if (transports.includes('ws'))
+    test("a WebSocket upgrade from a page of another site is refused, and one from the server's own origin opens", async () => {
+      expect(await upgradeStatus('https://another-site.example')).toBe(403)
+      expect(await upgradeStatus(new URL(getServerUrl()).origin)).toBe(101)
+    })
+  if (transports.includes('ws'))
+    test("on Node a WebSocket handshake whose Host can't be read is answered 400, and on every runtime a request for another path is the app's", async () => {
+      const handshake = [
+        'Connection: Upgrade',
+        'Upgrade: websocket',
+        'Sec-WebSocket-Version: 13',
+        'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+      ]
+      // On Node only: on Bun and Deno this app's static files middleware (srvx's) parses the request's URL before
+      // Telefunc's `fetch()` sees it, and answers 500 itself.
+      if (serverRuntime() === 'node')
+        expect(await rawRequestStatus(['GET /_telefunc HTTP/1.1', 'Host: a b', ...handshake])).toBe(400)
+      const { host } = new URL(getServerUrl())
+      // On every runtime: a WebSocket handshake to a path that only begins like Telefunc's is the app's own request,
+      // answered as the app answers a path that isn't Telefunc's.
+      const appsAnswer = await rawRequestStatus(['GET /no-such-page HTTP/1.1', `Host: ${host}`])
+      expect(appsAnswer).not.toBe('no answer')
+      expect(await rawRequestStatus(['GET /_telefunc/other HTTP/1.1', `Host: ${host}`, ...handshake])).toBe(appsAnswer)
+      // In development Vike answers both with 500, as the playground has no error page, and logs that on stderr.
+      if (isDev)
+        await autoRetry(async () => {
+          expectLog(/No error page found|HTTP response ← \/(no-such-page|_telefunc\/other) 500/)
+        })
+    })
+  testOtherWireVersionAndOrigins()
+  // Only the Node server holds or drops an upgrade (+server.ts), which `pnpm dev` doesn't serve.
+  if (transports.includes('ws') && !isDev && serverRuntime() === 'node') testWebSocketUnanswered()
   // ws-only (['ws']): no SSE to start from, so data-on-WS is normal and asserting it would be vacuous
   // — the existing channel suite already covers pure-WS delivery. Run only the upgrade path + control.
   if (!expectsUpgrade && !isSseOnly) return
@@ -106,12 +152,109 @@ function testUpgrade() {
       page.off('websocket', onWebSocket)
     }
   })
+
+  if (!expectsUpgrade) return
+
+  // The server moves a page's publishes to the WebSocket at the barrier, and the page takes that wire over once the
+  // barrier's POST answers. Holding that answer lands a publish between the two, whole or with its body's end after.
+  for (const { bytes, what, bodyHeld } of [
+    { bytes: 1024, what: 'arrives whole', bodyHeld: false },
+    { bytes: 4 * 1024 * 1024, what: 'starts arriving', bodyHeld: true },
+  ]) {
+    test(`${label}: a publish that ${what} before the page takes the new wire over reaches the page [${transports.join(',')}]`, async () => {
+      const browser = page.context().browser()
+      if (browser === null) throw new Error('no browser')
+      const context = await browser.newContext()
+      const routed = await context.newPage()
+      const acrossFlip = async () => {
+        const state: unknown = JSON.parse((await routed.textContent('#channel-state')) ?? 'null')
+        return typeof state === 'object' && state !== null && 'acrossFlip' in state ? state.acrossFlip : undefined
+      }
+      try {
+        const gate = await holdFlip(routed, bytes / 2)
+        await navigate(`${getServerUrl()}/channel`, undefined, routed)
+        await routed.click('#channel-test-across-flip')
+        await autoRetry(async () => expect(await acrossFlip()).not.toBe(null))
+        await gate.committed
+        gate.countFromHere()
+        await routed.evaluate((n) => {
+          if (!window.publishAcrossFlip) throw new Error('no publishAcrossFlip')
+          return window.publishAcrossFlip(n)
+        }, bytes)
+        void routed.evaluate(() => {
+          if (!window.sendAcrossFlip) throw new Error('no sendAcrossFlip')
+          return window.sendAcrossFlip()
+        })
+        await autoRetry(() => expect(gate.passedBytes()).greaterThan(bytes / 2))
+        expect((await gate.flip()) > 0).toBe(bodyHeld)
+        await autoRetry(async () => expect(await acrossFlip()).deep.equal({ received: [bytes] }))
+      } finally {
+        await context.close()
+      }
+    })
+  }
 }
 
-function parseChannelTransports(raw: string | undefined): string[] {
-  if (!raw) return ['sse']
-  return JSON.parse(raw) as string[]
+/** Routes `target`'s wires through the test: the barrier's POST is answered only by `flip()`, which then passes what it
+ *  held of the page's WebSocket past `heldPast` bytes, once the page's first send after the flip shows it took the wire. */
+async function holdFlip(target: Page, heldPast: number) {
+  const held: Buffer[] = []
+  let counted = false
+  let passed = 0
+  let toPage: WebSocketRoute | undefined
+  let allowFlip: () => void
+  const flipAllowed = new Promise<void>((resolve) => (allowFlip = resolve))
+  let tookWire: () => void
+  const tookWireP = new Promise<void>((resolve) => (tookWire = resolve))
+  let serverCommitted: () => void
+  const committed = new Promise<void>((resolve) => (serverCommitted = resolve))
+  await target.route(/\/_telefunc/, async (route) => {
+    if (!route.request().postDataBuffer()?.includes('upgradeId')) return route.fallback()
+    const answer = await route.fetch()
+    serverCommitted()
+    await flipAllowed
+    await route.fulfill({ response: answer })
+  })
+  await target.routeWebSocket(/\/_telefunc/, (ws) => {
+    const server = ws.connectToServer()
+    toPage = ws
+    ws.onMessage((message) => {
+      if (bytesOf(message).includes('after-flip')) tookWire()
+      server.send(message)
+    })
+    server.onMessage((message) => {
+      const bytes = bytesOf(message)
+      if (counted && passed > heldPast) return void held.push(bytes)
+      if (counted) passed += bytes.length
+      ws.send(message)
+    })
+  })
+  return {
+    committed,
+    countFromHere: () => void (counted = true),
+    passedBytes: () => passed,
+    flip: async () => {
+      allowFlip()
+      await tookWireP
+      counted = false
+      if (toPage === undefined) throw new Error("the page's WebSocket wasn't routed")
+      for (const message of held) toPage.send(message)
+      return held.length
+    },
+  }
 }
+
+declare global {
+  interface Window {
+    /** The across-flip row's publish of `bytes`, and its send once the page took the new wire. */
+    publishAcrossFlip?: (bytes: number) => Promise<unknown>
+    sendAcrossFlip?: () => Promise<unknown>
+  }
+}
+
+/** A routed WebSocket message's bytes, a copy of them. */
+const bytesOf = (message: string | Buffer) =>
+  typeof message === 'string' ? Buffer.from(message) : Buffer.from(message)
 
 type UpgradeChannelState = {
   connected: boolean
@@ -124,4 +267,87 @@ type UpgradeChannelState = {
   multiCh1IsMonotonic: boolean | null
   multiCh2IsMonotonic: boolean | null
   upstreamReconnectChannelId: string | null
+  acrossFlip: { received: number[] } | null
+}
+
+/** What a page on another wire version is told, and the refusals of forged or odd Origin headers. */
+function testOtherWireVersionAndOrigins() {
+  const transports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
+  if (transports.includes('ws'))
+    test('a page on another wire version is told to reload: its WebSocket opens, then closes with the code a page reloads on', async () => {
+      const url = new URL(`/_telefunc?wire=${OLD_WIRE_VERSION}`, getServerUrl())
+      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+      const ws = new globalThis.WebSocket(url)
+      const closed = await new Promise<{ code: number; reason: string }>((resolve, reject) => {
+        ws.onclose = (event) => resolve({ code: event.code, reason: event.reason })
+        ws.onerror = () => reject(new Error('The WebSocket failed before it closed'))
+      })
+      expect(closed).deep.equal({ code: 4001, reason: 'reload the page' })
+    })
+  if (transports.includes('sse'))
+    test('a page on another wire version is told to reload: its SSE request is refused `reload`', async () => {
+      const resp = await fetch(`${getServerUrl()}/_telefunc?_telefunc=sse&wire=${OLD_WIRE_VERSION}`, {
+        method: 'POST',
+        headers: { 'x-telefunc-request': 'sse' },
+        body: new Uint8Array(4),
+      })
+      expect(resp.status).toBe(409)
+      expect(resp.headers.get('content-type')).toMatch(/^text\/vnd\.telefunc\.refusal; kind=reload;/)
+      expect(await resp.text()).toBe('The server runs another wire version: reload the page.')
+    })
+  if (transports.includes('ws'))
+    test('WebSocket upgrades with forged or odd Origin headers are all refused, and the log stays bounded', async () => {
+      const origins = [
+        // `data:` parses, and its origin is the opaque `null`.
+        'data:,x',
+        'null',
+        `blob:https://${'a'.repeat(4000)}.example/id`,
+        `${'s'.repeat(8000)}://x`,
+        ...Array.from({ length: 30 }, (_, i) => `https://forged-${i}.example`),
+      ]
+      for (const origin of origins) expect(await upgradeStatus(origin)).toBe(403)
+      await autoRetry(async () => {
+        expectLog(/WebSocket upgrades from more than 20 origins were refused/, {
+          filter: (log) => log.logSource === 'stderr',
+        })
+      })
+      const lines: string[] = []
+      expectLog(/WebSocket upgrades? from/, {
+        filter: (log) => {
+          if (log.logSource !== 'stderr' || !/WebSocket upgrades? from/.test(log.logText)) return false
+          lines.push(...log.logText.split('\n').filter((line) => /WebSocket upgrades? from/.test(line)))
+          return true
+        },
+      })
+      expect(lines.length).lessThanOrEqual(21)
+      for (const line of lines) expect(line.length).lessThan(1000)
+    })
+}
+
+/** A page with ['ws', 'sse'] whose WebSocket upgrade gets no answer, or is dropped before it opens. */
+function testWebSocketUnanswered() {
+  for (const [what, arm] of [
+    ['gets no answer, as behind a proxy that black-holes WebSockets,', holdNextWebSocket],
+    ['is dropped before it opens', dropNextWebSocket],
+  ] as const)
+    test(`a page with ['ws', 'sse'] whose WebSocket upgrade ${what} opens its channel over SSE, and every message arrives once`, async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      let sseOpens = 0
+      const onRequest = (request: Request) => {
+        const url = new URL(request.url())
+        if (url.searchParams.get('_telefunc') === 'sse' && request.headers().accept === 'text/event-stream') sseOpens++
+      }
+      page.on('request', onRequest)
+      try {
+        await arm()
+        const opened = await page.evaluate(() => window.openCounted!(['ws', 'sse']))
+        if (!('id' in opened)) throw new Error(`The channel ended before it opened: ${opened.ended}`)
+        const sent = ['one', 'two', 'three']
+        for (const msg of sent) expect(await page.evaluate((msg) => window.sendCounted!(msg), msg)).toBe(`ack:${msg}`)
+        expect(sseOpens).toBe(1)
+        expect(JSON.parse((await getCleanupState())[`counted_${opened.id}`] ?? '[]')).deep.equal(sent)
+      } finally {
+        page.off('request', onRequest)
+      }
+    })
 }

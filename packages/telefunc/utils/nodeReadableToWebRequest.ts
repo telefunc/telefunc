@@ -2,23 +2,21 @@ export { nodeReadableToWebRequest, normalizeHeaders }
 
 import type { EventEmitter } from 'node:events'
 import type { Readable, Writable } from 'node:stream'
-import { loadStreamNodeModule } from './loadStreamNodeModule.js'
 import { assertIsNotBrowser } from './assertIsNotBrowser.js'
 assertIsNotBrowser()
 
 type HeadersInput = Record<string, string | string[] | undefined> | [string, string][] | Headers
 
-async function nodeReadableToWebRequest(
+function nodeReadableToWebRequest(
   readable: Readable,
   url: string,
   method: string,
   headers: HeadersInput,
   response?: Writable,
-): Promise<{ request: Request; unwatch: () => void }> {
-  const { Readable: ReadableClass } = await loadStreamNodeModule()
+): { request: Request; unwatch: () => void; clientGone: AbortSignal } {
   // `new Request()` refuses a body for these methods.
   const hasBody = !['GET', 'HEAD'].includes(method.toUpperCase())
-  const body = hasBody ? (ReadableClass.toWeb(readable) as ReadableStream<Uint8Array>) : null
+  const body = hasBody ? webBodyOf(readable) : null
 
   const headerPairs = normalizeHeaders(headers)
 
@@ -51,7 +49,41 @@ async function nodeReadableToWebRequest(
     socket.once('close', abort)
     unwatch = () => socket.off('close', abort)
   }
-  return { request, unwatch }
+  // The client left: its request was cut short, or once answered, its socket closed before the body's end.
+  const clientGone = AbortSignal.any([abortController.signal, socketClosesBeforeEnd(readable, socket)])
+  return { request, unwatch, clientGone }
+}
+
+/** Aborts once `socket` closes before `readable`'s end: the client left mid-upload. Once the call is answered, Node no
+ *  longer ends the request then, and `serve()` no longer has the request's signal watch the socket (`unwatch`). Watched
+ *  until the body's end, as keep-alive reuses the socket. */
+function socketClosesBeforeEnd(readable: Readable, socket: EventEmitter | null | undefined): AbortSignal {
+  const gone = new AbortController()
+  if (!socket || readable.readableEnded) return gone.signal
+  const left = () => gone.abort()
+  socket.once('close', left)
+  readable.once('end', () => socket.off('close', left))
+  return gone.signal
+}
+
+/** `readable` as a Web body that reads it only once read itself. A binary call's or an SSE upload's body is read off
+ *  `readable` by Telefunc's own reader: `Readable.toWeb()` would copy all of it into a queue nothing reads. */
+function webBodyOf(readable: Readable): ReadableStream<Uint8Array> {
+  // Its generator starts at the first `next()`: until then nothing listens to `readable`.
+  const chunks = readable[Symbol.asyncIterator]()
+  return new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        const { value, done } = await chunks.next()
+        if (done) controller.close()
+        else controller.enqueue(value)
+      },
+      async cancel() {
+        await chunks.return?.()
+      },
+    },
+    { highWaterMark: 0 },
+  )
 }
 
 function normalizeHeaders(headers: HeadersInput): [string, string][] {

@@ -271,6 +271,12 @@ const headings = [
   },
   {
     level: 2,
+    titleInNav: '`broadcast`',
+    title: '`broadcast` (config)',
+    url: '/broadcast-config',
+  },
+  {
+    level: 2,
     title: '`fetch`',
     url: '/fetch',
   },
@@ -318,6 +324,26 @@ const headings = [
     title: '`Channel`',
     url: '/channel',
     sectionTitles: ['`new Channel()`', '`Broadcast`', '`new BroadcastChannel()`'],
+  },
+  {
+    level: 2,
+    title: '`Room`',
+    url: '/room',
+    sectionTitles: [
+      'Create and join a room',
+      "Show who's in the room",
+      'Send a message to everyone',
+      'Send a private message',
+      'Control who can join and post',
+      'Stream audio or video',
+      'Run on multiple servers',
+      'Methods',
+    ],
+  },
+  {
+    level: 2,
+    title: '`Room` config',
+    url: '/room-config',
   },
   {
     level: 2,

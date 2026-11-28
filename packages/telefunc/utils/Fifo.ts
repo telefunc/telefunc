@@ -17,8 +17,21 @@ class Fifo<T> {
     return this.items[this.head]
   }
 
+  /** The item `index` places from the oldest. */
+  at(index: number): T | undefined {
+    return this.head + index < this.items.length ? this.items[this.head + index] : undefined
+  }
+
   *[Symbol.iterator](): Iterator<T> {
     for (let i = this.head; i < this.items.length; i++) yield this.items[i] as T
+  }
+
+  /** Removes the items `drops` says go, called on each in order. */
+  remove(drops: (item: T) => boolean): void {
+    const kept: T[] = []
+    for (const item of this) if (!drops(item)) kept.push(item)
+    this.items = kept
+    this.head = 0
   }
 
   shift(): T | undefined {

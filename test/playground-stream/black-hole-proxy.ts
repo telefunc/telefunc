@@ -1,4 +1,4 @@
-export { startBlackHoleProxy }
+export { startBlackHoleProxy, PacedDirection }
 export type { BlackHoleProxy }
 
 import * as net from 'node:net'
@@ -10,10 +10,23 @@ type BlackHoleProxy = {
   blackHoleWebSockets(): number
   /** The page's next WebSocket gets the server's upgrade answer and nothing after it, while what the page sends still reaches the server, but its close doesn't. */
   muteNextWebSocket(): void
+  /** The page's next WebSocket gets no answer, and the server never sees it: a peer that took the connection and stays silent. */
+  holdNextWebSocket(): void
+  /** How many of the page's WebSockets `holdNextWebSocket()` held. */
+  heldWebSockets(): number
   /** Null until the server closes the muted WebSocket, then how many WebSockets the page opened after it meanwhile. */
   openedBeforeMutedClosed(): number | null
-  /** From now on each direction carries `bytesPerSecond` (download, upload) through its own queue of `queueBytes`, as a slow link does; a direction whose queue is full stops reading its senders. */
-  pace(link: { downBytesPerSecond: number; upBytesPerSecond: number; queueBytes: number }): void
+  /** From now on what the page sends on each new connection reaches the server `ms` after its first byte, as a server
+   *  slow to take connections answers them late. */
+  delayFirstByte(ms: number): void
+  /** From now on each direction carries `bytesPerSecond` (download, upload) through its own queue of `queueBytes`, as a slow link does, each byte `delayMs` late; a direction whose queue is full stops reading its senders. */
+  pace(link: {
+    downBytesPerSecond: number
+    upBytesPerSecond: number
+    queueBytes: number
+    burstMs?: number
+    delayMs?: number
+  }): void
   close(): Promise<void>
 }
 
@@ -31,21 +44,46 @@ async function startBlackHoleProxy(target: string): Promise<BlackHoleProxy> {
   const { hostname, port: targetPort } = new URL(target)
   const links = new Set<Link>()
   let muteNext = false
+  let holdNext = false
+  let held = 0
   let webSockets = 0
   let openedBeforeMutedClosed: number | null = null
+  let firstByteDelayMs = 0
   let down: PacedDirection | null = null
   let up: PacedDirection | null = null
   const proxy = net.createServer((page) => {
     const server = net.connect(Number(targetPort), hostname)
+    // A link forwards bytes as they come: with Nagle, a small write here would wait for the other end's delayed ACK.
+    page.setNoDelay(true)
+    server.setNoDelay(true)
     const link: Link = { page, server, webSocket: false, dead: false, muted: null }
     links.add(link)
+    let lateMs = firstByteDelayMs
+    let late: Buffer[] | null = null
     page.on('data', (chunk: Buffer) => {
+      if (late) return void late.push(chunk)
+      if (lateMs === 0) return fromPage(chunk)
+      late = [chunk]
+      setTimeout(() => {
+        const held = late!
+        late = null
+        if (!server.destroyed) for (const each of held) fromPage(each)
+      }, lateMs)
+      lateMs = 0
+    })
+    const fromPage = (chunk: Buffer) => {
       if (link.dead) return
       if (link.muted) return forwardMutedUplink(link, chunk)
       const head = chunk.toString('latin1', 0, 2048)
       if (head.startsWith('GET /_telefunc') && /^upgrade: websocket/im.test(head)) {
         link.webSocket = true
         webSockets++
+        if (holdNext) {
+          holdNext = false
+          held++
+          link.dead = true
+          return
+        }
         if (muteNext) {
           muteNext = false
           link.muted = { uplink: Buffer.alloc(0), opened: webSockets }
@@ -53,7 +91,7 @@ async function startBlackHoleProxy(target: string): Promise<BlackHoleProxy> {
       }
       if (up) up.enqueue(page, server, chunk)
       else server.write(chunk)
-    })
+    }
     let answered = false
     server.on('data', (chunk: Buffer) => {
       if (link.dead || (link.muted && answered)) return
@@ -94,10 +132,17 @@ async function startBlackHoleProxy(target: string): Promise<BlackHoleProxy> {
     muteNextWebSocket() {
       muteNext = true
     },
+    holdNextWebSocket() {
+      holdNext = true
+    },
+    heldWebSockets: () => held,
     openedBeforeMutedClosed: () => openedBeforeMutedClosed,
-    pace({ downBytesPerSecond, upBytesPerSecond, queueBytes }) {
-      down = new PacedDirection(downBytesPerSecond, queueBytes)
-      up = new PacedDirection(upBytesPerSecond, queueBytes)
+    delayFirstByte(ms) {
+      firstByteDelayMs = ms
+    },
+    pace({ downBytesPerSecond, upBytesPerSecond, queueBytes, burstMs = 5, delayMs = 0 }) {
+      down = new PacedDirection(downBytesPerSecond, queueBytes, burstMs, delayMs)
+      up = new PacedDirection(upBytesPerSecond, queueBytes, burstMs, delayMs)
     },
     async close() {
       down?.stop()
@@ -137,23 +182,34 @@ function frameLength(bytes: Buffer): number | null {
   return bytes.length < 10 ? null : 10 + 4 + Number(bytes.readBigUInt64BE(2))
 }
 
-/** One direction of a slow link: what its senders write leaves in order at `bytesPerSecond`. */
+/** The most of the link's time one tick of a busy link sends, however late it runs: a link of the named rate doesn't
+ *  hand over more than a second of it at once. */
+const MAX_TICK_MS = 1000
+
+/** One direction of a slow link: what its senders write leaves in order at `bytesPerSecond`, no sooner than `delayMs`,
+ *  however late its ticks run. */
 class PacedDirection {
-  private queue: { from: net.Socket; to: net.Socket; chunk: Buffer }[] = []
+  private queue: { from: net.Socket; to: net.Socket; chunk: Buffer; at: number }[] = []
   private head = 0
   private queued = 0
   private paused = new Set<net.Socket>()
   private allowance = 0
   private last = performance.now()
-  private timer = setInterval(() => this.drain(), 5)
+  /** Whether bytes that were due still waited at the last tick: the link was busy the whole time since. */
+  private backlogged = false
+  private timer: ReturnType<typeof setInterval>
 
   constructor(
     private bytesPerSecond: number,
     private queueBytes: number,
-  ) {}
+    private burstMs: number,
+    private delayMs: number,
+  ) {
+    this.timer = setInterval(() => this.drain(), burstMs)
+  }
 
   enqueue(from: net.Socket, to: net.Socket, chunk: Buffer) {
-    this.queue.push({ from, to, chunk })
+    this.queue.push({ from, to, chunk, at: performance.now() + this.delayMs })
     this.queued += chunk.length
     if (this.queued > this.queueBytes && !this.paused.has(from)) {
       from.pause()
@@ -163,14 +219,17 @@ class PacedDirection {
 
   private drain() {
     const now = performance.now()
-    // A link idle for a while doesn't send a burst once it has data again.
+    // A busy link carried bytes the whole time since the last tick, however late this one runs. One idle for a while
+    // doesn't send a burst once it has data again.
+    const mostMs = this.backlogged ? MAX_TICK_MS : 2 * this.burstMs
     this.allowance = Math.min(
       this.allowance + ((now - this.last) * this.bytesPerSecond) / 1000,
-      this.bytesPerSecond / 100,
+      (this.bytesPerSecond * mostMs) / 1000,
     )
     this.last = now
-    while (this.allowance >= 1 && this.head < this.queue.length) {
-      const entry = this.queue[this.head]!
+    while (this.allowance >= 1) {
+      const entry = this.queue[this.head]
+      if (entry === undefined || entry.at > now) break
       const bytes = Math.min(entry.chunk.length, Math.floor(this.allowance))
       if (!entry.to.destroyed) entry.to.write(entry.chunk.subarray(0, bytes))
       this.allowance -= bytes
@@ -178,6 +237,8 @@ class PacedDirection {
       if (bytes === entry.chunk.length) this.head++
       else entry.chunk = entry.chunk.subarray(bytes)
     }
+    const next = this.queue[this.head]
+    this.backlogged = next !== undefined && next.at <= now
     if (this.head > 1024 && this.head * 2 > this.queue.length) {
       this.queue = this.queue.slice(this.head)
       this.head = 0

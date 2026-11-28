@@ -1,0 +1,50 @@
+import { Link } from '@brillout/docpress'
+import { ConfigWhereServer, TelefuncStreamBeta } from '../../components'
+
+**Environment**: server.
+
+<TelefuncStreamBeta />
+
+Set how <Link href="/channel#broadcast">Broadcast</Link> reaches subscribers on your other servers.
+
+```ts
+// /server/index.ts
+// Environment: server
+
+import { config } from 'telefunc'
+
+config.broadcast = {
+  onDeliveryLost: ({ key, reason }) => console.warn(`Missed messages for ${key}: ${reason}`),
+}
+```
+
+Broadcast uses your installed backend, such as <Link href="/redis" />, and works on one server by default. Set the optional `transport` to a <Link href="#custom-transports">`BroadcastTransport`</Link> for your own broker.
+
+> `onDeliveryLost` runs on a server that missed messages with Redis or Cloudflare. The default logs the loss. Use the callback to refresh state when needed.
+
+<ConfigWhereServer />
+
+## Custom transports
+
+`transport` is a `BroadcastTransport`:
+
+```ts ts-only
+type BroadcastTransport = {
+  send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
+  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): BroadcastUnsubscribe
+  sendBinary(key: string, payload: Uint8Array): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
+  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void): BroadcastUnsubscribe
+}
+type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; opened: Promise<void> }
+```
+
+- Forward each payload unchanged with the receipt that `send()` or `sendBinary()` returned. Assign one increasing sequence per key across servers, for text and binary together, and a Unix timestamp in milliseconds.
+- Return an unsubscribe function if the listener is ready immediately. When your broker confirms subscriptions asynchronously, return `{ unsubscribe, opened }` and settle `opened` with that confirmation or error. Keep delivering across your broker's reconnects.
+- Release a listener's resources in `unsubscribe()`. Telefunc calls it even if `opened` rejects, and may start another listener while cleanup runs.
+- Copy binary payloads you keep for asynchronous sends so the publisher can reuse its buffer.
+
+## See also
+
+- <Link href="/stream/scale" />
+- <Link href="/channel" />
+- <Link href="/redis" />

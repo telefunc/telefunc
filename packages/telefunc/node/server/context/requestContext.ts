@@ -5,7 +5,10 @@ export type { RequestContext, ResponseAbortSource }
 import { Abort } from '../Abort.js'
 import type { AbortError } from '../Abort.js'
 import { handleCallbackBug } from '../runTelefunc/validateTelefunctionError.js'
-import { isPromise } from '../../../utils/isPromise.js'
+import { invokeChannelListener } from '../../../wire-protocol/channel/channel.js'
+import { createDeferred } from '../../../utils/createDeferred.js'
+import { ATTACHABLE_NOW, type CallPage } from '../../../wire-protocol/channel/server/ServerChannel.js'
+import type { ResponseHold } from '../../../workarounds/denoUploadResponseHold.js'
 
 const REQUEST_CONTEXT: unique symbol = Symbol.for('telefunc.requestContext')
 
@@ -28,119 +31,153 @@ type RequestContext = {
   signal: AbortSignal
   /** Response-wide abort source used by returned values and response transports. */
   responseAbort: ResponseAbortSource
-  /** Fires when the telefunction throws (or has already thrown) at the top level. */
-  onTopLevelError: (cb: () => void) => void
-  /** @internal Called by the framework after executeTelefunction catches a top-level throw. */
-  markTopLevelError: () => void
+  /** Fires once the call answers with a status other than 200; at once if it already has. */
+  onCallFailed: (cb: () => void) => void
+  /** @internal Called by `runTelefunc` once the call answered with a status other than 200. */
+  markCallFailed: () => void
   /** Register a callback that fires when the request lifecycle ends for any reason
    *  (response sent, stream complete, or client disconnect). Fires exactly once. */
   onClose: (cb: () => void) => void
-  /** Mark the response as complete. Fires onClose callbacks.
-   *  Gated by trackPending: if pending items exist, defers until all complete. */
+  /** Fires once the call has answered while what its response still sends (a channel, a stream) holds the request:
+   *  never where nothing holds the request on. */
+  onAnswered: (cb: () => void) => void
+  /** @internal Called by `runTelefunc` once the call answered, whichever way: fires the onAnswered callbacks where a hold
+   *  is left, and onClose callbacks once no item of trackPending is pending. */
   markComplete: () => void
-  /** Register a pending item (channel, stream pump, inline stream).
-   *  Returns a completion callback. markComplete is deferred until all pending items complete. */
+  /** On Deno, keeps the response open until the call's binary upload ends. */
+  responseHold: ResponseHold | null
+  /** The page this call answers, as a channel the call returned waits for it to attach: each byte of its upload shows it
+   *  is on its way, as a browser attaches only once it has sent the whole body. Set by the binary call's reader. */
+  page: CallPage
+  /** Take a hold (a channel, a stream pump, an inline body) and return its one-shot release.
+   *  onClose callbacks fire once no hold is left. */
   trackPending: () => () => void
 }
 
-/** Create a RequestContext and wire the abort signal to markComplete. */
+/** Create a RequestContext and wire the abort signal to the call's own hold. */
 function createRequestContext(request: Request): RequestContext {
   const closeCallbacks: Array<() => void> = []
   let closed = false
+  let closeController: AbortController | undefined
 
   const fireClose = () => {
     if (closed) return
     closed = true
-    for (const cb of closeCallbacks) invokeCloseCallback(cb)
+    closeController?.abort()
+    for (const cb of closeCallbacks) invokeChannelListener(cb, [], handleCallbackBug)
     closeCallbacks.length = 0
   }
 
-  const errorCallbacks: Array<() => void> = []
-  let errored = false
-  const fireError = () => {
-    if (errored) return
-    errored = true
-    for (const cb of errorCallbacks) {
+  const failedCallbacks: Array<() => void> = []
+  let failed = false
+  const fireFailed = () => {
+    if (failed) return
+    failed = true
+    for (const cb of failedCallbacks) {
       try {
         cb()
       } catch {}
     }
-    errorCallbacks.length = 0
+    failedCallbacks.length = 0
   }
 
-  const closeController = new AbortController()
-  closeCallbacks.push(() => closeController.abort())
+  const abortSignal = request.signal
+  // The call holds the request until it answers or its client leaves (`watched`: its leaving releases the call's hold).
+  // Streams and channels can hold it longer.
+  let pendingCount = 1
+  let call: 'held' | 'watched' | 'released' = 'held'
 
-  // Reference counting: fireClose fires when all holds are released.
-  // Each trackPending() adds a hold and returns a one-shot release function.
-  let pendingCount = 0
-  const trackPending = () => {
-    pendingCount++
-    let released = false
-    return () => {
-      if (released) return
-      released = true
-      if (--pendingCount === 0) fireClose()
+  const releasePending = () => {
+    if (--pendingCount === 0) fireClose()
+  }
+  const releaseCall = () => {
+    if (call === 'released') return
+    if (call === 'watched') abortSignal.removeEventListener('abort', releaseCall)
+    call = 'released'
+    releasePending()
+  }
+  const watchClient = () => {
+    if (call !== 'held') return
+    if (abortSignal.aborted) {
+      releaseCall()
+      return
     }
+    abortSignal.addEventListener('abort', releaseCall, { once: true })
+    call = 'watched'
   }
-  // markComplete is the initial hold — released when serialization finishes
-  // or when the client disconnects, whichever comes first.
-  const markComplete = trackPending()
 
-  const responseAbort = createResponseAbortSource(markComplete)
+  const answeredCallbacks: Array<() => void> = []
+  const markComplete = () => {
+    releaseCall()
+    if (closed) return
+    for (const cb of answeredCallbacks) invokeChannelListener(cb, [], handleCallbackBug)
+    answeredCallbacks.length = 0
+  }
+
+  const responseAbort = createResponseAbortSource(releaseCall)
 
   const ctx: RequestContext = {
     request,
-    abortSignal: request.signal,
-    signal: closeController.signal,
+    abortSignal,
+    get signal() {
+      if (!closeController) {
+        closeController = new AbortController()
+        if (closed) closeController.abort()
+        else watchClient()
+      }
+      return closeController.signal
+    },
     responseAbort,
-    onTopLevelError(cb) {
-      if (errored) {
+    onCallFailed(cb) {
+      if (failed) {
         cb()
         return
       }
-      errorCallbacks.push(cb)
+      failedCallbacks.push(cb)
     },
-    markTopLevelError: fireError,
+    markCallFailed: fireFailed,
+    onAnswered(cb) {
+      answeredCallbacks.push(cb)
+    },
     onClose(cb) {
+      watchClient()
       if (closed) {
-        invokeCloseCallback(cb)
+        invokeChannelListener(cb, [], handleCallbackBug)
         return
       }
       closeCallbacks.push(cb)
     },
     markComplete,
-    trackPending,
-  }
-
-  // request.signal fires on abnormal client disconnect.
-  // During telefunc execution (pendingCount=1): releasePending fires onClose immediately.
-  // After serialization (pending channels/streams): defers until they all complete.
-  if (request.signal.aborted) {
-    markComplete()
-  } else {
-    request.signal.addEventListener('abort', markComplete, { once: true })
+    responseHold: null,
+    page: ATTACHABLE_NOW,
+    trackPending() {
+      watchClient()
+      pendingCount++
+      let released = false
+      return () => {
+        if (released) return
+        released = true
+        releasePending()
+      }
+    },
   }
 
   return ctx
 }
 
-function createResponseAbortSource(onAbort: () => void): ResponseAbortSource {
+function createResponseAbortSource(releaseCallHold: () => void): ResponseAbortSource {
   const abortCallbacks: Array<(abortError: AbortError) => void> = []
   let aborted = false
   let abortError: AbortError | null = null
-  let rejectAbortPromise: ((err: unknown) => void) | null = null
-  const errorPromise = new Promise<never>((_resolve, reject) => {
-    rejectAbortPromise = reject
-  })
-  errorPromise.catch(() => {})
+  const error = createDeferred<never>()
+  error.promise.catch(() => {})
 
   return {
     abort(abortValue) {
       if (aborted) return
       aborted = true
       abortError = Abort(abortValue)
-      rejectAbortPromise?.(abortError)
+      error.reject(abortError)
       for (const cb of abortCallbacks) {
         try {
           cb(abortError)
@@ -149,7 +186,7 @@ function createResponseAbortSource(onAbort: () => void): ResponseAbortSource {
         }
       }
       abortCallbacks.length = 0
-      onAbort()
+      releaseCallHold()
     },
     onAbort(cb) {
       if (abortError) {
@@ -158,15 +195,6 @@ function createResponseAbortSource(onAbort: () => void): ResponseAbortSource {
       }
       abortCallbacks.push(cb)
     },
-    errorPromise,
-  }
-}
-
-function invokeCloseCallback(cb: () => void): void {
-  try {
-    const result = cb()
-    if (isPromise(result)) result.catch(handleCallbackBug)
-  } catch (err) {
-    handleCallbackBug(err)
+    errorPromise: error.promise,
   }
 }

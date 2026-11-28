@@ -7,15 +7,30 @@
 // orderings. This spec drives the REAL ClientConnection against a scripted SSE server and a fake
 // WebSocket, so each interleaving is chosen rather than raced.
 
-import { afterEach, beforeEach, describe, expect, test } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { defined } from '../../../utils/defined.fixture.js'
 
-import { ClientConnection } from './ClientConnection.js'
-import { decode, encode } from '../../wire/frame.js'
+import { ClientConnection, type MuxChannel } from './ClientConnection.js'
+import { decode, encode, isOneFrame, messageFrames } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { DecodedFrame } from '../../wire/frame.js'
 import { decodeU32 } from '../../wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
+import { fakeMuxChannel } from './fakeMuxChannel.fixture.js'
+
+// This spec pins the upgrade's order, not its deadlines: a loaded runner must not reach one between steps.
+vi.mock('../../constants.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../constants.js')>()),
+  WS_PROBE_TIMEOUT_MS: 60_000,
+  UPGRADE_ATTEMPT_TIMEOUT_MS: 60_000,
+  UPGRADE_HANDOFF_JOIN_TIMEOUT_MS: 60_000,
+  RECONCILE_TIMEOUT_MS: 60_000,
+}))
+vi.mock('../../wire/pingDeadline.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../wire/pingDeadline.js')>()),
+  pingDeadline: () => 60_000,
+}))
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
 /** Long enough for the connect POST, the probe handshake and any chained microtasks to drain. */
@@ -24,27 +39,6 @@ const settle = async () => {
 }
 
 const bytes = (frame: Uint8Array) => frame as Uint8Array<ArrayBuffer>
-
-/** The frames the connection let through to the channel, in dispatch order. */
-function createChannel(dispatched: DecodedFrame[]) {
-  return {
-    id: crypto.randomUUID(),
-    isClosed: false,
-    _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
-    _onTransportOpen() {},
-    _dispatchFrame(frame: DecodedFrame) {
-      dispatched.push(frame)
-    },
-    _onEnded() {},
-    _attach: {
-      state: () => ({}),
-      receiveCredit: { onProbeAnswered() {}, acknowledge() {}, answered() {} },
-      fitReplays() {},
-      onBatched() {},
-      onUpgradeJoined() {},
-    },
-  }
-}
 
 class FakeWebSocket {
   static OPEN = 1
@@ -55,8 +49,9 @@ class FakeWebSocket {
   onmessage: ((ev: { data: ArrayBuffer }) => void) | null = null
   binaryType = 'blob'
   readyState = 1
-  /** Frames the client sent on this socket, decoded. */
+  /** Frames the client sent on this socket, decoded, and the bytes of its messages. */
   readonly sent: DecodedFrame[] = []
+  sentBytes = 0
   private onSent: ((frame: DecodedFrame) => void) | null = null
 
   constructor(_url: string) {
@@ -64,9 +59,13 @@ class FakeWebSocket {
     queueMicrotask(() => this.onopen?.())
   }
   send(data: ArrayBuffer | Uint8Array): void {
-    const frame = decode(new Uint8Array(data instanceof Uint8Array ? data : new Uint8Array(data)))
-    this.sent.push(frame)
-    this.onSent?.(frame)
+    const message = bytes(data instanceof Uint8Array ? data : new Uint8Array(data))
+    this.sentBytes += message.byteLength
+    for (const raw of isOneFrame(message) ? [message] : messageFrames(message)) {
+      const frame = decode(raw)
+      this.sent.push(frame)
+      this.onSent?.(frame)
+    }
   }
   close(): void {
     if (this.readyState === 3) return
@@ -82,18 +81,15 @@ class FakeWebSocket {
   }
 }
 
-function reconciled(extra: { ix: number; sessionId: string; upgradeId?: string }) {
+function reconciled(extra: { ix: number; sessionId: string; upgradeId?: string; pingInterval?: number }) {
   return encode.reconciled({
     sessionId: extra.sessionId,
     open: [{ ix: extra.ix, lastSeq: 0 }],
     reconnectTimeout: 60_000,
     idleTimeout: 60_000,
-    pingInterval: 100_000,
+    pingInterval: extra.pingInterval ?? 100_000,
     maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
-    serverReplayBuffer: 1_000_000,
-    serverReplayBufferBinary: 2_000_000,
-    clientReplayBuffer: 1_000_000,
-    clientReplayBufferBinary: 2_000_000,
+    creditWindow: 1_000_000,
     sseFlushThrottle: 300,
     ssePostIdleFlushDelay: 50,
     transports: ['sse', 'ws'],
@@ -133,14 +129,16 @@ type Harness = {
   pushOld: (frame: Uint8Array) => void
   dispatched: DecodedFrame[]
   connection: ClientConnection
-  channel: ReturnType<typeof createChannel>
+  channel: MuxChannel
+  /** Registers `other` on the same connection. */
+  register: (other: MuxChannel) => void
 }
 
 /** Connect over SSE, reconcile, let the client probe WS, answer PREPARE with READY, and stop at
  *  the moment the barrier has been emitted — the start of the join, before either completion frame lands. */
 async function upgradeToBarrier(): Promise<Harness> {
   const dispatched: DecodedFrame[] = []
-  const channel = createChannel(dispatched)
+  const channel = fakeMuxChannel({ _dispatchFrame: (frame) => dispatched.push(frame) })
   const sessionId = crypto.randomUUID()
   let ix = 0
   const downstream = makeDownstream()
@@ -206,11 +204,10 @@ async function upgradeToBarrier(): Promise<Harness> {
     })
   }) as unknown as typeof fetch
 
-  const connection = ClientConnection.getOrCreate('http://test.local/_telefunc', channel as never, {
-    transports: ['sse', 'ws'],
-    fetchImpl,
-    connectionKey: crypto.randomUUID(),
-  })
+  const options = { transports: ['sse' as const, 'ws' as const], fetchImpl, connectionKey: crypto.randomUUID() }
+  const register = (other: MuxChannel) =>
+    void ClientConnection.getOrCreate('http://test.local/_telefunc', other, options)
+  const connection = ClientConnection.getOrCreate('http://test.local/_telefunc', channel, options)
 
   await settle()
   const probe = FakeWebSocket.last
@@ -226,7 +223,7 @@ async function upgradeToBarrier(): Promise<Harness> {
   const barrier = await Promise.race([barrierSent, settle().then(() => null)])
   expect(barrier, 'the client should have emitted its barrier').not.toBeNull()
 
-  return { ix, probe: probe!, barrierSent, pushOld: downstream.push, dispatched, connection, channel }
+  return { ix, probe: defined(probe), barrierSent, pushOld: downstream.push, dispatched, connection, channel, register }
 }
 
 const realWebSocket = globalThis.WebSocket

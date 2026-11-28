@@ -6,7 +6,13 @@ import type { CreditOwner, Urgency } from './credit.js'
 import type { RoundTrips } from './RoundTrips.js'
 import type { SelfTime } from './SelfTime.js'
 import type { SendWait } from './SendWaits.js'
-import { CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_INITIAL_BYTES_BATCH, FC_SELF_UTIL_THRESHOLD } from '../constants.js'
+import {
+  CREDIT_WINDOW_INITIAL_BYTES,
+  CREDIT_WINDOW_INITIAL_BYTES_BATCH,
+  FC_SELF_UTIL_THRESHOLD,
+  WIRE_PIECES_ACK_GAP_MS,
+} from '../constants.js'
+import { unrefTimer } from '../../utils/unrefTimer.js'
 import type { BdpPingAck } from '../wire/frame.js'
 
 type ReceiveCreditOptions = {
@@ -30,7 +36,7 @@ class ReceiveCredit {
   /** A page's uplink's: its round trip, which an answer to a `BDP_PING` says. */
   private roundTrips: RoundTrips | null = null
   private downlink: AttachedDownlink | null = null
-  /** `fitReplay` said the replay buffer that bounds the window. */
+  /** `capWindow` said what bounds the window. */
   private fitted = false
   // What arrived, what was consumed, and what had been consumed when each limit last went out.
   private consumedBytes = 0
@@ -45,8 +51,13 @@ class ReceiveCredit {
   private urgentMessages = 0
   /** Bytes of the frames credit doesn't count that arrived since the byte limit last went out. */
   private uncountedBytes = 0
+  private confirmTimer: ReturnType<typeof setTimeout> | null = null
+  /** When the newest seq arrived, if it is a lossy value: the byte limit reports how long this side held it. */
+  private receivedAt: number | undefined = undefined
   /** A frame arrived since the byte limit last went out, which acknowledges what arrived. */
   private arrived = false
+  /** The owner held enough when the byte limit last went out, so that limit granted nothing new. */
+  private withheld = false
   /** It grants the largest byte window its peer's replay allows (see `widenByteWindow`). */
   private widened = false
   /** It attached on a wire. */
@@ -71,8 +82,8 @@ class ReceiveCredit {
     return this.roundTrips?.pathRtt ?? Infinity
   }
 
-  /** Keeps what it lets be in flight within the replay buffer that holds what its peer sends (see `replayWindow`). */
-  fitReplay(window: number): void {
+  /** Keeps what it lets be in flight within what the server's `maxMemory` allows. */
+  capWindow(window: number): void {
     this.fitted = true
     this.bdp.capByteWindow(window)
   }
@@ -107,9 +118,11 @@ class ReceiveCredit {
     if (this.uncountedBytes >= this.bdp.byteWindow >> 2) this.advertiseBytes('acknowledgement')
   }
 
-  /** At each heartbeat: a `WINDOW` for what arrived since the last, which the sender's replay frees. */
+  /** At each heartbeat: a `WINDOW` for what arrived since the last, which the sender's replay frees, and for a grant
+   *  withheld, which looks again. */
   acknowledge(): void {
-    if (this.arrived) this.advertiseBytes('acknowledgement')
+    if (this.withheld) this.advertiseBytes('flow-control')
+    else if (this.arrived) this.advertiseBytes('acknowledgement')
   }
 
   /** This side answered the newest frame that arrived, so no `WINDOW` is owed for what arrived. */
@@ -126,8 +139,10 @@ class ReceiveCredit {
     if (!wantBytes && !wantMsgs) return
     if (this.selfTime.utilisation() > FC_SELF_UTIL_THRESHOLD) return
     if (wantBytes) {
+      const remaining = this.grantedBytes - Math.max(this.receivedBytes, this.consumedBytes)
+      const needsLimit = this.arrived || remaining < this.byteWindow
       this.bdp.growBytes()
-      this.advertiseBytes('flow-control')
+      if (needsLimit) this.advertiseBytes('flow-control')
     }
     if (wantMsgs) {
       this.bdp.growMsgs()
@@ -153,6 +168,8 @@ class ReceiveCredit {
     this.sendWait = null
     this.roundTrips = null
     this.downlink = null
+    if (this.confirmTimer !== null) clearTimeout(this.confirmTimer)
+    this.confirmTimer = null
   }
 
   /** Frames held back arrived at once: the round in flight doesn't count them as delivered within its round trip. */
@@ -184,6 +201,23 @@ class ReceiveCredit {
     this.arrived = true
   }
 
+  /** A sequenced frame arrived, which is the newest seq till the next. */
+  onSequencedArrival(): void {
+    this.receivedAt = undefined
+  }
+
+  /** A lossy value arrived: a `WINDOW` confirms it soon, with how long this side held it, and a lossy sender tells by
+   *  that whether its page keeps up. */
+  confirmSoon(): void {
+    this.receivedAt = performance.now()
+    this.confirmTimer ??= unrefTimer(setTimeout(this.confirm, WIRE_PIECES_ACK_GAP_MS))
+  }
+
+  private readonly confirm = (): void => {
+    this.confirmTimer = null
+    if (this.arrived) this.advertiseBytes('flow-control')
+  }
+
   /** A publish of `bytes` was consumed, which takes no message credit. */
   onPublishConsumed(bytes: number): void {
     this.consume(bytes, 0)
@@ -208,7 +242,9 @@ class ReceiveCredit {
   }
 
   private refresh(): void {
-    if (this.consumedBytes - this.advertisedBytes >= this.bdp.byteWindow >> 2) this.advertiseBytes('flow-control')
+    // Until growth is advertised, refresh within the window the sender has.
+    const byteWindow = Math.min(this.bdp.byteWindow, this.grantedBytes - this.advertisedBytes)
+    if (this.consumedBytes - this.advertisedBytes >= byteWindow >> 2) this.advertiseBytes('flow-control')
     if (this.consumedMessages - this.advertisedMessages >= this.bdp.msgWindow >> 2) {
       this.advertiseMessages('flow-control')
     }
@@ -216,8 +252,9 @@ class ReceiveCredit {
 
   private advertiseBytes(urgency: 'acknowledgement' | 'flow-control'): void {
     if (!this.fitted) return
-    this.advertisedBytes = this.consumedBytes
-    const limit = this.consumedBytes + this.byteWindow
+    this.withheld = this.owner.holdsEnough?.() ?? false
+    if (!this.withheld) this.advertisedBytes = this.consumedBytes
+    const limit = this.withheld ? this.grantedBytes : this.consumedBytes + this.byteWindow
     if (limit > this.grantedBytes) {
       this.downlink?.granted(limit - this.grantedBytes)
       this.grantedBytes = limit
@@ -233,7 +270,7 @@ class ReceiveCredit {
     if (sent !== 'acknowledgement' && this.consumedMessages > this.advertisedMessages) {
       this.advertiseMessages('acknowledgement')
     }
-    this.owner.sendByteLimit(limit >>> 0, sent)
+    this.owner.sendByteLimit(limit >>> 0, sent, this.receivedAt)
   }
 
   /** An `acknowledgement` rides the next message, so it is never urgent. */

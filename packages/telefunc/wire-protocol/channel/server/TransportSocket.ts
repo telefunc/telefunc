@@ -25,4 +25,8 @@ class TransportSocket implements PieceSocket {
   get bufferedAmount(): number {
     return this.transport.bufferedAmount(this.wire) ?? 0
   }
+
+  get copiesOnSend(): boolean {
+    return this.transport.copiesOnSend === true
+  }
 }

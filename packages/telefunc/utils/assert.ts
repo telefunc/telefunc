@@ -23,13 +23,11 @@ function assert(condition: unknown, debugInfo?: unknown): asserts condition {
     return
   }
 
-  const debugStr = (() => {
-    if (!debugInfo) {
-      return ''
-    }
+  let debugStr = ''
+  if (debugInfo) {
     const debugInfoSerialized = typeof debugInfo === 'string' ? debugInfo : '`' + JSON.stringify(debugInfo) + '`'
-    return `Debug info (this is for the ${projectInfo.projectName} maintainers; you can ignore this): ${debugInfoSerialized}.`
-  })()
+    debugStr = `Debug info (this is for the ${projectInfo.projectName} maintainers; you can ignore this): ${debugInfoSerialized}.`
+  }
 
   const link = 'https://github.com/telefunc/telefunc/issues/new'
   const internalError = createErrorWithCleanStackTrace(

@@ -1,0 +1,241 @@
+export {
+  isRoomRequest,
+  decodeRoomRequest,
+  decodeRoomDeclaration,
+  decodeRoomWantParts,
+  decodeRoomPublish,
+  decodeStubBinaryFrame,
+  pageFrameMessage,
+  decodeParticipantRequest,
+  decodeParticipantFrame,
+  decodeParticipantDeclaration,
+}
+export type { RoomRequest, RoomDeclaration }
+
+import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
+import { ProtocolViolationError } from 'telefunc/__internal'
+import {
+  EVERY_MEMBER,
+  EVERY_TRACK,
+  decodeBinaryFrame,
+  decodeFrameMessage,
+  isMemberId,
+  isRoomTrack,
+  type BinaryFrame,
+  type BinaryWantChange,
+} from '../shared/binary.js'
+import { isRecord } from '../shared/arguments.js'
+import { isRoomErrorCode } from '../shared/RoomError.js'
+import type {
+  RoomResult,
+  MemberMutationRequest,
+  ParticipantStubRequest,
+  RoomDataPublish,
+  RoomStubRequest,
+} from '../shared/protocol.js'
+assertIsNotBrowser()
+
+type RoomRequest = Extract<
+  RoomStubRequest,
+  { __r: 'req-join' | 'req-leave' | 'req-set-meta' | 'req-update-meta' | 'req-dm' | 'req-private' }
+>
+
+type RoomDeclaration = Exclude<RoomStubRequest, RoomRequest>
+
+/** A member's meta, attributes and DM requests, by the API call each serves. */
+const MEMBER_MUTATIONS = {
+  'req-set-meta': 'setMeta',
+  'req-update-meta': 'updateMeta',
+  'req-dm': 'send',
+  'req-private': 'sendPrivate',
+} as const
+
+/** A stub's client library sends only these shapes, so anything else comes from a broken or hostile peer
+ *  and ends its connection. */
+function malformed(what: string): never {
+  throw new ProtocolViolationError(`malformed Room ${what}`)
+}
+
+function record(value: unknown, what: string): Record<string, unknown> {
+  if (!isRecord(value)) malformed(what)
+  return value
+}
+
+function text(value: unknown, what: string): string {
+  if (typeof value !== 'string') malformed(what)
+  return value
+}
+
+function memberId(value: unknown, what: string): string {
+  if (!isMemberId(value)) malformed(what)
+  return value
+}
+
+function flag(value: unknown, what: string): boolean {
+  if (typeof value !== 'boolean') malformed(what)
+  return value
+}
+
+function integer(value: unknown, what: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) malformed(what)
+  return value
+}
+
+function optionalTrue(value: unknown, what: string): boolean {
+  if (value !== undefined && value !== true) malformed(what)
+  return value === true
+}
+
+/** A stub's requests and declarations share its channel: a request is tagged `req-`. */
+function isRoomRequest(value: unknown): boolean {
+  return isRecord(value) && typeof value.__r === 'string' && value.__r.startsWith('req-')
+}
+
+function decodeRoomRequest(value: unknown): RoomRequest {
+  const req = record(value, 'request')
+  switch (req.__r) {
+    case 'req-join':
+      return {
+        __r: 'req-join',
+        reqId: integer(req.reqId, 'join'),
+        meta: record(req.meta, 'join meta'),
+        selfDelivery: flag(req.selfDelivery, 'join'),
+      }
+    case 'req-leave':
+      return { __r: 'req-leave', id: memberId(req.id, 'leave') }
+    case 'req-set-meta':
+    case 'req-update-meta':
+    case 'req-dm':
+    case 'req-private': {
+      const id = memberId(req.id, MEMBER_MUTATIONS[req.__r])
+      return { ...decodeMemberMutation(req.__r, req), id }
+    }
+  }
+  return malformed('request')
+}
+
+function decodeRoomDeclaration(value: unknown): RoomDeclaration {
+  const decl = record(value, 'declaration')
+  switch (decl.__r) {
+    case 'dm-reply':
+      return decodeDmReplyDeclaration(decl)
+  }
+  return malformed('declaration')
+}
+
+/** A page's `RoomWantParts`, none before its first member or track want: the members, and the pairs as wants to turn
+ *  on. */
+function decodeRoomWantParts(value: unknown): { members: Set<string>; tracks: BinaryWantChange[] } {
+  if (value === undefined) return { members: new Set(), tracks: [] }
+  const parts = record(value, 'want parts')
+  if (!Array.isArray(parts.members) || !Array.isArray(parts.tracks)) malformed('want parts')
+  const members = new Set<string>()
+  for (const id of parts.members) members.add(memberId(id, 'want parts'))
+  const tracks = parts.tracks.map((pair: unknown): BinaryWantChange => {
+    if (!Array.isArray(pair) || pair.length !== 2) malformed('want parts')
+    const [member, track] = pair
+    if (member !== null && !isMemberId(member)) malformed('want parts')
+    if (track !== null && !isRoomTrack(track)) malformed('want parts')
+    return { member: member ?? EVERY_MEMBER, track: track ?? EVERY_TRACK, on: true }
+  })
+  return { members, tracks }
+}
+
+function decodeParticipantDeclaration(value: unknown): Extract<RoomDeclaration, { __r: 'dm-reply' }> {
+  const decl = record(value, 'declaration')
+  if (decl.__r !== 'dm-reply') malformed('declaration')
+  return decodeDmReplyDeclaration(decl)
+}
+
+function decodeDmReplyDeclaration(decl: Record<string, unknown>): Extract<RoomDeclaration, { __r: 'dm-reply' }> {
+  return { __r: 'dm-reply', ackId: text(decl.ackId, 'DM reply'), reply: decodeDmReply(decl.reply) }
+}
+
+/** A client-supplied reply, rebuilt field by field so no other key rides into the `dm-ack` envelope. */
+function decodeDmReply(value: unknown): RoomResult {
+  const reply = record(value, 'DM reply')
+  if (reply.ok === true) return { ok: true, value: reply.value }
+  if (reply.ok !== false) malformed('DM reply')
+  if (reply.kind === 'abort') return { ok: false, kind: 'abort', abortValue: reply.abortValue }
+  const message = text(reply.message, 'DM reply')
+  if (reply.kind === 'error') {
+    if (!isRoomErrorCode(reply.code)) malformed('DM reply')
+    return { ok: false, kind: 'error', code: reply.code, message }
+  }
+  if (reply.kind !== 'shield' && reply.kind !== 'overflow') malformed('DM reply')
+  return { ok: false, kind: reply.kind, message }
+}
+
+/** A declared text want per member id, into a record no key can reach the prototype of. */
+function decodeRoomPublish(value: unknown): RoomDataPublish {
+  const publish = record(value, 'publish')
+  if (publish.__r !== 'data') malformed('publish')
+  const decoded: RoomDataPublish = { __r: 'data', from: memberId(publish.from, 'publish'), data: publish.data }
+  if (optionalTrue(publish.retain, 'publish retain')) decoded.retain = true
+  return decoded
+}
+
+function decodeStubBinaryFrame(framed: Uint8Array): BinaryFrame {
+  return decodeBinaryFrame(framed) ?? malformed('binary frame')
+}
+
+/** What a frame from a page shows its guards: its bytes, or a text frame's message. */
+function pageFrameMessage(frame: BinaryFrame): unknown {
+  if (!frame.text) return frame.payload
+  try {
+    return decodeFrameMessage(frame)
+  } catch {
+    return malformed('text frame')
+  }
+}
+
+function decodeParticipantFrame(framed: Uint8Array, participantId: string): BinaryFrame {
+  const frame = decodeStubBinaryFrame(framed)
+  if (frame.from !== participantId) malformed('binary frame sender')
+  return frame
+}
+
+function decodeParticipantRequest(value: unknown): ParticipantStubRequest {
+  const req = record(value, 'participant request')
+  switch (req.__r) {
+    case 'req-publish': {
+      const publish: Extract<ParticipantStubRequest, { __r: 'req-publish' }> = { __r: 'req-publish', data: req.data }
+      if (optionalTrue(req.retain, 'publish retain')) publish.retain = true
+      return publish
+    }
+    case 'req-set-meta':
+    case 'req-update-meta':
+    case 'req-dm':
+    case 'req-private':
+      return decodeMemberMutation(req.__r, req)
+    case 'req-leave':
+      return { __r: 'req-leave' }
+  }
+  return malformed('participant request')
+}
+
+/** A member's meta, attributes, DM or package message request, as both stubs decode it; a Room stub's also names the acting member. */
+function decodeMemberMutation(kind: MemberMutationRequest['__r'], req: Record<string, unknown>): MemberMutationRequest {
+  switch (kind) {
+    case 'req-set-meta':
+      return { __r: 'req-set-meta', meta: record(req.meta, 'setMeta meta') }
+    case 'req-update-meta':
+      return { __r: 'req-update-meta', attrs: record(req.attrs, 'updateMeta meta') }
+    case 'req-dm': {
+      const dm: Extract<MemberMutationRequest, { __r: 'req-dm' }> = {
+        __r: 'req-dm',
+        to: text(req.to, 'send recipient'),
+        data: req.data,
+      }
+      if (optionalTrue(req.ack, 'send ack')) dm.ack = true
+      return dm
+    }
+    case 'req-private':
+      return {
+        __r: 'req-private',
+        to: text(req.to, 'sendPrivate recipient'),
+        field: text(req.field, 'sendPrivate field'),
+        data: req.data,
+      }
+  }
+}

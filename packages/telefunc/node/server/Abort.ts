@@ -1,1 +1,1 @@
-export { Abort, AbortError, isAbort, createAbortError } from '../../shared/Abort.js'
+export { Abort, AbortError, createAbortError } from '../../shared/Abort.js'

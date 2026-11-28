@@ -8,6 +8,7 @@ export type {
   // ===== Contexts =====
   ClientReviverContext,
   ServerReviverContext,
+  RequestFile,
   ClientReplacerContext,
   ServerReplacerContext,
   StreamSource,
@@ -42,6 +43,7 @@ export type {
 
 import type { ServerChannel } from '../channel/server/ServerChannel.js'
 import type { ServerBroadcast } from '../channel/server/ServerBroadcast.js'
+import type { ServerBroadcastEnd } from '../channel/server/ServerBroadcastEnd.js'
 import type { ClientChannel } from '../channel/client/ClientChannel.js'
 import type { ClientBroadcast } from '../channel/client/ClientBroadcast.js'
 import type { AbortError } from '../../shared/Abort.js'
@@ -61,8 +63,8 @@ type TypeContract<V = unknown, R = unknown, M extends Record<string, unknown> = 
 /** Replacer: detect a value during serialization and replace it with prefix+metadata on the wire.
  *  `replace` is the primary verb of the Replacer API — it runs once per serialized value and may
  *  perform side effects (register channels, install listeners, wire lifecycle). The returned
- *  `metadata` is what crosses the wire; `close` / `abort` are lifecycle hooks tracked by the
- *  registry and invoked when the carrier message completes or is aborted.
+ *  `metadata` is what crosses the wire; `abort` runs when the carrier message is aborted, and on the page
+ *  `close` runs once the value it sent is let go.
  *
  *  Duplicated references run `replace` once and revive as one client object (see
  *  createStreamingReplacer), so metadata must identify the value uniquely within the
@@ -110,8 +112,9 @@ type StreamingProducer = {
 }
 
 type StreamingValueServer = {
-  createProducer: () => StreamingProducer
+  producer: StreamingProducer
   index: number
+  eager: boolean
 }
 
 // ===== Contexts =====
@@ -148,14 +151,31 @@ type ClientReviverContext = {
     ack?: boolean
     maxFrameBytes?: number
   }): ClientChannel<ClientToServer, ServerToClient>
-  createBroadcast<T = unknown>(opts: { channelId: string; key: string; maxFrameBytes?: number }): ClientBroadcast<T>
+  createBroadcastChannel<T = unknown, Publish = T>(opts: {
+    channelId: string
+    key: string
+    maxFrameBytes?: number
+  }): ClientBroadcast<T, Publish>
   receiveStream(metadata: StreamingMetadata): StreamSource
+  /** Gives a derived value its owner's explicit-close lifetime without changing its identity. */
+  shareLifecycle(child: object, owner: object): void
+}
+
+/** A file of the call's body, as its File reads it: its bytes are kept for it until it reads them or is let go of, past
+ *  its call too. */
+type RequestFile = {
+  /** Its bytes' stream: a File is read once. */
+  stream: () => ReadableStream<Uint8Array<ArrayBuffer>>
+  /** No File reads it anymore (collected, or its call failed): its bytes aren't kept for it. */
+  letGo: () => void
+  /** Takes what runs once its bytes are gone: read, let go of, or ended with the body. */
+  onGone: (callback: () => void) => void
 }
 
 /** Context for all server-side request revivers (File/Blob + Function + ReadableStream). */
 type ServerReviverContext = {
-  registerFile(index: number, size: number): void
-  consumeFile(index: number, size: number): ReadableStream<Uint8Array<ArrayBuffer>>
+  /** Registers a file of the call's body. */
+  registerFile(index: number, size: number): RequestFile
   createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts: {
     id: string
     ack?: boolean
@@ -172,9 +192,15 @@ type ServerReplacerContext = {
   createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts?: {
     ack?: boolean
   }): ServerChannel<ClientToServer, ServerToClient>
-  /** Registers a channel with the response lifecycle. Also installs shield validators if the channel has shields. */
+  /** Registers a channel with the response lifecycle: the response carries it, with its shield validators, once
+   *  serialized. */
   registerChannel(channel: ServerChannel<any, any>): void
-  sendStream(createProducer: () => StreamingProducer): {
+  /** Creates and registers the server end of a page's `ClientBroadcast`. */
+  createBroadcastChannel(): ServerBroadcastEnd
+  sendStream(
+    createProducer: () => StreamingProducer,
+    options?: { eager: true },
+  ): {
     metadata: StreamingMetadata
     close: () => Promise<void> | void
     abort: (abortError: AbortError) => void
@@ -183,6 +209,14 @@ type ServerReplacerContext = {
    *  Replacers pick the names relevant to their data flow. Each returns `true` on success or an error
    *  string — call sites decide the action (throw, drop, ...). */
   validators: ShieldValidators
+  /** One store per response, shared by every replacer in it; `init` runs on the first call for `key`. */
+  responseState<T>(key: symbol, init: () => T): T
+  /** The page the response goes to: the session its client names in every call, one per tab and `telefuncUrl`. A
+   *  request that names no session is a page of its own. Opaque: compare it, and nothing else. */
+  readonly page: string
+  /** The largest WebSocket message the runtime accepts, where it caps them (Cloudflare); a channel's metadata tells the
+   *  page. */
+  maxFrameBytes: number | undefined
 }
 
 /** Context for all client-side request replacers (File/Blob + Function + ReadableStream). */
@@ -200,7 +234,7 @@ type ClientReplacerContext = {
 
 // ===== Metadata =====
 
-type StreamingMetadata = { channelId: string } | { __index: number; flowId?: string }
+type StreamingMetadata = { channelId: string } | { __index: number }
 
 /** Request-direction (client→server): bytes are framed back-to-back in the request body,
  *  so the reader needs an explicit `index` and `size` to know where this file starts and ends. */

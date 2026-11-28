@@ -31,14 +31,18 @@ function ChannelDemo() {
     if (channelRef.current && !channelRef.current.isClosed) return
     addLog('system', 'Calling onChannelInit()...')
 
-    const { channel, serverTime } = await onChannelInit()
+    const { channel, serverTime, openingUser } = await onChannelInit()
     channelRef.current = channel
 
     addLog('system', `Connected! Server time: ${new Date(serverTime).toISOString()}`)
+    if (openingUser !== undefined) addLog('system', `Opened by ${openingUser}`)
     setConnected(true)
 
     channel.listen((msg) => {
       addLog('in', JSON.stringify(msg))
+    })
+    channel.onClose((err) => {
+      if (err) addLog('system', `Closed: ${err.message}`)
     })
 
     channel.send({ type: 'ping' })
@@ -62,13 +66,20 @@ function ChannelDemo() {
     setEchoInput('')
   }, [echoInput, addLog])
 
+  const readContext = useCallback(async () => {
+    const channel = channelRef.current
+    if (channel === null) return
+    const user = await channel.send({ type: 'context' }, { ack: true })
+    addLog('in', `Channel request: ${user}`)
+  }, [addLog])
+
   const sendOversized = useCallback(() => {
     if (channelRef.current?.isClosed !== false) return
     try {
       channelRef.current.sendBinary(new Uint8Array(32 * 1024 * 1024))
       addLog('out', 'binary: 32 MiB')
     } catch (err) {
-      addLog('system', `Refused: ${(err as Error).message}`)
+      addLog('system', `Refused: ${err instanceof Error ? err.message : String(err)}`)
     }
   }, [addLog])
 
@@ -122,6 +133,9 @@ function ChannelDemo() {
           />
           <button type="button" id="send-echo-btn" onClick={sendEcho} style={{ padding: '4px 12px' }}>
             Send Echo
+          </button>
+          <button type="button" id="channel-context-btn" onClick={readContext}>
+            Read channel context
           </button>
           <button type="button" id="send-oversized-btn" onClick={sendOversized} style={{ padding: '4px 12px' }}>
             Send 32 MiB

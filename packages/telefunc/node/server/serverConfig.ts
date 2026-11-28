@@ -1,13 +1,15 @@
 export { configUser as config }
 export { getServerConfig }
+export { getTelefuncUrl }
 export { getManifestConfig }
 export { applyManifestConfig }
 export { getServerExtensionTypes }
-export { enableChannelTransports }
 export { setAdapterMaxFrameBytes }
+export { setAdapterMaxMemory }
 export { getAdapterMaxFrameBytes }
 export { setRootFromVite }
-export { pingDeadlineOf }
+export { getChannelConfig }
+export { getAllowedOrigins }
 export { reconnectWindow }
 export type {
   ConfigUser,
@@ -28,25 +30,18 @@ import type { TelefuncServerExtension } from './extensions.js'
 import { registerShieldType } from './shield.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
 import { toPosixPath, pathIsAbsolute, assertPosixPath } from '../../utils/path.js'
+import { configureBroadcastTransport } from '../../wire-protocol/backend/install.js'
+import type { BroadcastTransport } from '../../wire-protocol/backend/broadcast/TransportBroadcastDriver.js'
 import {
-  installBroadcastAdapter,
-  DefaultBroadcastAdapter,
-  type BroadcastTransport,
-} from '../../wire-protocol/broadcast/broadcastAdapter.js'
-import {
-  CHANNEL_BUFFER_LIMIT_BYTES,
-  CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
-  CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
-  CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_CONNECT_TTL_MS,
+  CHANNEL_HOLD_MAX_BYTES,
   CHANNEL_IDLE_TIMEOUT_MS,
-  CHANNEL_MAX_PENDING_ACKS,
-  CHANNEL_MAX_PENDING_BYTES,
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
+  CHANNEL_RECONNECT_INITIAL_DELAY_MS,
+  CHANNEL_RECONNECT_TIMEOUT_MIN_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
-  CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
-  CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
+  CREDIT_WINDOW_INITIAL_BYTES,
   DEFAULT_SERVER_CHANNEL_TRANSPORTS,
   DEFAULT_STREAM_TRANSPORT,
   parseStreamConfig,
@@ -56,8 +51,14 @@ import {
   type ChannelTransports,
   type StreamTransport,
   TIMER_DELAY_MAX_MS,
+  CHANNEL_TRANSPORT,
 } from '../../wire-protocol/constants.js'
-import { pingDeadline } from '../../wire-protocol/wire/pingDeadline.js'
+import {
+  NOT_AN_ORIGIN,
+  parseAllowedOrigin,
+  type AllowedOrigin,
+} from '../../wire-protocol/channel/server/allowedOrigin.js'
+import { PING_INTERVAL_MAX_MS, reconnectWindowOf } from '../../wire-protocol/wire/pingDeadline.js'
 
 type StreamConfigUser = {
   /**
@@ -73,6 +74,13 @@ type StreamConfigUser = {
 type BroadcastConfigUser = {
   /** Transport for cross-node `Broadcast` delivery. */
   transport?: BroadcastTransport
+  /**
+   * Called when messages published to a key never reached a server subscribed to it, though `publish()` resolved. They
+   * aren't sent again.
+   *
+   * @default ({ key, reason }) => console.error(`Broadcast delivery of '${key}' lost: ${reason}`)
+   */
+  onDeliveryLost?: (lost: { key: string; reason: string }) => void
 }
 
 type ChannelConfigUser = {
@@ -80,13 +88,26 @@ type ChannelConfigUser = {
    * Transports enabled on this server for Telefunc channels.
    * Determines which transport(s) clients may connect with or upgrade to.
    *
-   * - `['sse']` (default): SSE only
-   * - `['sse', 'ws']`: SSE and WebSocket — clients may upgrade to WS
+   * - `['sse']`: SSE only
+   * - `['sse', 'ws']` (default): SSE and WebSocket — a page is offered WS only where its server takes upgrades
+   *   (`installWebSocket()`, `telefunc/bun`, `telefunc/deno`, a Durable Object)
    * - `['ws']`: WebSocket only
    *
    * Connections arriving on a transport not listed here are immediately rejected.
    */
   transports?: ChannelTransports
+  /**
+   * The origins of other sites' pages that may open a WebSocket to this server, as a browser sends them
+   * (`'https://app.example.com'`, an app shell's `'capacitor://localhost'`). A leading `*.` stands for any one subdomain
+   * label, whoever runs it (`'https://*.example.com'`). A page of this server's own origin needs no entry, behind a
+   * proxy too where it forwards `X-Forwarded-Host`. `null` and `file:` can't be listed: any site can make its page send
+   * `null`, and one `file:` entry would stand for every local file.
+   *
+   * https://telefunc.com/transport#websocket
+   *
+   * @default []
+   */
+  allowedOrigins?: readonly string[]
   /**
    * How long, in milliseconds, the server keeps channel state after a client
    * disconnects while waiting for a reconnect.
@@ -94,39 +115,38 @@ type ChannelConfigUser = {
   reconnectTimeout?: number
   /**
    * How long, in milliseconds, to keep the shared channel connection alive
-   * after the last channel closes.
+   * after the last channel closes. `0` closes it as soon as the server has
+   * what the channels sent.
    */
   idleTimeout?: number
   /**
    * How often, in milliseconds, the client sends a ping for channel health
-   * checks. The server considers the client dead after 2x this interval.
+   * checks. The server considers the client dead after 2x this interval, or 2.5x
+   * over SSE, where the client may hold its ping for a POST.
    */
   pingInterval?: number
   /**
-   * The most bytes of text messages the server keeps per channel, of those it sent that the client hasn't acknowledged,
-   * to replay after a reconnect. If you `await` your sends, a reconnect loses nothing, as long as each message is at
-   * most half its replay buffer: 64 MiB with the defaults.
+   * The most all channels on this server hold queued for their clients, in bytes or as `'4g'`, `'512m'`, and with them
+   * the Files a call hadn't read yet when it returned. It's a ceiling on what is admitted, not memory
+   * set aside up front: part of it is kept as headroom for sends that wait, each wire may carry one frame of the largest
+   * size past it, and one channel, or one call's Files, holds at most 320 MiB of it by default.
+   *
+   * https://telefunc.com/channel-config
+   *
+   * @default a quarter of the memory the process reports (1 GiB fallback, 64 MiB on Cloudflare)
    */
-  serverReplayBuffer?: number
-  /** As `serverReplayBuffer`, for binary messages. */
-  serverReplayBufferBinary?: number
-  /** As `serverReplayBuffer`, for what the client sends: the client keeps that replay, sized as the server tells it. */
-  clientReplayBuffer?: number
-  /** As `clientReplayBuffer`, for binary messages. */
-  clientReplayBufferBinary?: number
+  maxMemory?: number | string
+  /** The most one channel holds for its client, of its sends, of what awaits acknowledgement and of the messages its
+   *  listeners work on, in bytes, within `maxMemory`; and the most one call keeps of the Files it hadn't read when it
+   *  returned. @default 335544320 */
+  maxPendingBytes?: number
   /**
    * How long, in milliseconds, a newly created channel waits for the client to
-   * connect before it is closed automatically.
+   * connect before it is closed automatically, and a telefunction call waits for
+   * a broadcast subscription its client made before it to take effect before
+   * that broadcast is closed.
    */
   connectTtl?: number
-  /** Maximum bytes queued beyond credit or awaiting acknowledgements. @default 268435456 */
-  maxPendingBytes?: number
-  /** Maximum simultaneous acknowledgement requests. @default 16384 */
-  maxPendingAcks?: number
-  /** Maximum text bytes buffered per channel while no client is attached. */
-  bufferLimit?: number
-  /** Maximum number of bytes buffered per channel for binary messages while no client peer is attached. */
-  bufferLimitBinary?: number
   /**
    * When using SSE channels, upstream client-to-server frames are batched for at
    * most this many milliseconds before Telefunc sends a POST.
@@ -150,15 +170,9 @@ type ChannelConfigResolved = {
   reconnectTimeout: number
   idleTimeout: number
   pingInterval: number
-  serverReplayBuffer: number
-  serverReplayBufferBinary: number
-  clientReplayBuffer: number
-  clientReplayBufferBinary: number
-  connectTtl: number
+  maxMemory: number
   maxPendingBytes: number
-  maxPendingAcks: number
-  bufferLimit: number
-  bufferLimitBinary: number
+  connectTtl: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
 }
@@ -233,14 +247,30 @@ type ConfigResolved = {
   extensions: TelefuncServerExtension[]
 }
 
-const globalObject = getGlobalObject('serverConfig.ts', {
+type ServerConfigState = {
+  config: ConfigUser
+  manifestConfig: Record<string, unknown>
+  adapterMaxFrameBytes: number | undefined
+  adapterMaxMemory: number | undefined
+  defaultMaxMemory: number | undefined
+  channelConfigInUse: boolean
+  allowedOrigins: readonly AllowedOrigin[]
+}
+
+const globalObject = getGlobalObject<ServerConfigState>('node/server/serverConfig.ts', {
   config: { stream: {}, channel: {}, broadcast: {}, extensions: [] } as ConfigUser,
   /** The Vite plugin's settings, from the production manifest: kept so they fill again what a later assignment of the app's server code leaves unset. */
   manifestConfig: {} as Record<string, unknown>,
-  /** Transports a server adapter enables: kept apart from the user's config, which a later assignment replaces. */
-  adapterChannelTransports: new Set<ChannelTransports[number]>(),
   /** The largest frame the adapter's runtime takes, where that is less than the server reads. */
   adapterMaxFrameBytes: undefined as number | undefined,
+  /** The default of `maxMemory` where the adapter's runtime can't tell what the process may use. */
+  adapterMaxMemory: undefined,
+  /** The default of `maxMemory` elsewhere: a request reads the config, and this process's memory doesn't change. */
+  defaultMaxMemory: undefined,
+  /** A channel read `config.channel`, whose values each of its parts then relies on staying as they are. */
+  channelConfigInUse: false,
+  /** The entries of `config.channel.allowedOrigins`, parsed when it was assigned. */
+  allowedOrigins: [],
 })
 const configState = globalObject.config
 
@@ -316,6 +346,11 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
   },
 })
 
+/** `config.telefuncUrl` as `getServerConfig()` resolves it, without the rest: a server reads it per request. */
+function getTelefuncUrl(): string {
+  return configState.telefuncUrl || '/_telefunc'
+}
+
 function getServerConfig(): ConfigResolved {
   return {
     disableEtag: configState.disableEtag ?? false,
@@ -334,7 +369,7 @@ function getServerConfig(): ConfigResolved {
         }
       })(),
     },
-    telefuncUrl: configState.telefuncUrl || '/_telefunc',
+    telefuncUrl: getTelefuncUrl(),
     telefuncFiles: (() => {
       if (configState.telefuncFiles) {
         return configState.telefuncFiles.map(toPosixPath)
@@ -356,30 +391,50 @@ function getServerConfig(): ConfigResolved {
     stream: {
       transport: configState.stream.transport || DEFAULT_STREAM_TRANSPORT,
     },
-    channel: {
-      transports: configState.channel.transports ?? [
-        ...DEFAULT_SERVER_CHANNEL_TRANSPORTS,
-        ...globalObject.adapterChannelTransports,
-      ],
-      reconnectTimeout: configState.channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
-      idleTimeout: configState.channel.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS,
-      pingInterval: configState.channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
-      serverReplayBuffer: configState.channel.serverReplayBuffer ?? CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
-      serverReplayBufferBinary:
-        configState.channel.serverReplayBufferBinary ?? CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
-      clientReplayBuffer: configState.channel.clientReplayBuffer ?? CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
-      clientReplayBufferBinary:
-        configState.channel.clientReplayBufferBinary ?? CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
-      connectTtl: configState.channel.connectTtl ?? CHANNEL_CONNECT_TTL_MS,
-      maxPendingBytes: configState.channel.maxPendingBytes ?? CHANNEL_MAX_PENDING_BYTES,
-      maxPendingAcks: configState.channel.maxPendingAcks ?? CHANNEL_MAX_PENDING_ACKS,
-      bufferLimit: configState.channel.bufferLimit ?? CHANNEL_BUFFER_LIMIT_BYTES,
-      bufferLimitBinary: configState.channel.bufferLimitBinary ?? CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
-      sseFlushThrottle: configState.channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
-      ssePostIdleFlushDelay: configState.channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
-    },
+    channel: resolveChannelConfig(configState.channel),
     extensions: configState.extensions,
   }
+}
+
+function resolveChannelConfig(channel: ChannelConfigUser): ChannelConfigResolved {
+  const reconnectTimeout = channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS
+  return {
+    transports: channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS],
+    reconnectTimeout,
+    // A long reconnect window doesn't pin an idle wire, and a short one (Cloudflare's) doesn't wait longer than itself.
+    idleTimeout: channel.idleTimeout ?? Math.min(reconnectTimeout, CHANNEL_IDLE_TIMEOUT_MS),
+    pingInterval: channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
+    connectTtl: channel.connectTtl ?? CHANNEL_CONNECT_TTL_MS,
+    maxMemory:
+      parseMemorySize(channel.maxMemory) ??
+      globalObject.adapterMaxMemory ??
+      (globalObject.defaultMaxMemory ??= defaultMaxMemory()),
+    maxPendingBytes: channel.maxPendingBytes ?? CHANNEL_HOLD_MAX_BYTES,
+    sseFlushThrottle: channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
+    ssePostIdleFlushDelay: channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
+  }
+}
+
+/** What a process may use where the runtime can't tell. */
+const DEFAULT_PROCESS_MEMORY_BYTES = 4 * 1024 * 1024 * 1024
+
+/** A quarter of what the process may use: channels hold bytes outside the JS heap, which the rest of the process needs too. */
+function defaultMaxMemory(): number {
+  const process = globalThis.process
+  const total = process?.getBuiltinModule?.('node:os')?.totalmem() ?? DEFAULT_PROCESS_MEMORY_BYTES
+  return Math.floor(Math.min(process?.constrainedMemory?.() || total, total) / 4)
+}
+
+/** The settings a channel runs by, which can't change from here on. */
+function getChannelConfig(): ChannelConfigResolved {
+  globalObject.channelConfigInUse = true
+  return resolveChannelConfig(configState.channel)
+}
+
+/** The entries of `config.channel.allowedOrigins`, as a WebSocket upgrade reads them: reading them neither marks
+ *  `config.channel` as used nor resolves the rest of it, since a refused upgrade opens nothing. */
+function getAllowedOrigins(): readonly AllowedOrigin[] {
+  return globalObject.allowedOrigins
 }
 
 /** The user's settings as plain data, for the production manifest. (`extensions` and `broadcast` are runtime objects; `root` and `telefuncFiles` are paths on the build machine.) */
@@ -408,15 +463,11 @@ function fillUnset(current: unknown, val: unknown): unknown {
   return filled
 }
 
-/** How long a wire may deliver nothing before it is taken for dead: two ping intervals, each of at least a second. */
-function pingDeadlineOf({ pingInterval }: Pick<ChannelConfigResolved, 'pingInterval'>): number {
-  return pingDeadline(Math.max(pingInterval, CHANNEL_PING_INTERVAL_MIN_MS))
-}
-
-/** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
+/** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`.
+ *  The longest, a page's over SSE: the client's transport isn't known where this is read. */
 function reconnectWindow(): number {
-  const c = getServerConfig().channel
-  return Math.min(TIMER_DELAY_MAX_MS, pingDeadlineOf(c) + c.reconnectTimeout)
+  const c = getChannelConfig()
+  return reconnectWindowOf(c.pingInterval, c.reconnectTimeout, CHANNEL_TRANSPORT.SSE)
 }
 
 /** Extension wire types are consumed after user modules may have registered more extensions.
@@ -428,14 +479,14 @@ function getServerExtensionTypes() {
   }
 }
 
-/** @internal Adds transports to the defaults, which apply while the user sets none. */
-function enableChannelTransports(transports: ChannelTransports): void {
-  for (const transport of transports) globalObject.adapterChannelTransports.add(transport)
-}
-
 /** @internal The runtime ends a WebSocket on a larger message: the page refuses one, told by each channel the server makes and by each RECONCILED. */
 function setAdapterMaxFrameBytes(bytes: number | undefined): void {
   globalObject.adapterMaxFrameBytes = bytes
+}
+
+/** @internal */
+function setAdapterMaxMemory(bytes: number): void {
+  globalObject.adapterMaxMemory = bytes
 }
 
 function getAdapterMaxFrameBytes(): number | undefined {
@@ -530,64 +581,116 @@ function applyUserConfig(prop: string | symbol, val: unknown) {
 function applyChannelConfig(val: unknown): void {
   assertUsage(isObject(val), 'config.channel should be an object')
   const next: ChannelConfigUser = {}
+  const allowedOrigins: AllowedOrigin[] = []
   for (const [key, value] of Object.entries(val)) {
     const configPath = `config.channel.${key}`
     switch (key) {
       case 'transports':
         next.transports = validateChannelTransports(value, configPath, "['sse'] or ['ws']")
         break
+      case 'allowedOrigins': {
+        assertUsage(Array.isArray(value), `\`${configPath}\` should be an array of origins`)
+        // `for…of` reads a hole as `undefined`, which is no origin.
+        for (const entry of value) {
+          const allowed = typeof entry === 'string' ? parseAllowedOrigin(entry) : NOT_AN_ORIGIN
+          assertUsage(typeof allowed !== 'string', `\`${configPath}\` lists ${JSON.stringify(entry)}: ${allowed}`)
+          allowedOrigins.push(allowed)
+        }
+        // Its own copy: a later change of the caller's array changes nothing, and reading it back can't change it.
+        next[key] = Object.freeze(value.slice())
+        break
+      }
       case 'pingInterval':
         assertDuration(
           value,
           configPath,
-          Math.floor(TIMER_DELAY_MAX_MS / 2),
-          'as its deadline, twice it, is at most the longest a timer waits',
+          PING_INTERVAL_MAX_MS,
+          'as its deadline, up to two and a half times it, is at most the longest a timer waits',
+        )
+        assertUsage(
+          value >= CHANNEL_PING_INTERVAL_MIN_MS,
+          `\`${configPath}\` should be at least ${CHANNEL_PING_INTERVAL_MIN_MS}: more pings than that flood the wire`,
         )
         next[key] = value
         break
-      case 'reconnectTimeout':
-      case 'idleTimeout':
       case 'connectTtl':
+      case 'idleTimeout':
       case 'sseFlushThrottle':
       case 'ssePostIdleFlushDelay':
         assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
         next[key] = value
         break
-      case 'serverReplayBuffer':
-      case 'serverReplayBufferBinary':
-      case 'clientReplayBuffer':
-      case 'clientReplayBufferBinary':
-      case 'maxPendingBytes':
-      case 'maxPendingAcks':
-      case 'bufferLimit':
-      case 'bufferLimitBinary':
+      case 'reconnectTimeout':
+        assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
         assertUsage(
-          typeof value === 'number' && Number.isSafeInteger(value) && value >= 0,
-          `\`${configPath}\` should be a non-negative safe integer`,
+          value >= CHANNEL_RECONNECT_TIMEOUT_MIN_MS,
+          `\`${configPath}\` should be at least ${CHANNEL_RECONNECT_TIMEOUT_MIN_MS}: a client that lost its connection retries within ${CHANNEL_RECONNECT_INITIAL_DELAY_MS} ms, so in less its channels may close before it is back`,
         )
-        ;(next as Record<string, unknown>)[key] = value
+        next[key] = value
         break
+      case 'maxPendingBytes':
+        assertUsage(
+          typeof value === 'number' && Number.isSafeInteger(value) && value >= CREDIT_WINDOW_INITIAL_BYTES,
+          `\`${configPath}\` should be an integer of at least ${CREDIT_WINDOW_INITIAL_BYTES}: a channel's credit window starts at that`,
+        )
+        next[key] = value
+        break
+      case 'maxMemory': {
+        const bytes = parseMemorySize(value)
+        assertUsage(
+          bytes !== null && bytes >= CREDIT_WINDOW_INITIAL_BYTES,
+          `\`${configPath}\` should be a number of bytes, or a size such as '4g' or '512m', of at least ${CREDIT_WINDOW_INITIAL_BYTES}: a channel's credit window starts at that`,
+        )
+        next[key] = bytes
+        break
+      }
       default:
         assertUsage(false, `Unknown ${configPath}`)
     }
   }
+  assertUsage(
+    !globalObject.channelConfigInUse ||
+      (JSON.stringify(resolveChannelConfig(next)) === JSON.stringify(resolveChannelConfig(configState.channel)) &&
+        JSON.stringify(allowedOrigins) === JSON.stringify(globalObject.allowedOrigins)),
+    "`config.channel` can't change once the server has used it, from its first channel or page connection on, as those already open would keep the old values: set it before the server handles a request",
+  )
   configState.channel = next
+  globalObject.allowedOrigins = allowedOrigins
+}
+
+/** `value` in bytes: a whole number, or a size such as `'4g'`; null where it is neither. */
+function parseMemorySize(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isSafeInteger(value) ? value : null
+  const [, amount, unit] = (typeof value === 'string' ? /^(\d+(?:\.\d+)?)([kmg])$/i.exec(value) : null) ?? []
+  if (amount === undefined || unit === undefined) return null
+  return Math.floor(Number(amount) * 1024 ** ('kmg'.indexOf(unit.toLowerCase()) + 1))
 }
 
 function applyBroadcastConfig(val: unknown): void {
   assertUsage(isObject(val), 'config.broadcast should be an object')
+  const next: BroadcastConfigUser = {}
   for (const [key, value] of Object.entries(val)) {
     if (key === 'transport') {
       assertUsage(
-        isObject(value) && typeof (value as any).send === 'function' && typeof (value as any).listen === 'function',
-        'config.broadcast.transport must be a BroadcastTransport with send() and listen() methods',
+        isObject(value) &&
+          (['send', 'listen', 'sendBinary', 'listenBinary'] as const).every(
+            (method) => typeof value[method] === 'function',
+          ),
+        'config.broadcast.transport must be a BroadcastTransport with send(), listen(), sendBinary() and ' +
+          'listenBinary() methods',
       )
-      configState.broadcast.transport = value as BroadcastTransport
-      installBroadcastAdapter(() => new DefaultBroadcastAdapter(value as BroadcastTransport))
+      // A runtime check proves each method is a function, never its signature.
+      next.transport = value as BroadcastTransport
+    } else if (key === 'onDeliveryLost') {
+      assertUsage(typeof value === 'function', 'config.broadcast.onDeliveryLost should be a function')
+      // `typeof` narrows to `Function`, never to the listener's signature.
+      next.onDeliveryLost = value as BroadcastConfigUser['onDeliveryLost']
     } else {
       assertUsage(false, `Unknown config.broadcast.${key}`)
     }
   }
+  configState.broadcast = next
+  if (next.transport) configureBroadcastTransport(next.transport)
 }
 
 let rootFromVite: string | null = null

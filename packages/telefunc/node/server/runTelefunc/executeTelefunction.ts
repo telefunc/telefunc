@@ -1,6 +1,6 @@
 export { executeTelefunction }
 
-import { isAbort } from '../Abort.js'
+import { Abort } from '../Abort.js'
 import { restoreContext } from '../context/context.js'
 import type { Context } from '../context/context.js'
 import { createRequestContext } from '../context/requestContext.js'
@@ -34,7 +34,7 @@ async function executeTelefunction(runContext: {
   let telefunctionAborted = false
   const onTopLevelError = (err: unknown) => {
     validateTelefunctionError(err, runContext)
-    if (isAbort(err)) {
+    if (err instanceof Abort) {
       telefunctionAborted = true
       telefunctionReturn = err.abortValue
       runContext.requestContext.responseAbort.abort(err.abortValue)

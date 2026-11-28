@@ -7,8 +7,9 @@ export default {
   // cert from Caddy's auto-generated local CA — Chromium has no reason to trust that CA, so
   // we tell it to skip cert validation. Same flag is harmless for non-docker tests that
   // already speak HTTP or have a real cert chain.
+  // The fake camera, granted without a prompt, feeds the playground's video chat page.
   chromiumLaunchOptions: {
-    args: ['--ignore-certificate-errors'],
+    args: ['--ignore-certificate-errors', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'],
   },
 }
 
@@ -21,10 +22,16 @@ function getCiJobs() {
     os: 'windows-latest',
     node_version: '26',
   }
-  // The oldest Node.js Telefunc supports.
+  // The oldest Node.js major Telefunc supports, at its latest release.
   const ubuntuOldest = {
     os: 'ubuntu-latest',
     node_version: '22',
+  }
+  // The lowest Node.js that `engines` allows: before 22.21 Node has no `shouldUpgradeCallback`, and Telefunc's WebSocket
+  // answers a request with `Upgrade` that isn't Telefunc's itself.
+  const ubuntuLowest = {
+    os: 'ubuntu-latest',
+    node_version: '22.0.0',
   }
   const setups = [ubuntu, win]
   const setupModern = [ubuntu]
@@ -34,13 +41,24 @@ function getCiJobs() {
     {
       name: 'Vitest',
       command: 'pnpm run test:units',
-      setups: [ubuntu, ubuntuOldest],
+      setups: [ubuntu, ubuntuOldest, ubuntuLowest],
     },
 
     // TypeScript
     {
       name: 'TypeScript',
       command: 'pnpm run test:types',
+      setups: [ubuntu],
+    },
+    {
+      name: 'Released API',
+      command: 'pnpm run test:released-api',
+      setups: [ubuntu],
+    },
+    // @telefunc/redis against Redis 7.0.0 and 7.4.12, Valkey 7.2.5 and 8.1.1, each store in Docker
+    {
+      name: 'Redis stores',
+      command: 'pnpm run test:redis-stores',
       setups: [ubuntu],
     },
 

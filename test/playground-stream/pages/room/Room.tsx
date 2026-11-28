@@ -1,0 +1,3498 @@
+export { Room }
+
+import React, { useEffect, useState, useSyncExternalStore } from 'react'
+import { abort, close, withContext } from 'telefunc/client'
+import { keepReachable } from '../keepReachable'
+import {
+  byteAt,
+  fieldOf,
+  messageOf,
+  nameOf,
+  numberAt,
+  numberOf,
+  optionalFieldOf,
+  optionalTextOf,
+  present,
+  searchParam,
+  textAt,
+  textListOf,
+  textOf,
+} from '../../../checked'
+import {
+  onCreateRoom,
+  onJoinSpeaker,
+  onSpeakerPublishes,
+  onGetRoom,
+  onGetRoomTail,
+  onGetOrCreateRoom,
+  onGetOrCreateRoomTail,
+  onCreateTypedRoom,
+  onOpenGuardedRoom,
+  onGetUnguardedRoom,
+  onOpenAuditedRoom,
+  onGetAudit,
+  onJoinAsServer,
+  onJoinWithEveryKindOfMeta,
+  onJoinRoomAsServer,
+  onJoinRoomAsServerSelf,
+  onJoinAsServerSelf,
+  onJoinAsServerSelfPublishing,
+  onJoinTailAsServerSelfGreeting,
+  onGetRoomWithMember,
+  onGetRoomWithSnapshotMember,
+  onWatchRoom,
+  onWatchRoomAsSelf,
+  onGetWatched,
+  onWatchRoomTrack,
+  onGetWatchedTrack,
+  onHoldRetainedReads,
+  onHeldRetainedReads,
+  onReleaseRetainedReads,
+  onWatchEveryFrame,
+  onIterateMessages,
+  onGetIteratedMessages,
+  onKeepRoom,
+  onCountKeptRoom,
+  onCountRoom,
+  onGetEveryFrame,
+  onJoinHiddenAndHand,
+  onReturnDeparted,
+  onHiddenSetMeta,
+  onHiddenLeave,
+  onHiddenAfterPlayers,
+  onGetHiddenAfterPlayers,
+  onCloseRoomWithMember,
+  onBackgroundErrors,
+  onCloseWhileSubscribing,
+  onRoomWhileAway,
+  onRoomMetaWhileAway,
+  onRoomLeaveWhileJoining,
+  onRoomOverflow,
+  onParticipantOverflow,
+  onGetRoomOverflow,
+  onRoomBurst,
+  onRoomFlood,
+  onRoomMetaFlood,
+  onRoomTracks,
+  onRoomLossyNearBudget,
+  onRoomTextCursor,
+  onOpenReliableGapRoom,
+  onGetWatchedCount,
+  onRoomRelease,
+  onFailBackend,
+  onDropBackendSubscriptions,
+  onListParticipantNames,
+  onCreateRoomClosingAfter,
+  onSeedRoom,
+  onSeedChurn,
+  onPing,
+  onSystemPublish,
+  onSystemSend,
+  onSystemSendToUser,
+  onUpdateRoom,
+  onListRooms,
+  onKick,
+  onKickByIdentity,
+  onCloseRoom,
+  onWatchRoomBinary,
+  onGetWatchedBinary,
+  onPublishBufferAsServer,
+  onSendReusingObjects,
+  onSendPackageMessage,
+  onPublishRightAfterSubscribe,
+  onOpenSlowGuardRoom,
+  onConcurrentMetaWrites,
+  onReplaceMetaInLoop,
+  onStopReplacingMeta,
+  onReadMetaAcrossWrite,
+  onReadSplitMetaAcrossMerge,
+  onCreateRoomWithBytes,
+  onOpenRecordingGuardRoom,
+  onGetGuardCalls,
+  onOpenSlowJoinRoom,
+  onRoomForDeferredJoin,
+  onGetSlowJoins,
+  onGetSlowJoinRoom,
+  onCloseWhenEmpty,
+  onCreateRoomWith,
+  onCreateRoomHeld,
+  onJoinAndLeaveAsServer,
+  onIsOpen,
+  onListAsListed,
+  onListWhileClosing,
+  onRecreate,
+  onJoinAnswering,
+  onJoinClosed,
+  onThrowingListener,
+  onTwoRoutes,
+  onPublishLoop,
+  onSubscriberDropped,
+  onPublishOverRedisLimit,
+  onBusyLanes,
+  onLanesAfterDrop,
+  onLanesBeforeRewind,
+  onLanesPastRewind,
+  onSaveReply,
+  onSeedAndChurn,
+  onStopChurn,
+  onPublishWhileEstablishing,
+  onPublishOnServer,
+  onServerPublisherReads,
+  onJoinHiddenHeld,
+  onWatchAsServer,
+  onRenameWatcher,
+  onWatcherLeaves,
+} from './Room.telefunc'
+import {
+  onJoinChat,
+  onLoadHistory,
+  onJoinChatWriter,
+  onWriterPublishes,
+  onHoldSave,
+  onReleaseSave,
+  onSavedTexts,
+} from './Room.chatHistory.telefunc'
+import { defineParticipantField, watchersOf } from '@telefunc/room/__internal'
+import { RoomError, type LocalParticipant } from '@telefunc/room/client'
+import { demandNames, type NamedDemand } from './demandNames'
+import { publishMine } from './publishMine'
+
+type PollResult = { done: boolean; result?: unknown }
+/** The members one room view joins, and the named tracks one member publishes on (docs/pages/room, Reference). */
+const ROOM_VIEW_LIMIT = 4096
+/** 80 s of polls: past the 60 s reconnectTimeout the server waits for a closed tab on SSE. */
+const CLOSED_TAB_POLLS = 400
+
+async function createRoomId(label: string): Promise<string> {
+  const roomId = `e2e-${label}:${crypto.randomUUID()}`
+  await onCreateRoom(roomId)
+  return roomId
+}
+
+async function createRoom(label: string) {
+  const roomId = await createRoomId(label)
+  return [roomId, await onGetRoom(roomId)] as const
+}
+
+let selfCloseBase = ''
+
+type RoomView = Awaited<ReturnType<typeof onGetRoom>>
+type ServerJoined = Awaited<ReturnType<typeof onJoinAsServerSelf>>
+
+/** The join the `away-join` card starts when its second button is clicked. */
+let startAwayJoin: (() => void) | null = null
+/** The status the `join-only` card's member sets when its second button is clicked. */
+let goAway: (() => void) | null = null
+/** The check the `member-keeps-room` card runs when its second button is clicked. */
+let checkKeptMember: (() => void) | null = null
+/** The removal the `removed-identity` card makes when its second button is clicked. */
+let removeByIdentity: (() => void) | null = null
+/** The sends the `send-identity` card makes when its second button is clicked. */
+let sendToMulti: (() => void) | null = null
+/** The publish the `self-upgrade` card makes when its second button is clicked. */
+let publishUpgradedSelf: (() => void) | null = null
+/** The check the `watchers-upgrade` card runs when its second button is clicked. */
+let checkUpgradedWatch: (() => void) | null = null
+/** The publish the `member-resub` card makes when its second button is clicked. */
+let publishToResubscribed: (() => void) | null = null
+/** The check the `members-let-go` card runs when its second button is clicked. */
+let checkLetGo: (() => void) | null = null
+/** The chat the `ack-dm-close` card closes when its second button is clicked. */
+let closeChat: (() => void) | null = null
+/** The room view the `ack-dm-close-view` card closes when its second button is clicked. */
+let closeViewChat: (() => void) | null = null
+/** The call the `ack-dm-hang-up` card hangs up when its second button is clicked. */
+let hangUp: (() => void) | null = null
+
+const replyOf = (sent: Promise<unknown>) => sent.catch((err: Error) => err.message)
+
+/** A reply that links back to its thread, which can't be sent. */
+function threadedReply() {
+  const thread: { replies: unknown[] } = { replies: [] }
+  const reply = { text: 'see thread', thread }
+  thread.replies.push(reply)
+  return reply
+}
+
+/** Each of the participant's tracks as someone starts (`true`) and the last one stops (`false`) receiving it. */
+function demandLog(me: Pick<LocalParticipant, 'demand' | 'onChange'>): Array<[string, boolean]> {
+  const log: Array<[string, boolean]> = []
+  let watched = new Set<string>()
+  me.onChange(() => {
+    const now = new Set(me.demand.map(({ track }) => track))
+    for (const track of now) if (!watched.has(track)) log.push([track, true])
+    for (const track of watched) if (!now.has(track)) log.push([track, false])
+    watched = now
+  })
+  return log
+}
+
+/** Whether the last of `reads` is `expected`. */
+const readsAt = (reads: NamedDemand[][], expected: NamedDemand[]) =>
+  JSON.stringify(reads.at(-1)) === JSON.stringify(expected)
+
+/** `cam` received by `watchers` and `watcherCount` people in all. */
+const cam = (watchers: string[], watcherCount: number): NamedDemand => ({ track: 'cam', watchers, watcherCount })
+
+/** Joins through a room the page doesn't keep, and lets go of the member too, without leaving. */
+async function joinAndLetGo(roomId: string, leaves: string[]): Promise<void> {
+  const me = await (await onGetRoom(roomId)).join({ meta: { name: 'Dropped' } })
+  me.onLeave((cause) => leaves.push(cause.type))
+}
+
+/** Joins the room named in the URL as `Mallory`, then sends what no client library sends, as a hostile page can. */
+async function joinAndSendMalformed(kind: 'request' | 'publish' | 'reply'): Promise<void> {
+  const roomId = searchParam('roomId')
+  const room = await onGetRoom(roomId)
+  keepReachable(room)
+  // The room's own channel, past the API that checks what goes on it.
+  const end = roomEnd(room)
+  if (!isSendingEnd(end)) throw new Error("The room's channel has no send(), publish() or _sendReply()")
+  if (kind === 'reply') {
+    // Before the join: a DM that arrives while the join settles is answered through the end as it is then.
+    const sendReply = end._sendReply.bind(end)
+    end._sendReply = (reply, failure) =>
+      sendReply(
+        reply.then((dmReply) => Object.assign({}, dmReply, { reply: 'bogus' })),
+        failure,
+      )
+  }
+  const me = await room.join({ meta: { name: 'Mallory' } })
+  if (kind === 'reply') {
+    me.listen(() => 'hi')
+    return
+  }
+  await (kind === 'request' ? end.send({ __r: 'req-bogus' }, { ack: true }) : end.publish({ __r: 'bogus' })).catch(
+    () => {},
+  )
+}
+
+/** The room's own channel, as a hostile page reaches it past the API: its handle holds it, as its state's owner. */
+function roomEnd(room: object): object {
+  const end = fieldOf(fieldOf(fieldOf(fieldOf(room, '_remotes'), 'state'), 'owner'), 'end')
+  if (typeof end !== 'object' || end === null) throw new Error(`Expected the room's channel, read ${String(end)}`)
+  return end
+}
+
+/** A channel with the methods a hostile page calls on it to send past the API. */
+function isSendingEnd(end: object): end is {
+  send(data: unknown, options: { ack: true }): Promise<unknown>
+  publish(data: unknown): Promise<unknown>
+  _sendReply(reply: Promise<unknown>, failure: unknown): void
+} {
+  return (
+    'send' in end &&
+    typeof end.send === 'function' &&
+    'publish' in end &&
+    typeof end.publish === 'function' &&
+    '_sendReply' in end &&
+    typeof end._sendReply === 'function'
+  )
+}
+
+/** A connection's table of its channels, which finds a channel's record. */
+function isChannelTable(channels: unknown): channels is { of(end: object): unknown } {
+  return typeof channels === 'object' && channels !== null && 'of' in channels && typeof channels.of === 'function'
+}
+
+/** The documented React adapter: the room's methods passed as they are. */
+function LiveCount({ room }: { room: RoomView }) {
+  const snapshot = useSyncExternalStore(room.onChange, room.snapshot)
+  return <pre id="room-live-count">{snapshot.count}</pre>
+}
+
+function Room() {
+  const [result, setResult] = useState<string>('')
+  const [liveRoom, setLiveRoom] = useState<RoomView | null>(null)
+  const [hydrated, setHydrated] = useState(false)
+  useEffect(() => setHydrated(true), [])
+  /** Render every poll so e2e autoRetry sees fresh data; some reads are asynchronous. */
+  const pollUntil = async (render: () => PollResult | Promise<PollResult>, polls = 50) => {
+    for (let poll = 0; poll < polls; poll++) {
+      const { done, result } = await render()
+      if (result !== undefined) setResult(JSON.stringify(result))
+      if (done) break
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+  }
+
+  const getParticipantWhenJoined = async (room: RoomView, id: string) => {
+    await pollUntil(() => ({ done: room.getParticipant(id) !== null }))
+    const participant = room.getParticipant(id)
+    if (!participant) throw new Error(`Participant did not join within the test horizon: ${id}`)
+    return participant
+  }
+
+  /** What reaches a page offline while its room's speaker sends 16 rounds on two tracks and its messages. */
+  const tracksBehind = (heavy: 'cursor' | 'drawing') => async () => {
+    const roomId = await createRoomId(`tracks-${heavy}`)
+    const view = await onGetRoom(roomId)
+    const text: { data: string; seq: number }[] = []
+    view.subscribe((data, info) => text.push({ data: textOf(data), seq: info.seq }))
+    type Frame = { n: number; seq: number }
+    const tracks: Record<'pointer' | 'cursor' | 'drawing', Frame[]> = { pointer: [], cursor: [], drawing: [] }
+    for (const track of ['pointer', 'cursor', 'drawing'] as const) {
+      view.subscribeBinary((_data, info) => tracks[track].push({ n: numberAt(info.meta, 'n'), seq: info.seq }), {
+        track,
+      })
+    }
+    let closed = false
+    view.onClose(() => (closed = true))
+    const me = await view.join({ meta: { name: 'Me' } })
+    let myCause: unknown = null
+    me.onLeave((cause) => (myCause = cause))
+    await onRoomTracks(roomId, heavy)
+    await pollUntil(() => ({ done: text.some(({ data }) => data === 'before') }))
+    setResult(JSON.stringify({ roomId }))
+    const done = () =>
+      text.at(-1)?.data === '15' &&
+      tracks.pointer.at(-1)?.n === 7 &&
+      tracks.cursor.at(-1)?.n === 15 &&
+      tracks.drawing.length === 16
+    await pollUntil(() => ({ done: done() || (closed && myCause !== null) }), 150)
+    setResult(JSON.stringify({ roomId, text, ...tracks, closed, myCause }))
+  }
+
+  /** What the view receives of messages, of track `cam` and of the lossy track `cursor`: `Other`'s before and after
+   *  `me`'s (`publishMine()`, which `actAsMe` makes happen), once `meanwhile` is done. `me` joined on the server with
+   *  `selfDelivery: false`, and a server-side room watches `cam` (`onWatchRoomTrack()`). */
+  const receivedBesideMe = async (
+    roomId: string,
+    room: RoomView,
+    actAsMe: () => Promise<unknown>,
+    meanwhile?: () => Promise<void>,
+  ) => {
+    const text: unknown[] = []
+    const frames: number[] = []
+    const lossy: number[] = []
+    room.subscribe((data) => text.push(data))
+    room.subscribeBinary((data) => frames.push(byteAt(data)), { track: 'cam' })
+    room.subscribeBinary((data) => lossy.push(byteAt(data)), { track: 'cursor' })
+    const other = await room.join({ meta: { name: 'Other' } })
+    const otherSends = async (data: string, frame: number) => {
+      await other.publish(data)
+      await other.publishBinary(new Uint8Array([frame]), { track: 'cam' })
+      await other.publishBinary(new Uint8Array([frame]), { track: 'cursor', lossy: true })
+      await pollUntil(() => ({ done: text.includes(data) && frames.includes(frame) && lossy.includes(frame) }))
+    }
+    await otherSends('hello', 1)
+    await meanwhile?.()
+    await actAsMe()
+    // The view was relayed them when the server-side room was, so it gets `Other`'s next ones after them.
+    await pollUntil(async () => {
+      const watched = await onGetWatchedTrack(roomId)
+      return { done: watched.text.includes('mine') && watched.frames.includes(7) && watched.lossy.includes(7) }
+    })
+    await otherSends('bye', 9)
+    return { text, frames, lossy }
+  }
+
+  const scenario = (id: string, heading: string | null, label: string, run: () => Promise<void>) => (
+    <>
+      {heading && <h2>{heading}</h2>}
+      <button
+        id={`test-room-${id}`}
+        onClick={async () => {
+          setResult('')
+          await run()
+        }}
+      >
+        {label}
+      </button>
+    </>
+  )
+
+  return (
+    <div id={hydrated ? 'hydrated' : undefined}>
+      <pre id="room-result">{result}</pre>
+      {liveRoom && <LiveCount room={liveRoom} />}
+
+      {scenario('signals', 'Subscriptions', 'Abort listeners and iterate messages', async () => {
+        const [roomId, lobby] = await createRoom('signals')
+        const lifetime = new AbortController()
+        let calls = 0
+        lobby.subscribe(() => calls++, { signal: lifetime.signal })
+        lobby.onJoin(() => calls++, { signal: lifetime.signal })
+        const me = await lobby.join({ meta: { name: 'Alice' } })
+        const remote = present(lobby.getParticipant(me.id), 'Alice in the lobby')
+        remote.subscribe(() => calls++, { signal: lifetime.signal })
+        me.listen(() => calls++, { signal: lifetime.signal })
+        lifetime.abort()
+        const before = calls
+        const bobView = await onGetRoom(roomId)
+        const releaseBobView = keepReachable(bobView)
+        const bob = await bobView.join({ meta: { name: 'Bob' } })
+        await onIterateMessages(roomId)
+        const stream = lobby.messages()
+        // The first `next()` subscribes.
+        const pending = stream.next()
+        await me.publish('hello')
+        await bob.publish('hi')
+        await me.publishBinary(new Uint8Array([1]), { track: 'camera', meta: { frame: 1 } })
+        await me.publishBinary(new Uint8Array([2]), { track: 'screen' })
+        await bob.publishBinary(new Uint8Array([3]), { track: 'camera' })
+        const received: string[] = []
+        for (let next = pending; received.length < 5; next = stream.next()) {
+          const step = await next
+          if (step.done) throw new Error('The messages ended')
+          const message = step.value
+          received.push(
+            message.type === 'text'
+              ? `text ${present(message.info.from, 'its sender').meta.name}: ${message.data}`
+              : `binary ${message.info.from.meta.name} ${message.info.track}: ${message.data} ${JSON.stringify(message.info.meta)}`,
+          )
+        }
+        await present(stream.return, "the messages' return").call(stream)
+        const stopped = (await stream.next()).done
+        let onServer: string[] = []
+        await pollUntil(async () => {
+          onServer = await onGetIteratedMessages(roomId)
+          return { done: onServer.length === 5 }
+        })
+        const aborted = lobby.messages({ signal: lifetime.signal })
+        const abortedWithReason = await aborted.next().then(
+          () => false,
+          (error) => error === lifetime.signal.reason,
+        )
+        await me.send(me.id, 'ignored')
+        await me.leave()
+        await bob.leave()
+        releaseBobView()
+        setResult(
+          JSON.stringify({
+            unchanged: calls === before,
+            // Sorted: this checks what arrived and from whom, not the order.
+            received: received.sort(),
+            onServer: onServer.sort(),
+            stopped,
+            abortedWithReason,
+          }),
+        )
+      })}
+
+      {scenario('chat', 'Presence & Chat', 'Join, publish, setMeta, leave', async () => {
+        const [roomId, lobby] = await createRoom('chat')
+
+        const events: string[] = []
+        lobby.onJoin((m) => events.push(`join:${m.meta.name}`))
+        lobby.onLeave((m) => events.push(`leave:${m.meta.name}`))
+        const received: Array<{ text: unknown; from: unknown }> = []
+        lobby.subscribe((data, { from }) => {
+          received.push({ text: textAt(data, 'text'), from: from?.meta.name })
+        })
+
+        const snapBefore = lobby.snapshot()
+        let changes = 0
+        lobby.onChange(() => changes++)
+
+        const me = await lobby.join({ meta: { name: 'Alice' } })
+        const countAfterJoin = lobby.count
+        const updates: unknown[] = []
+        const alice = present(lobby.getParticipant(me.id), 'Alice in the lobby')
+        alice.onChange(() => updates.push(alice.meta.score))
+
+        const ack = await me.publish({ text: 'hello' })
+        await me.setMeta({ name: 'Alice', score: 42 })
+        await me.leave()
+
+        await pollUntil(() => {
+          const state = {
+            events,
+            received,
+            updates,
+            countAfterJoin,
+            count: lobby.count,
+            ack: { key: ack.key, seq: ack.seq },
+            snapshotChanged: lobby.snapshot() !== snapBefore,
+            snapshotStable: lobby.snapshot() === lobby.snapshot(),
+            changes,
+          }
+          return {
+            result: state,
+            done: events.length >= 2 && received.length >= 1 && updates.length >= 1 && changes >= 1,
+          }
+        })
+      })}
+
+      {scenario('retain', 'Retained Replay', 'Retained replay to a late subscriber', async () => {
+        const roomId = await createRoomId('retain')
+
+        const pubView = await onGetRoom(roomId)
+        // A GC pass would close `pubView`, and Author leaving with it deletes the message it retained.
+        const releasePubView = keepReachable(pubView)
+        const author = await pubView.join({ meta: { name: 'Author' } })
+        await author.publish({ text: 'pinned' }, { retain: true })
+
+        const late = await onGetRoom(roomId)
+        const received: string[] = []
+        late.subscribe((data) => received.push(textAt(data, 'text')))
+
+        await pollUntil(() => ({ result: { received }, done: received.length >= 1 }))
+        releasePubView()
+      })}
+
+      {scenario('participant', 'Server-Joined Participant', 'Server-side join + publish', async () => {
+        const [roomId, observer] = await createRoom('participant')
+        const received: Array<{ text: unknown; from: unknown }> = []
+        observer.subscribe((data, { from }) => {
+          received.push({ text: textAt(data, 'text'), from: from?.meta.name })
+        })
+
+        const me = await onJoinAsServer(roomId, 'Bob')
+        await me.publish({ text: 'from-bob' })
+        await me.setMeta({ name: 'Bobby' })
+        // Live handle (meta stays fresh); retry (the join event may still be in flight).
+        const remoteMe = await getParticipantWhenJoined(observer, me.id)
+
+        const ally = await observer.join({ meta: { name: 'Ally' } })
+        const dms: Array<{ data: unknown; fromAlly: boolean }> = []
+        me.listen((data, { from }) => dms.push({ data, fromAlly: from?.id === ally.id }))
+        await ally.send(me.id, 'psst')
+
+        await pollUntil(() => {
+          const state = {
+            received,
+            count: observer.count,
+            remoteMetaName: remoteMe?.meta.name ?? null,
+            localMetaName: me.meta.name ?? null,
+            localIdentity: me.identity,
+            remoteIdentity: remoteMe?.identity ?? null,
+            dms,
+          }
+          return {
+            result: state,
+            done:
+              received.length >= 1 &&
+              state.remoteMetaName === 'Bobby' &&
+              state.localMetaName === 'Bobby' &&
+              dms.length >= 1,
+          }
+        })
+      })}
+
+      {scenario('binary', 'Binary', 'Publish 3 binary frames', async () => {
+        const [roomId, videoRoom] = await createRoom('binary')
+        const me = await videoRoom.join({ meta: { name: 'Cam' } })
+
+        const frames: Array<{
+          size: number
+          firstByte: number
+          fromSelf: boolean
+          track: string
+          meta: Record<string, unknown> | null
+        }> = []
+        videoRoom.subscribeBinary((data, info) => {
+          frames.push({
+            size: data.byteLength,
+            firstByte: byteAt(data),
+            fromSelf: info.from.id === me.id,
+            track: info.track,
+            meta: info.meta,
+          })
+        })
+        const cameraOnly: number[] = []
+        videoRoom.subscribeBinary((data) => cameraOnly.push(byteAt(data)), { track: 'camera' })
+        const defaultOnly: number[] = []
+        videoRoom.subscribeBinary((data) => defaultOnly.push(byteAt(data)), { track: 'main' })
+
+        for (let i = 0; i < 3; i++) {
+          await me.publishBinary(new Uint8Array(64).fill(i + 1))
+        }
+        // Named track + per-frame meta: mic/camera/screen multiplex over one member lane.
+        await me.publishBinary(new Uint8Array(32).fill(9), { track: 'camera', meta: { key: true } })
+
+        await pollUntil(() => {
+          return {
+            result: { frames, cameraOnly, defaultOnly },
+            done: frames.length >= 4 && cameraOnly.length >= 1 && defaultOnly.length >= 3,
+          }
+        })
+      })}
+
+      {scenario('guard', 'Guards', 'Guarded publish & send', async () => {
+        const roomId = await createRoomId('guard')
+        const room = await onOpenGuardedRoom(roomId)
+
+        const received: unknown[] = []
+        room.subscribe((data) => received.push(data))
+        const joinError = await room.join({ meta: { name: 'Banned' } }).then(
+          () => null,
+          (err: Error) => err.message,
+        )
+        const unguardedJoinError = await (await onGetUnguardedRoom(roomId)).join({ meta: { name: 'Anyone' } }).then(
+          () => null,
+          (err: Error) => err.message,
+        )
+        const me = await room.join({ meta: { name: 'Mallory' } })
+        const peer = await room.join({ meta: { name: 'Peer' } })
+        const inbox: unknown[] = []
+        peer.listen((data) => inbox.push(data))
+
+        const publishError = await me.publish('forbidden').then(
+          () => null,
+          (err: Error) => err.message,
+        )
+        const trackError = await me.publish('forbidden', { track: 'cursor' }).then(
+          () => null,
+          (err: Error) => err.message,
+        )
+        const sendError = await me.send(peer.id, 'forbidden').then(
+          () => null,
+          (err: Error) => err.message,
+        )
+        await me.publish('fine')
+        await me.send(peer.id, 'psst')
+
+        await pollUntil(() => ({
+          result: { joinError, unguardedJoinError, publishError, trackError, sendError, received, inbox },
+          done: received.length >= 1 && inbox.length >= 1,
+        }))
+      })}
+
+      {scenario('shield', null, 'Shielded publish', async () => {
+        const roomId = `e2e-shield:${crypto.randomUUID()}`
+        const room = await onCreateTypedRoom(roomId)
+        const me = await room.join({ meta: { name: 'A' } })
+        const received: string[] = []
+        room.subscribe((data) => received.push(data.text))
+
+        const okAck = await me.publish({ kind: 'chat', text: 'hi' }).then(
+          () => true,
+          () => false,
+        )
+        // A hostile page publishes past the type, as a JavaScript caller can: the generated shield rejects it.
+        // @ts-expect-error The message has no `text`.
+        const badError = await me.publish({ kind: 'chat' }).then(
+          () => null,
+          (err: Error) => err.name,
+        )
+
+        const trackBadError = await me
+          // @ts-expect-error The message has no `text`.
+          .publish({ kind: 'chat' }, { track: 'cursor' })
+          .then(
+            () => null,
+            (err: Error) => err.name,
+          )
+
+        await pollUntil(() => ({ result: { okAck, badError, trackBadError, received }, done: received.length >= 1 }))
+      })}
+
+      {scenario('own-bytes', 'Bytes of its own', 'Listeners that write into or transfer their bytes', async () => {
+        const roomId = await createRoomId('own-bytes')
+        const room = await onWatchRoomBinary(roomId)
+        const me = await room.join({ meta: { name: 'Pub' } })
+        // The first listener detaches its buffer, as handing it to a worker does.
+        room.subscribeBinary((data) => structuredClone(data.buffer, { transfer: [data.buffer] }))
+        const seen: number[][] = []
+        room.subscribeBinary((data) => seen.push([...data]))
+
+        await me.publishBinary(new Uint8Array([1, 2, 3, 4]))
+        await onPublishBufferAsServer(roomId, [5, 6, 7, 8])
+        const late = await onGetRoom(roomId)
+        const lateSeen: number[][] = []
+        late.subscribeBinary((data) => lateSeen.push([...data]))
+
+        await pollUntil(async () => {
+          const serverSeen = await onGetWatchedBinary(roomId)
+          return {
+            result: { seen, serverSeen, lateSeen },
+            done: seen.length >= 2 && serverSeen.length >= 2 && lateSeen.length >= 1,
+          }
+        })
+      })}
+
+      {scenario('at-call', 'Taken at the call', 'Writes whose caller reuses its object', async () => {
+        const [roomId, room] = await createRoom('at-call')
+        const me = await room.join({ meta: { name: 'Me' } })
+        const messages: Array<{ data: unknown; from: string }> = []
+        const systemMessages: unknown[] = []
+        room.subscribe((data, { from }) => {
+          if (from === null) systemMessages.push(data)
+          else messages.push({ data, from: textOf(from.meta.name) })
+        })
+        const frames: number[][] = []
+        room.subscribeBinary((data) => frames.push([...data]))
+        const dms: unknown[] = []
+        me.listen((data) => dms.push(data))
+        await me.updateMeta({ ready: true }) // same-channel ack orders the declarations before the server's writes
+
+        const first = { n: 10 }
+        const second = { n: 11 }
+        const published = Promise.all([me.publish(first), me.publish(second)])
+        second.n = 12
+        await published
+        const reuser = await getParticipantWhenJoined(room, await onSendReusingObjects(roomId, me.id))
+
+        await pollUntil(() => {
+          const state = {
+            messages,
+            frames,
+            systemMessages,
+            dms,
+            reuserTags: reuser.meta.tags === undefined ? null : textListOf(reuser.meta.tags),
+            roomTags: room.meta.tags === undefined ? null : textListOf(room.meta.tags),
+          }
+          return {
+            result: state,
+            done:
+              messages.length >= 3 &&
+              frames.length >= 1 &&
+              systemMessages.length >= 1 &&
+              dms.length >= 2 &&
+              state.reuserTags?.[0] === 'b' &&
+              state.roomTags !== null,
+          }
+        })
+      })}
+
+      {scenario('package-message', 'Package messages', "A package's message to me, then the app's", async () => {
+        // The package's side of the page: its field runs on the page's room, the only one of it here.
+        const packaged: unknown[] = []
+        defineParticipantField<null>('e2e-field', {
+          initial: null,
+          attach: ({ onPrivate }) => onPrivate((_from, data) => packaged.push(data)),
+        })
+        const roomId = `e2e-package-message:${crypto.randomUUID()}`
+        await onCreateRoomWith(roomId, {})
+        const room = await onGetRoom(roomId)
+        const releaseRoom = keepReachable(room)
+        const me = await room.join({ meta: { name: 'Me' } })
+        // And a `me` a server returned alone.
+        const alone = await onJoinHiddenHeld(roomId)
+        const dms: string[] = []
+        me.listen((data) => dms.push(`me: ${data}`))
+        alone.listen((data) => dms.push(`alone: ${data}`))
+        await onSendPackageMessage(roomId, me.id)
+        await onSendPackageMessage(roomId, alone.id)
+        await pollUntil(() => ({ result: { dms, packaged }, done: dms.length === 2 && packaged.length === 2 }))
+        releaseRoom()
+      })}
+
+      {scenario('right-after', 'Publish right after subscribe', 'Subscribe, then publish at once', async () => {
+        const roomId = await createRoomId('right-after')
+        await onPublishRightAfterSubscribe(roomId)
+        const room = await onGetRoom(roomId)
+        const me = await room.join({ meta: { name: 'Page' } })
+        const seen: unknown[] = []
+        room.subscribe((data, { from }) => {
+          if (from?.id === me.id) seen.push(data)
+        })
+        room.subscribeBinary((data, { from }) => {
+          if (from.id === me.id) seen.push([...data])
+        })
+        await Promise.all([me.publish('p1'), me.publishBinary(new Uint8Array([2])), me.publish('p2')])
+
+        await pollUntil(async () => {
+          const serverSeen = await onGetWatched(roomId)
+          return { result: { seen, serverSeen }, done: seen.length >= 3 && serverSeen.length >= 4 }
+        })
+      })}
+
+      {scenario('call-order', 'Publishes in call order', 'Publish behind a slow guard', async () => {
+        const roomId = await createRoomId('call-order')
+        const room = await onOpenSlowGuardRoom(roomId)
+        const texts: number[] = []
+        room.subscribe((data) => texts.push(numberOf(data)))
+        const frames: number[] = []
+        room.subscribeBinary((data) => frames.push(byteAt(data)))
+        const me = await room.join({ meta: { name: 'Fast' } })
+
+        const numbers = Array.from({ length: 20 }, (_, i) => i)
+        await Promise.all(numbers.flatMap((n) => [me.publish(n), me.publishBinary(new Uint8Array([n]))]))
+
+        await pollUntil(() => ({ result: { texts, frames }, done: texts.length >= 20 && frames.length >= 20 }))
+      })}
+
+      {scenario('meta-race', 'Concurrent meta writes', 'Many writers at once', async () => {
+        const [roomId, room] = await createRoom('meta-race')
+        const other = await onGetRoom(roomId)
+        const stored = await onConcurrentMetaWrites(roomId)
+        const member = await getParticipantWhenJoined(room, stored.memberId)
+        const otherMember = await getParticipantWhenJoined(other, stored.memberId)
+
+        await pollUntil(() => {
+          const views = {
+            roomMeta: Object.entries(room.meta),
+            otherRoomMeta: Object.entries(other.meta),
+            memberMeta: Object.entries(member.meta),
+            otherMemberMeta: Object.entries(otherMember.meta),
+          }
+          const settled =
+            JSON.stringify(views.roomMeta) === JSON.stringify(stored.roomMeta) &&
+            JSON.stringify(views.otherRoomMeta) === JSON.stringify(stored.roomMeta) &&
+            JSON.stringify(views.memberMeta) === JSON.stringify(stored.memberMeta) &&
+            JSON.stringify(views.otherMemberMeta) === JSON.stringify(stored.memberMeta)
+          return { result: { stored, ...views }, done: settled }
+        })
+      })}
+
+      {scenario('meta-replace', 'Reads while meta is replaced', 'Read a big meta while it is replaced', async () => {
+        const roomId = await createRoomId('meta-replace')
+        const memberId = await onReplaceMetaInLoop(roomId)
+        // Which meta a read got: `a…` or `b…` whole, or what it saw otherwise.
+        const which = (meta: Record<string, unknown>) => {
+          const keys = Object.keys(meta).filter((key) => key !== 'name')
+          const prefix = keys[0]?.[0]
+          const whole = keys.length === 1500 && keys.every((key, i) => key === `${prefix}${i}` && meta[key] === i)
+          return whole ? prefix : `${keys.length} keys from ${keys[0]} to ${keys.at(-1)}`
+        }
+        const reads: Array<string | undefined> = []
+        for (let i = 0; i < 6; i++) {
+          const room = await onGetRoom(roomId)
+          const member = room.getParticipant(memberId)
+          reads.push(which(room.meta), which(member?.meta ?? {}))
+        }
+        await onStopReplacingMeta(roomId)
+        setResult(JSON.stringify({ reads }))
+      })}
+
+      {scenario('meta-across-write', null, "Read a member's big meta across a write", async () => {
+        const reads: Record<string, string> = {}
+        for (const [write, gen] of [
+          ['replace with no keys', 1],
+          ['merge', 1],
+          ['replace', 9],
+          ['replace', 99],
+        ] as const) {
+          reads[`${write} from ${gen}`] = await onReadMetaAcrossWrite(
+            await createRoomId('meta-across-write'),
+            write,
+            gen,
+          )
+          setResult(JSON.stringify(reads))
+        }
+      })}
+
+      {scenario('split-meta-across-merge', null, "Read a member's split meta across a merge", async () => {
+        const roomId = await createRoomId('split-meta-across-merge')
+        setResult(JSON.stringify({ read: await onReadSplitMetaAcrossMerge(roomId) }))
+      })}
+
+      {scenario('members-cap', 'Limits', 'Join past the members one view joins', async () => {
+        const roomId = await createRoomId('members-cap')
+        const view = await onGetRoom(roomId)
+        const releaseView = keepReachable(view)
+        const joins = await Promise.allSettled(
+          Array.from({ length: ROOM_VIEW_LIMIT + 1 }, (_, i) => view.join({ meta: { name: `m${i}` } })),
+        )
+        const joined = joins.flatMap((join) => (join.status === 'fulfilled' ? [join.value] : []))
+        const errors = joins.flatMap((join) => (join.status === 'rejected' ? [messageOf(join.reason)] : []))
+        // The members it joined keep working.
+        const first = present(joined[0], 'a joined member')
+        await first.updateMeta({ still: true })
+        const count = (await onListParticipantNames(roomId)).length
+        setResult(JSON.stringify({ joined: joined.length, errors, count, still: first.meta.still }))
+        releaseView()
+      })}
+
+      {scenario('tracks-cap', null, 'Publish past the named tracks one member publishes on', async () => {
+        const roomId = await createRoomId('tracks-cap')
+        const view = await onGetRoom(roomId)
+        const releaseView = keepReachable(view)
+        const me = await view.join({ meta: { name: 'Tracks' } })
+        const publishes = await Promise.allSettled(
+          Array.from({ length: ROOM_VIEW_LIMIT + 1 }, (_, i) =>
+            me.publishBinary(new Uint8Array([1]), { track: `t${i}`, retain: true }),
+          ),
+        )
+        const errors = publishes.flatMap((publish) =>
+          publish.status === 'rejected' ? [messageOf(publish.reason)] : [],
+        )
+        // Its tracks and the default track keep working, and a late view gets each named track's retained frame.
+        const kept = publishes.findIndex((publish) => publish.status === 'fulfilled')
+        await me.publishBinary(new Uint8Array([2]), { track: `t${kept}` })
+        await me.publishBinary(new Uint8Array([3]))
+        const late = await onGetRoom(roomId)
+        const releaseLate = keepReachable(late)
+        const retained = new Set<string>()
+        late.subscribeBinary((_data, info) => retained.add(info.track))
+        await pollUntil(() => ({
+          result: { accepted: publishes.length - errors.length, errors, retained: retained.size },
+          done: retained.size >= ROOM_VIEW_LIMIT,
+        }))
+        releaseLate()
+        releaseView()
+      })}
+
+      {scenario('sender', 'Rename during a guard', 'Rename while a publish waits on its guard', async () => {
+        const roomId = await createRoomId('sender')
+        const room = await onOpenSlowGuardRoom(roomId)
+        const names: unknown[] = []
+        room.subscribe((_data, { from }) => names.push(from?.meta.name))
+        const me = await room.join({ meta: { name: 'A' } })
+        // A view whose roster may still be on its way.
+        const other = await onGetRoom(roomId)
+        const otherNames: unknown[] = []
+        other.subscribe((_data, { from }) => otherNames.push(from?.meta.name))
+
+        const published = me.publish(0) // its guard waits 50 ms
+        await me.setMeta({ name: 'B' })
+        await published
+        const view = await getParticipantWhenJoined(room, me.id)
+        const otherView = await getParticipantWhenJoined(other, me.id)
+
+        await pollUntil(() => {
+          const state = { names, otherNames, viewName: view.meta.name, otherViewName: otherView.meta.name }
+          return {
+            result: state,
+            done: names.length >= 1 && otherNames.length >= 1 && state.viewName === 'B' && state.otherViewName === 'B',
+          }
+        })
+      })}
+
+      {scenario('guard-calls', 'What guards are handed', 'Guarded join, send, publish and leave', async () => {
+        const roomId = await createRoomId('guard-calls')
+        const room = await onOpenRecordingGuardRoom(roomId)
+        const me = await room.join({ meta: { name: 'G' } })
+        const peer = await room.join({ meta: { name: 'P' } })
+        await me.send(peer.id, 'hi')
+        const binaryError = await me.publishBinary(new Uint8Array([1])).then(
+          () => null,
+          (err: Error) => err.message,
+        )
+        const afterHookAck = await me.publish('after').then(
+          (ack) => ack.seq > 0,
+          (err: Error) => err.message,
+        )
+        await me.publish('on-a-track', { track: 'cursor' })
+        // The second publish waits behind the first's guard while its member leaves.
+        const slow = me.publish('slow')
+        const queued = me.publish('queued')
+        await me.leave()
+        await Promise.allSettled([slow, queued])
+        setResult(JSON.stringify({ binaryError, afterHookAck, calls: await onGetGuardCalls(roomId) }))
+      })}
+
+      {scenario(
+        'leave-causes',
+        'Leave causes',
+        'Leave with acknowledged DMs pending, and a tab that closes',
+        async () => {
+          const [roomId, room] = await createRoom('leave-causes')
+          const causes: Array<{ name: unknown; type: string }> = []
+          room.onLeave((member, cause) => causes.push({ name: member.meta.name, type: cause.type }))
+          const a = await room.join({ meta: { name: 'A' } })
+          const b = await room.join({ meta: { name: 'B' } })
+          const c = await room.join({ meta: { name: 'C' } })
+          // A and C take each DM and never answer.
+          a.listen(() => new Promise(() => {}))
+          c.listen(() => new Promise(() => {}))
+          const outcome = (sent: Promise<unknown>) =>
+            sent.then(
+              () => 'resolved',
+              () => 'rejected',
+            )
+
+          const start = performance.now()
+          const toLeaving = b.send(a.id, 'ping', { ack: true })
+          await a.leave()
+          const recipientLeft = await outcome(toLeaving)
+          const fromLeaving = b.send(c.id, 'ping', { ack: true })
+          await b.leave()
+          const senderLeft = await outcome(fromLeaving)
+          const seconds = (performance.now() - start) / 1000
+
+          // The test joins `Closer` from another tab, then closes it; on SSE the server waits out reconnectTimeout (60 s).
+          await pollUntil(
+            () => ({
+              result: { roomId, recipientLeft, senderLeft, seconds, causes },
+              done: causes.some((cause) => cause.name === 'Closer'),
+            }),
+            CLOSED_TAB_POLLS,
+          )
+        },
+      )}
+
+      {scenario('connection', 'Connection', "Watch another tab's member drop, come back and close", async () => {
+        const [roomId, room] = await createRoom('connection')
+        await room.join({ meta: { name: 'Watcher' } })
+        const events: string[] = []
+        room.onJoin((member) => {
+          if (member.meta.name !== 'Closer') return
+          member.onChange(() => events.push(`change:${member.meta.status ?? 'here'}:${member.isConnected}`))
+          member.onDisconnect(() => events.push(`disconnect:${member.isConnected}`))
+          member.onReconnect(() => events.push(`reconnect:${member.isConnected}`))
+          member.onLeave((cause) => events.push(`leave:${cause.type}`))
+        })
+        const closerConnected = () =>
+          room.snapshot().participants.find((member) => member.meta.name === 'Closer')?.isConnected ?? null
+        // The test joins `Closer` from another tab, sets it away, takes that tab offline and back, then offline and
+        // closes it.
+        await pollUntil(
+          () => ({
+            result: { roomId, events, closerConnected: closerConnected() },
+            done: events.includes('leave:disconnected'),
+          }),
+          2 * CLOSED_TAB_POLLS,
+        )
+      })}
+
+      {scenario('join-only', null, 'Join the room named in the URL', async () => {
+        const roomId = searchParam('roomId')
+        const room = await onGetRoom(roomId)
+        keepReachable(room)
+        const me = await room.join({ meta: { name: 'Closer' } })
+        const { promise: away, resolve } = Promise.withResolvers<void>()
+        goAway = resolve
+        setResult(JSON.stringify('joined'))
+        await away
+        await me.updateMeta({ status: 'away' })
+        setResult(JSON.stringify('away'))
+      })}
+      <button id="test-room-join-only-away" onClick={() => goAway?.()}>
+        Set away
+      </button>
+
+      {scenario(
+        'dm-ack-outcomes',
+        'Acknowledged DM outcomes',
+        "Send to another tab's handler that throws, then to one it holds while its tab goes away",
+        async () => {
+          const [roomId, room] = await createRoom('dm-ack-outcomes')
+          setResult(JSON.stringify({ roomId }))
+          const me = await room.join({ meta: { name: 'Sender' } })
+          // The test joins `Recipient` from another tab, and navigates that tab away once its handler holds `hold`.
+          const recipient = await new Promise<string>((resolve) =>
+            room.onJoin((member) => member.meta.name === 'Recipient' && resolve(member.id)),
+          )
+          const outcome = async (sent: Promise<unknown>) => {
+            const start = performance.now()
+            try {
+              return { resolved: await sent }
+            } catch (err) {
+              const isRoomError = err instanceof RoomError
+              const code = typeof err === 'object' && err !== null && 'code' in err ? err.code : null
+              const message = err instanceof Error ? err.message : String(err)
+              return { isRoomError, code, message, seconds: Math.round((performance.now() - start) / 1000) }
+            }
+          }
+          const threw = await outcome(me.send(recipient, 'throw', { ack: true }))
+          const wentAway = await outcome(me.send(recipient, 'hold', { ack: true }))
+          setResult(JSON.stringify({ roomId, threw, wentAway }))
+        },
+      )}
+      {scenario('dm-ack-recipient', null, 'Join the room named in the URL, and take its DMs', async () => {
+        const roomId = new URLSearchParams(location.search).get('roomId') ?? ''
+        const room = await onGetRoom(roomId)
+        keepReachable(room)
+        const me = await room.join({ meta: { name: 'Recipient' } })
+        me.listen((data) => {
+          if (data === 'throw') throw new Error("the handler's own message")
+          setResult(JSON.stringify('holding'))
+          return new Promise(() => {})
+        })
+        setResult(JSON.stringify('joined'))
+      })}
+
+      {scenario('malformed', 'Malformed requests', 'Join, and say goodbye to whoever leaves', async () => {
+        const [roomId, room] = await createRoom('malformed')
+        const events: string[] = []
+        const received: unknown[] = []
+        let dm: string | null = null
+        room.subscribe((data) => received.push(data))
+        room.onJoin((member) => {
+          events.push(`join:${member.meta.name}`)
+          if (member.meta.name !== 'Mallory') return
+          void me.send(member.id, 'hello?', { ack: true }).then(
+            () => (dm = 'answered'),
+            () => (dm = 'rejected'),
+          )
+        })
+        const me = await room.join({ meta: { name: 'Witness' } })
+        room.onLeave((member, cause) => {
+          events.push(`leave:${member.meta.name}:${cause.type}`)
+          void me.publish(`bye ${member.meta.name}`)
+        })
+        // The test joins `Mallory` from another tab, which then sends a malformed request, publish or DM reply.
+        await pollUntil(
+          () => ({ result: { roomId, events, received, dm }, done: received.length > 0 && dm !== null }),
+          150,
+        )
+      })}
+
+      {scenario('malformed-request', null, 'Join the room named in the URL, then send a malformed request', () =>
+        joinAndSendMalformed('request'),
+      )}
+
+      {scenario('malformed-publish', null, 'Join the room named in the URL, then send a malformed publish', () =>
+        joinAndSendMalformed('publish'),
+      )}
+
+      {scenario('malformed-reply', null, 'Join the room named in the URL, then reply to a DM malformed', () =>
+        joinAndSendMalformed('reply'),
+      )}
+
+      {scenario(
+        'own-meta-race',
+        'Own meta under concurrent writes',
+        'Unawaited setMeta() and updateMeta()',
+        async () => {
+          const [roomId, room] = await createRoom('own-meta-race')
+          const me = await room.join({ meta: { name: 'Mine', round: -1 } })
+          const other = await onGetRoom(roomId)
+          // A GC pass would close `other`, and `remote` would stop taking its meta updates.
+          const releaseOther = keepReachable(other)
+          const remote = await getParticipantWhenJoined(other, me.id)
+          await Promise.all(
+            Array.from({ length: 20 }, (_, i) =>
+              i % 5 === 0 ? me.setMeta({ name: 'Mine', round: i }) : me.updateMeta({ [`m${i}`]: i }),
+            ),
+          )
+          await pollUntil(() => {
+            const state = { mine: Object.entries(me.meta), remote: Object.entries(remote.meta) }
+            return { result: state, done: JSON.stringify(state.mine) === JSON.stringify(state.remote) }
+          })
+          releaseOther()
+        },
+      )}
+
+      {scenario('meta-bytes', 'Bytes in a meta', 'Room.create() and join() with a Uint8Array', async () => {
+        const { room, memberId, onServer } = await onCreateRoomWithBytes(`e2e-meta-bytes:${crypto.randomUUID()}`)
+        const member = await getParticipantWhenJoined(room, memberId)
+        const me = await room.join({ meta: { avatar: new Uint8Array([7, 8]) } })
+        const before = me.meta
+        await me.updateMeta({ avatar: new Uint8Array([9]) })
+        const changed = me.meta
+        await me.updateMeta({ avatar: new Uint8Array([10]) })
+        const read = [room.meta.thumbnail, member.meta.avatar, before.avatar, changed.avatar, me.meta.avatar]
+        setResult(
+          JSON.stringify({
+            onServer,
+            onPage: read.map((value) => (value instanceof Uint8Array ? Array.from(value) : value)),
+          }),
+        )
+      })}
+
+      {scenario('malformed-answer', null, 'Keep taking events after an invalid meta reply', async () => {
+        const [, room] = await createRoom('malformed-answer')
+        const me = await room.join({ meta: { name: 'Before' } })
+        const rejected = await me.updateMeta({ name: 'malformed-meta-marker' }).then(
+          () => false,
+          (error: unknown) => error instanceof Error,
+        )
+        const [next] = await Promise.all([room.join({ meta: { name: 'After' } }), me.updateMeta({ name: 'Recovered' })])
+        setResult(
+          JSON.stringify({ rejected, meta: me.meta.name, subsequentJoin: room.getParticipant(next.id)?.meta.name }),
+        )
+      })}
+
+      {scenario('subscriber-dropped', 'A dropped subscriber', 'Publish across it', async () => {
+        const roomId = await createRoomId('subscriber-dropped')
+        setResult(JSON.stringify(await onSubscriberDropped(roomId)))
+      })}
+
+      {scenario('over-redis-limit', 'A publish over Redis limit', 'Publish it', async () => {
+        const roomId = await createRoomId('over-redis-limit')
+        setResult(JSON.stringify(await onPublishOverRedisLimit(roomId)))
+      })}
+
+      {scenario('dropped-at-rest', 'A dropped subscriber at rest', 'Reports nothing', async () => {
+        const roomId = await createRoomId('dropped-at-rest')
+        await onBusyLanes(roomId)
+        await fetch('/api/redis/drop-connections', { method: 'POST' })
+        setResult(JSON.stringify(await onLanesAfterDrop(roomId)))
+      })}
+
+      {scenario('rewound', 'A failover across a dropped subscriber', 'Reports what it cannot count', async () => {
+        const roomId = await createRoomId('rewound')
+        await onLanesBeforeRewind(roomId)
+        const { snapshot } = await (await fetch('/api/redis/snapshot')).json()
+        await onLanesPastRewind(roomId)
+        await fetch('/api/redis/restore', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ snapshot }),
+        })
+        await fetch('/api/redis/drop-connections', { method: 'POST' })
+        setResult(JSON.stringify(await onLanesAfterDrop(roomId)))
+      })}
+
+      {scenario('publish-loop', 'A publish loop', 'Other work runs during it', async () => {
+        const roomId = await createRoomId('publish-loop')
+        setResult(JSON.stringify(await onPublishLoop(roomId)))
+      })}
+
+      {scenario('throwing-listener', 'A throwing listener', 'The one beside it still hears', async () => {
+        const roomId = await createRoomId('throwing-listener')
+        setResult(JSON.stringify(await onThrowingListener(roomId)))
+      })}
+
+      {scenario('two-routes', 'A track through two subscriptions', 'Each frame once on each', async () => {
+        setResult(JSON.stringify(await onTwoRoutes(await createRoomId('two-routes'), false)))
+      })}
+
+      {scenario('two-routes-start-over', null, 'Each frame once, after her order starts over', async () => {
+        setResult(JSON.stringify(await onTwoRoutes(await createRoomId('two-routes-start-over'), true)))
+      })}
+
+      {scenario('join-closed', 'Joins on closed rooms', 'Handles that never heard of the close', async () => {
+        setResult(JSON.stringify(await onJoinClosed(await createRoomId('join-closed'))))
+      })}
+
+      {scenario('join-races', 'Join races', 'A closed tab during a slow join', async () => {
+        const roomId = await createRoomId('join-races')
+        const room = await onOpenSlowJoinRoom(roomId)
+        const events: string[] = []
+        room.onJoin((member) => events.push(`join:${member.meta.name}`))
+        room.onLeave((member, cause) => events.push(`leave:${member.meta.name}:${cause.type}`))
+
+        // The test joins `Closer` slowly from another tab and closes the tab during the wait.
+        // On SSE the server holds the closed tab for reconnectTimeout (60 s), so `Closer` may join, then leave.
+        let settledAt: number | null = null
+        await pollUntil(async () => {
+          const joins = await onGetSlowJoins(roomId)
+          if (settledAt === null && joins.done.includes('Closer')) settledAt = performance.now()
+          const serverCount = (await onGetRoom(roomId)).count
+          return {
+            result: {
+              roomId,
+              closerJoining: joins.entered.includes('Closer'),
+              events,
+              count: room.count,
+              serverCount,
+              settled: settledAt !== null,
+            },
+            // A member admitted after its tab closed would show within a second of the guard's end.
+            done: settledAt !== null && performance.now() - settledAt > 1000 && room.count === 0 && serverCount === 0,
+          }
+        }, CLOSED_TAB_POLLS)
+      })}
+
+      {scenario('join-across-reconnect', null, 'Join and publish when the wire reconnects', async () => {
+        const roomId = `join-across-reconnect:${crypto.randomUUID()}`
+        const room = await onRoomForDeferredJoin(roomId)
+        const path: string[] = []
+        room.onJoin((member) => path.push(`join:${member.meta.name}`))
+        let received: unknown
+        room.subscribe((value) => {
+          received = value
+        })
+        setResult(JSON.stringify({ roomId }))
+        const me = await room.join({ meta: { name: 'Ada' } })
+        path.push(`answer:${room.getParticipant(me.id)?.meta.name}`)
+        await me.publish(Uint8Array.of(7, 8))
+        await pollUntil(() => ({
+          result: { roomId, path, bytes: received instanceof Uint8Array ? [...received] : null },
+          done: received !== undefined,
+        }))
+      })}
+
+      {scenario('join-slowly', null, 'Join the room named in the URL, slowly', async () => {
+        const roomId = searchParam('roomId')
+        const room = await onGetSlowJoinRoom(roomId)
+        keepReachable(room)
+        await room.join({ meta: { name: 'Closer', slow: true } })
+      })}
+
+      {scenario(
+        'close-handles',
+        'Close ends every handle',
+        'Leave and kick into onEmpty, then Room.close()',
+        async () => {
+          const outcome = (done: Promise<unknown>) =>
+            done.then(
+              () => 'resolved',
+              (err: Error) => err.name,
+            )
+
+          // The last member's leave() empties the room, and onEmpty closes it.
+          const [leftId, left] = await createRoom('close-left')
+          await onCloseWhenEmpty(leftId)
+          const leaver = await left.join({ meta: { name: 'Leaver' } })
+          const leave = await outcome(leaver.leave())
+
+          // The last member's kick empties the room, and onEmpty closes it.
+          const [kickedId, kicked] = await createRoom('close-kicked')
+          await onCloseWhenEmpty(kickedId)
+          const kickedMember = await kicked.join({ meta: { name: 'Kicked' } })
+          const kick = await outcome(onKick(kickedId, kickedMember.id))
+
+          // Room.close() with a member in: what its leave callback sees, an unsubscribe in onClose, an onClose added after.
+          const [closedId, closed] = await createRoom('close-closed')
+          const member = await closed.join({ meta: { name: 'Member' } })
+          let atLeave: { cause: string; isClosed: boolean; count: number } | null = null
+          member.onLeave((cause) => (atLeave = { cause: cause.type, isClosed: closed.isClosed, count: closed.count }))
+          const unsubscribe = closed.subscribe(() => {})
+          let unsubscribeInOnClose: string | null = null
+          let closeCause: unknown = null
+          closed.onClose((cause) => {
+            closeCause = cause
+            try {
+              unsubscribe()
+              unsubscribeInOnClose = 'returned'
+            } catch (err) {
+              unsubscribeInOnClose = nameOf(err)
+            }
+          })
+          const close = await outcome(onCloseRoom(closedId))
+          await pollUntil(() => ({ done: closed.isClosed }))
+          let lateOnClose: unknown = null
+          closed.onClose((cause) => (lateOnClose = cause))
+
+          await pollUntil(() => ({
+            result: {
+              leave,
+              kick,
+              close,
+              atLeave,
+              unsubscribeInOnClose,
+              closeCause,
+              lateOnClose,
+              isClosed: [left.isClosed, kicked.isClosed],
+            },
+            done:
+              atLeave !== null &&
+              unsubscribeInOnClose !== null &&
+              lateOnClose !== null &&
+              left.isClosed &&
+              kicked.isClosed,
+          }))
+        },
+      )}
+
+      {scenario('self-close', 'Rooms that close by themselves', 'Short timeouts', async () => {
+        const base = `e2e-self-close:${crypto.randomUUID()}`
+        selfCloseBase = base
+        const ids = {
+          empty: `${base}:empty`,
+          departed: `${base}:departed`,
+          held: `${base}:held`,
+          never: `${base}:never`,
+        }
+        await onCreateRoomWith(ids.empty, { emptyTimeout: 1000 })
+        await onCreateRoomWith(ids.departed, { emptyTimeout: 60_000, departureTimeout: 1000 })
+        await onCreateRoomWith(ids.never, { emptyTimeout: Infinity, departureTimeout: Infinity })
+        await onJoinAndLeaveAsServer(ids.departed)
+        const isOpen = async () => ({
+          empty: await onIsOpen(ids.empty),
+          departed: await onIsOpen(ids.departed),
+          held: await onIsOpen(ids.held),
+          never: await onIsOpen(ids.never),
+        })
+
+        // The test creates `held` from another tab, which keeps the view it was returned.
+        // Once the two closed, the held one and the one that never closes have outlived their 1 s by 1.5 s more.
+        let closedAt: number | null = null
+        await pollUntil(async () => {
+          const open = await isOpen()
+          if (closedAt === null && open.held && !open.empty && !open.departed) closedAt = performance.now()
+          const outlived = closedAt !== null && performance.now() - closedAt > 1500
+          return { result: { base, open, outlived }, done: outlived }
+        })
+      })}
+
+      {scenario('hold-room', null, 'Create the room named in the URL and keep its view', async () => {
+        const roomId = searchParam('roomId')
+        keepReachable(await onCreateRoomHeld(roomId))
+        setResult(JSON.stringify('holding'))
+      })}
+
+      {scenario('self-close-released', null, 'After the holding tab closed', async () => {
+        const held = `${selfCloseBase}:held`
+        // On SSE the server holds the closed tab for reconnectTimeout (60 s).
+        await pollUntil(async () => {
+          const heldOpen = await onIsOpen(held)
+          return { result: { heldOpen }, done: !heldOpen }
+        }, CLOSED_TAB_POLLS)
+      })}
+
+      {scenario('list-races', 'Room.list(), close and recreate', 'List while closing, recreate', async () => {
+        const base = `e2e-list:${crypto.randomUUID()}`
+        for (const suffix of ['b', 'é', 'B', 'a', 'Z']) await onCreateRoom(`${base}:${suffix}`)
+        const order = (await onListAsListed(base)).map((id) => id.slice(base.length + 1))
+        const whileClosing = await onListWhileClosing(`${base}:c`)
+        const recreatedId = `${base}:again`
+        const recreated = await onRecreate(recreatedId)
+        await pollUntil(async () => {
+          const recreatedOpen = await onIsOpen(recreatedId)
+          return { result: { order, whileClosing, recreated, recreatedOpen }, done: !recreatedOpen }
+        })
+      })}
+
+      {scenario('ack-dm', 'Acknowledged DMs', 'DMs that wait for their reply', async () => {
+        const [roomId, room] = await createRoom('ack-dm')
+        const me = await room.join({ meta: { name: 'Asker' } })
+        const peer = await room.join({ meta: { name: 'Peer' } })
+        peer.listen((data) => ({ echo: data }))
+        const threaded = await room.join({ meta: { name: 'Threaded' } })
+        threaded.listen(threadedReply)
+        const serverMember = await onJoinAnswering(roomId)
+        const held = await onJoinAsServer(roomId, 'Held')
+        held.listen((value) => (value instanceof Uint8Array ? value : 'pong'))
+        const heldThreaded = await onJoinAsServer(roomId, 'Held threaded')
+        heldThreaded.listen(threadedReply)
+        const observed = await room.join({ meta: { name: 'Observed' } })
+        observed.listen(() => {})
+        observed.listen(() => 'ok')
+        observed.listen(() => {})
+        const competing = await room.join({ meta: { name: 'Competing' } })
+        competing.listen(() => 'one')
+        competing.listen(() => 'two')
+        const unhandled: string[] = []
+        const recordUnhandled = (event: PromiseRejectionEvent) => unhandled.push(String(event.reason))
+        window.addEventListener('unhandledrejection', recordUnhandled)
+        try {
+          const reply = await me.send(held.id, Uint8Array.of(11, 22), { ack: true })
+          setResult(
+            JSON.stringify({
+              fromHeldBytes: reply instanceof Uint8Array ? [...reply] : null,
+              fromPage: await replyOf(me.send(peer.id, 'hi', { ack: true })),
+              fromPageUnsendable: await replyOf(me.send(threaded.id, 'where?', { ack: true })),
+              fromServer: await replyOf(me.send(serverMember, 'hi', { ack: true })),
+              fromHeld: await replyOf(me.send(held.id, 'ping', { ack: true })),
+              fromHeldUnsendable: await replyOf(me.send(heldThreaded.id, 'where?', { ack: true })),
+              fromObserved: await replyOf(me.send(observed.id, 'move', { ack: true })),
+              fromCompeting: await replyOf(me.send(competing.id, 'move', { ack: true })),
+              refused: await replyOf(me.send(serverMember, 'refuse', { ack: true })),
+              unhandled,
+            }),
+          )
+        } finally {
+          window.removeEventListener('unhandledrejection', recordUnhandled)
+        }
+      })}
+
+      {scenario('ack-dm-close', null, 'Ask a member who saves their reply', async () => {
+        const [roomId, room] = await createRoom('ack-dm-close')
+        const me = await room.join({ meta: { name: 'Asker' } })
+        const leaving = await onJoinAsServer(roomId, 'Leaving')
+        leaving.listen(async () => {
+          setResult(JSON.stringify({ roomId, saving: true }))
+          await onSaveReply(roomId)
+          return 'bye'
+        })
+        const answer = replyOf(me.send(leaving.id, 'thanks', { ack: true }))
+        const { promise: closeClicked, resolve } = Promise.withResolvers<void>()
+        closeChat = resolve
+        await closeClicked
+        const closing = close(leaving)
+        setResult(JSON.stringify({ roomId, closing: true }))
+        await closing
+        setResult(JSON.stringify({ answer: await answer, closed: true }))
+      })}
+      <button id="test-room-ack-dm-close-chat" onClick={() => closeChat?.()}>
+        Close the chat
+      </button>
+
+      {scenario('ack-dm-close-view', null, 'Ask a member a page joined, who saves their reply', async () => {
+        const [roomId, room] = await createRoom('ack-dm-close-view')
+        const me = await room.join({ meta: { name: 'Asker' } })
+        const chat = await onGetRoom(roomId)
+        const leaving = await chat.join({ meta: { name: 'Leaving' } })
+        leaving.listen(async () => {
+          setResult(JSON.stringify({ roomId, saving: true }))
+          await onSaveReply(roomId)
+          return 'bye'
+        })
+        const answer = replyOf(me.send(leaving.id, 'thanks', { ack: true }))
+        const { promise: closeClicked, resolve } = Promise.withResolvers<void>()
+        closeViewChat = resolve
+        await closeClicked
+        const closing = close(chat)
+        setResult(JSON.stringify({ roomId, closing: true }))
+        await closing
+        setResult(JSON.stringify({ answer: await answer, closed: true }))
+      })}
+      <button id="test-room-ack-dm-close-view-chat" onClick={() => closeViewChat?.()}>
+        Close the chat
+      </button>
+
+      {scenario('ack-dm-hang-up', null, 'Ask a member who saves their reply, then hang up', async () => {
+        const [roomId, room] = await createRoom('ack-dm-hang-up')
+        const me = await room.join({ meta: { name: 'Asker' } })
+        const hangingUp = await onJoinAsServer(roomId, 'Hanging up')
+        const { promise: saved, resolve: onSaved } = Promise.withResolvers<void>()
+        hangingUp.listen(async () => {
+          setResult(JSON.stringify({ roomId, saving: true }))
+          await onSaveReply(roomId)
+          onSaved()
+          return 'bye'
+        })
+        const unhandled: string[] = []
+        const recordUnhandled = (event: PromiseRejectionEvent) => unhandled.push(String(event.reason))
+        window.addEventListener('unhandledrejection', recordUnhandled)
+        try {
+          const answer = replyOf(me.send(hangingUp.id, 'thanks', { ack: true }))
+          const { promise: hangUpClicked, resolve } = Promise.withResolvers<void>()
+          hangUp = resolve
+          await hangUpClicked
+          abort(hangingUp)
+          const fromHangingUp = await answer
+          setResult(JSON.stringify({ roomId, fromHangingUp }))
+          await saved
+          // The reply's rejection, if any, is reported by the next task.
+          await new Promise((next) => setTimeout(next))
+          setResult(JSON.stringify({ fromHangingUp, unhandled }))
+        } finally {
+          window.removeEventListener('unhandledrejection', recordUnhandled)
+        }
+      })}
+      <button id="test-room-ack-dm-hang-up-now" onClick={() => hangUp?.()}>
+        Hang up
+      </button>
+
+      {scenario('ack-timeout', null, 'An acknowledged DM nobody answers', async () => {
+        const [, room] = await createRoom('ack-timeout')
+        const me = await room.join({ meta: { name: 'Asker' } })
+        const silent = await room.join({ meta: { name: 'Silent' } })
+        silent.listen(() => new Promise(() => {}))
+        const start = performance.now()
+        const error = await me.send(silent.id, 'hello?', { ack: true }).then(
+          () => null,
+          () => 'rejected',
+        )
+        setResult(JSON.stringify({ error, seconds: Math.round((performance.now() - start) / 1000) }))
+      })}
+
+      {scenario(
+        'roster-churn',
+        'Roster under churn',
+        'Open a big room while members come, go and write meta',
+        async () => {
+          const roomId = await createRoomId('roster-churn')
+          await onSeedAndChurn(roomId)
+          const room = await onGetRoom(roomId)
+          let emptied = false
+          room.onEmpty(() => (emptied = true))
+          const listed = room.getParticipants().length
+          const me = await room.join({ meta: { name: 'Page' } })
+          const serverCount = await onStopChurn(roomId)
+          await pollUntil(() => ({
+            result: { listed, serverCount, count: room.count, emptied, joined: me.id !== '' },
+            done: room.count === serverCount,
+          }))
+        },
+      )}
+
+      {scenario('dm-overflow', 'DM hold overflow', 'Three acknowledged DMs before listen()', async () => {
+        const [, room] = await createRoom('dm-overflow')
+        const late = await room.join({ meta: { name: 'Late' } })
+        const sender = await room.join({ meta: { name: 'Sender' } })
+        // Three 900,000-byte DMs: two fit the 2 MiB a participant holds, three don't.
+        const sends = ['1', '2', '3'].map((n) =>
+          sender.send(late.id, n.padEnd(900_000, '.'), { ack: true }).then(
+            () => 'answered',
+            () => 'rejected',
+          ),
+        )
+        // The third's arrival drops the oldest, whose acknowledged send rejects.
+        const first = await Promise.race([
+          present(sends[0], 'the first send'),
+          new Promise((resolve) => setTimeout(() => resolve('held'), 5000)),
+        ])
+        const got: string[] = []
+        late.listen((data) => {
+          got.push(present(textOf(data)[0], 'its first character'))
+        })
+        setResult(JSON.stringify({ first, outcomes: await Promise.all(sends), got }))
+      })}
+
+      {scenario('hold', null, 'Publishes held past 2 MiB together', async () => {
+        const roomId = await createRoomId('hold')
+        const serverOutcomes = await onPublishWhileEstablishing(roomId, 3, 1_500_000)
+        await pollUntil(async () => {
+          const seen = await onGetWatched(roomId)
+          return { result: { serverOutcomes, seen }, done: seen.length >= 3 }
+        })
+      })}
+
+      {scenario('member', 'Returnable member view', 'Return room + member view', async () => {
+        const [roomId, lobby] = await createRoom('member')
+        const me = await lobby.join({ meta: { name: 'Viewed' } })
+
+        const out = await onGetRoomWithMember(roomId, me.id)
+        const viaRoom = out.room.getParticipant(me.id)
+        const state = {
+          hasMember: out.member !== null,
+          memberName: out.member?.meta.name ?? null,
+          sameObject: out.member !== null && viaRoom === out.member,
+          listedOnServer: await onListParticipantNames(roomId),
+        }
+        setResult(JSON.stringify(state))
+      })}
+
+      {scenario('server-only', null, "A page's server-only options", async () => {
+        const [, room] = await createRoom('server-only')
+        const refusal = (promise: Promise<unknown>) =>
+          promise.then(
+            () => null,
+            (error: Error) => error.message,
+          )
+        setResult(
+          JSON.stringify({
+            identity: await refusal(room.join({ identity: 'admin' })),
+            hidden: await refusal(room.join({ hidden: true })),
+            listHidden: await refusal(Promise.resolve().then(() => room.getParticipants({ hidden: true }))),
+          }),
+        )
+      })}
+
+      {scenario('snapshot-grid', 'Snapshot participants', 'A grid of three, one of them changes', async () => {
+        const [roomId, room] = await createRoom('snapshot-grid')
+        const [a, b, c] = await Promise.all([
+          room.join({ meta: { name: 'A' } }),
+          room.join({ meta: { name: 'B' } }),
+          room.join({ meta: { name: 'C' } }),
+        ])
+        const tile = <P extends { id: string }>(participants: readonly P[], id: string) =>
+          present(
+            participants.find((p) => p.id === id),
+            `participant ${id}`,
+          )
+        const before = room.snapshot().participants
+        await b.updateMeta({ status: 'away' })
+        const after = room.snapshot().participants
+        const fromA: unknown[] = []
+        const everyone: unknown[] = []
+        tile(after, a.id).subscribe((data) => fromA.push(data))
+        room.subscribe((data) => everyone.push(data))
+        await a.publish('from A')
+        await c.publish('from C')
+        const handed = await onGetRoomWithSnapshotMember(roomId, c.id)
+        const live = handed.room.getParticipant(c.id)
+        await pollUntil(() => ({
+          result: {
+            kept: [a, c].map(({ id }) => tile(after, id) === tile(before, id)),
+            replaced: tile(after, b.id) !== tile(before, b.id),
+            status: [before, after].map((participants) => tile(participants, b.id).meta.status ?? null),
+            fromA,
+            revived: { sameObject: handed.member !== null && handed.member === live, name: handed.member?.meta.name },
+          },
+          done: everyone.includes('from C') && fromA.length > 0,
+        }))
+      })}
+
+      {scenario('complete-room', 'A room with its participants', 'Get a room two members are in', async () => {
+        const roomId = await createRoomId('complete-room')
+        const [a, b] = await Promise.all([onJoinAsServer(roomId, 'A'), onJoinAsServer(roomId, 'B')])
+        const room = await onGetRoom(roomId)
+        const names = (participants: readonly { meta: { name?: unknown } }[]) =>
+          participants.map((participant) => participant.meta.name).sort()
+        const arrived = {
+          listed: names(room.getParticipants()),
+          shown: names(room.snapshot().participants),
+          count: room.count,
+          one: room.getParticipant(a.id)?.meta.name ?? null,
+        }
+        const joins: unknown[] = []
+        room.onJoin((member) => joins.push(member.meta.name))
+        const c = await onJoinAsServer(roomId, 'C')
+        await pollUntil(() => ({ result: { arrived, joins }, done: joins.length > 0 }))
+        await Promise.all([a, b, c].map((member) => member.leave()))
+      })}
+
+      {scenario(
+        'admin',
+        'Admin (system publish and send, kick & close)',
+        'System publish and send, kick, close',
+        async () => {
+          const [roomId, lobby] = await createRoom('admin')
+          const me = await lobby.join({ meta: { name: 'Eve' } })
+
+          const published: Array<{ data: unknown; fromRoom: boolean }> = []
+          lobby.subscribe((data, { from }) => published.push({ data, fromRoom: from === null }))
+          const system: Array<{ data: unknown; fromRoom: boolean }> = []
+          me.listen((data, { from }) => system.push({ data, fromRoom: from === null }))
+          await me.updateMeta({ ready: true }) // same-channel ack orders the declarations before the HTTP-triggered broadcasts
+
+          let kicked = false
+          let kickCause: unknown = null
+          let closed = false
+          me.onLeave((cause) => {
+            kicked = true
+            kickCause = cause
+          })
+          lobby.onClose(() => (closed = true))
+
+          await onSystemPublish(roomId, 'maintenance')
+          const receipt = await onSystemSend(roomId, me.id, 'welcome')
+          await pollUntil(() => ({
+            result: { published, system },
+            done: published.length >= 1 && system.length >= 1,
+          }))
+
+          await onKick(roomId, me.id)
+          await onCloseRoom(roomId)
+          await pollUntil(() => {
+            const state = {
+              published,
+              system,
+              receipt,
+              kicked,
+              kickCause,
+              closed,
+              isClosed: lobby.isClosed,
+              count: lobby.count,
+            }
+            return { result: state, done: kicked && closed && lobby.isClosed }
+          })
+        },
+      )}
+
+      {scenario('send-identity', null, 'Send to every tab of a user', async () => {
+        const roomId = await createRoomId('send-identity')
+        const { promise: sending, resolve } = Promise.withResolvers<void>()
+        sendToMulti = resolve
+        setResult(JSON.stringify({ roomId }))
+        await sending
+        const receipts = await onSystemSendToUser(roomId, 'user:Multi', 'hello')
+        await onSystemSendToUser(roomId, 'user:Multi', 'bye')
+        const toNoTab = await onSystemSendToUser(roomId, 'user:Nobody', 'hello')
+        setResult(JSON.stringify({ receipts, toNoTab }))
+      })}
+      <button id="test-room-send-identity-send" onClick={() => sendToMulti?.()}>
+        Send to Multi
+      </button>
+      {scenario('send-identity-held', null, 'Hold Multi and hear what it is sent', async () => {
+        const roomId = new URLSearchParams(location.search).get('roomId') ?? ''
+        const me = await onJoinAsServer(roomId, 'Multi')
+        keepReachable(me)
+        const received: Array<{ data: unknown; fromServer: boolean }> = []
+        me.listen((data, { from }) => {
+          received.push({ data, fromServer: from === null })
+          setResult(JSON.stringify(received))
+        })
+        setResult(JSON.stringify(received))
+      })}
+
+      {scenario('attributes', 'updateMeta (partial merge)', 'Merge & delete attributes', async () => {
+        const [roomId, lobby] = await createRoom('attr')
+        const me = await lobby.join({ meta: { name: 'Zoe', score: 1 } })
+        const remote = await getParticipantWhenJoined(lobby, me.id)
+
+        await me.updateMeta({ score: 2 }) // merge: name is untouched
+        await me.updateMeta({ title: 'lead' }) // add a key
+        await me.updateMeta({ score: undefined }) // a key set to undefined is removed
+
+        await pollUntil(() => {
+          const meta = remote?.meta ?? {}
+          const localMeta = me.meta
+          return {
+            result: {
+              name: meta.name ?? null,
+              title: meta.title ?? null,
+              hasScore: 'score' in meta,
+              localName: localMeta.name ?? null,
+              localHasScore: 'score' in localMeta,
+            },
+            done: meta.name === 'Zoe' && meta.title === 'lead' && !('score' in meta),
+          }
+        })
+      })}
+
+      {scenario('demand', 'me.demand (who watches)', 'Track demand up & down', async () => {
+        const [roomId, pubRoom] = await createRoom('demand')
+        // A GC pass would close `pubRoom`, and Pub leaving with it ends the demand this waits on.
+        const releasePubRoom = keepReachable(pubRoom)
+        const pub = await pubRoom.join({ meta: { name: 'Pub' } })
+        const demand = demandLog(pub)
+        const camera = () => demand.filter(([track]) => track === 'camera').map(([, watched]) => watched)
+        await pub.publishBinary(new Uint8Array(8).fill(1), { track: 'camera', meta: { key: true } })
+
+        const viewer = await onGetRoom(roomId)
+        const unsub = viewer.subscribeBinary(() => {}, { track: 'camera' })
+        await pollUntil(() => ({ result: { cam: camera() }, done: camera().includes(true) }))
+        unsub()
+        await pollUntil(() => ({ result: { cam: camera() }, done: camera().at(-1) === false }))
+        releasePubRoom()
+      })}
+
+      {scenario('watchers', null, "Watch a server participant's track", async () => {
+        const releases: Array<() => void> = []
+        const kept = <T extends object>(handle: T) => {
+          releases.push(keepReachable(handle))
+          return handle
+        }
+        /** A room with `Pub` on the server and its `cam` watched as `watch` sets up: each `demand` Pub read, until it
+         *  reads `expected`. */
+        const readsOf = async (
+          label: string,
+          expected: NamedDemand[],
+          watch: (roomId: string, pubId: string) => Promise<unknown>,
+        ) => {
+          const roomId = await createRoomId(`watchers-${label}`)
+          await watch(roomId, await onPublishOnServer(roomId))
+          let reads: NamedDemand[][] = []
+          await pollUntil(async () => {
+            reads = await onServerPublisherReads(roomId)
+            return { done: readsAt(reads, expected) }
+          })
+          return reads
+        }
+        // The docs' page: `me` joined through one view, the publisher watched through another.
+        const docsPage = await readsOf('docs-page', [cam(['Me'], 1)], async (roomId, pubId) => {
+          kept(await kept(await onGetRoom(roomId)).join({ meta: { name: 'Me' } }))
+          const view = kept(await onGetRoom(roomId))
+          ;(await getParticipantWhenJoined(view, pubId)).subscribeBinary(() => {}, { track: 'cam' })
+        })
+        const twoOnOnePage = await readsOf('two', [cam(['Ann', 'Bob'], 2)], async (roomId) => {
+          const view = kept(await onGetRoom(roomId))
+          kept(await view.join({ meta: { name: 'Ann' } }))
+          kept(await view.join({ meta: { name: 'Bob' } }))
+          view.subscribeBinary(() => {}, { track: 'cam' })
+        })
+        const nameless = await readsOf('nameless', [cam([], 1)], async (roomId) => {
+          kept(await onGetRoom(roomId)).subscribeBinary(() => {}, { track: 'cam' })
+        })
+        const hidden = await readsOf('hidden', [cam([], 1)], async (roomId) => {
+          kept(await onJoinHiddenHeld(roomId))
+          kept(await onGetRoom(roomId)).subscribeBinary(() => {}, { track: 'cam' })
+        })
+        const oneTask = await readsOf(
+          'one-task',
+          [cam([], 1), { track: 'mic', watchers: [], watcherCount: 1 }],
+          (roomId) => onWatchAsServer(roomId, [], ['cam', 'mic']),
+        )
+        setResult(JSON.stringify({ docsPage, twoOnOnePage, nameless, hidden, oneTask }))
+        releases.forEach((release) => release())
+      })}
+
+      {scenario('watchers-on-page', null, 'Watch a track of this page', async () => {
+        const [roomId, view] = await createRoom('watchers-on-page')
+        const releaseView = keepReachable(view)
+        const pub = await view.join({ meta: { name: 'Pub' } })
+        const reads: NamedDemand[][] = []
+        pub.onChange(() => reads.push(demandNames(pub)))
+        await onWatchAsServer(roomId, ['Sam', 'Tia'], ['cam'])
+        await pollUntil(() => ({ result: { reads }, done: readsAt(reads, [cam(['Sam', 'Tia'], 2)]) }))
+        await onWatchAsServer(roomId, [], ['cam'])
+        await pollUntil(() => ({ result: { reads }, done: readsAt(reads, [cam(['Sam', 'Tia'], 3)]) }))
+        const shown = pub.demand
+        await pub.setMeta({ name: 'Pub', mood: 'on air' })
+        await pollUntil(() => ({ done: pub.meta.mood === 'on air' }))
+        const sameList = pub.demand === shown
+        await onWatchAsServer(roomId, [], ['mic'])
+        await pollUntil(() => ({ done: pub.demand.length === 2 }))
+        setResult(JSON.stringify({ reads, sameList, sameEntry: pub.demand[0] === shown[0], tracks: demandNames(pub) }))
+        releaseView()
+      })}
+
+      {scenario('watchers-alone', null, 'Watch a track of a me returned alone', async () => {
+        const roomId = `e2e-watchers-alone:${crypto.randomUUID()}`
+        // Created through a telefunction that returns no room, so the page holds none: `me` alone.
+        await onCreateRoomWith(roomId, {})
+        const me = await onJoinAsServer(roomId, 'Pub')
+        const releaseMe = keepReachable(me)
+        const reads: NamedDemand[][] = []
+        me.onChange(() => reads.push(demandNames(me)))
+        await me.publishBinary(new Uint8Array([1]), { track: 'cam' })
+        await onWatchAsServer(roomId, ['Sam'], ['cam'])
+        await pollUntil(() => ({ result: { reads }, done: readsAt(reads, [cam(['Sam'], 1)]) }))
+        await onRenameWatcher(roomId, 'Sam', 'Samuel')
+        await pollUntil(() => ({ result: { reads }, done: readsAt(reads, [cam(['Samuel'], 1)]) }))
+        await onWatcherLeaves(roomId, 'Sam')
+        await pollUntil(() => ({ result: { reads }, done: readsAt(reads, [cam([], 1)]) }))
+        releaseMe()
+      })}
+
+      {scenario('watchers-union', null, 'Count who receives a group of tracks', async () => {
+        /** A page's `me` whose tracks `a` and `b` `watch` has received, once both are told. */
+        const publisher = async (label: string, watch: (roomId: string) => Promise<void>) => {
+          const [roomId, view] = await createRoom(label)
+          const releaseView = keepReachable(view)
+          const pub = await view.join({ meta: { name: 'Pub' } })
+          await watch(roomId)
+          await pollUntil(() => ({ done: pub.demand.length === 2 }))
+          return { roomId, pub, releaseView }
+        }
+        const one = await publisher('watchers-union-one', (roomId) => onWatchAsServer(roomId, [], ['a', 'b']))
+        const onePageOnBoth = watchersOf(one.pub, ['a', 'b']).watcherCount
+        const two = await publisher('watchers-union-two', async (roomId) => {
+          await onWatchAsServer(roomId, [], ['a'])
+          await onWatchAsServer(roomId, [], ['b'])
+        })
+        const twoPagesOnOneEach = watchersOf(two.pub, ['a', 'b']).watcherCount
+        await onWatchAsServer(two.roomId, ['Sam'], ['a'])
+        await pollUntil(() => ({ done: watchersOf(two.pub, ['a', 'b']).watchers.length === 1 }))
+        const { watchers, watcherCount } = watchersOf(two.pub, ['a', 'b'])
+        const third = { watchers: watchers.map((watcher) => watcher.meta.name), watcherCount }
+        setResult(JSON.stringify({ onePageOnBoth, twoPagesOnOneEach, third }))
+        one.releaseView()
+        two.releaseView()
+      })}
+
+      {scenario('watchers-left', null, 'Count who receives the tracks of a participant that left', async () => {
+        /** What a page's `me` whose tracks `a` and `b` a server-side room receives shows once `end` ended it. */
+        const after = async (label: string, end: (roomId: string, pub: LocalParticipant) => Promise<void>) => {
+          const [roomId, view] = await createRoom(label)
+          const releaseView = keepReachable(view)
+          const pub = await view.join({ meta: { name: 'Pub' } })
+          await onWatchAsServer(roomId, [], ['a', 'b'])
+          await pollUntil(() => ({ done: watchersOf(pub, ['a', 'b']).watcherCount === 1 }))
+          let left = false
+          pub.onLeave(() => (left = true))
+          await end(roomId, pub)
+          await pollUntil(() => ({ done: left }))
+          const { watchers, watcherCount } = watchersOf(pub, ['a', 'b'])
+          releaseView()
+          return { watchers: watchers.length, watcherCount, demand: pub.demand.length }
+        }
+        const left = await after('watchers-left', (_roomId, pub) => pub.leave())
+        const removed = await after('watchers-removed', (roomId, pub) => onKick(roomId, pub.id))
+        setResult(JSON.stringify({ left, removed }))
+      })}
+
+      {scenario('watchers-upgrade', null, 'Watch while the connection upgrades', async () => {
+        const roomId = await createRoomId('watchers-upgrade')
+        const pubId = await onPublishOnServer(roomId)
+        const room = await onGetRoom(roomId)
+        const releaseRoom = keepReachable(room)
+        const releaseMe = keepReachable(await room.join({ meta: { name: 'Me' } }))
+        const view = await onGetRoom(roomId)
+        const releaseView = keepReachable(view)
+        ;(await getParticipantWhenJoined(view, pubId)).subscribeBinary(() => {}, { track: 'cam' })
+        let readsBefore = 0
+        await pollUntil(async () => {
+          const reads = await onServerPublisherReads(roomId)
+          readsBefore = reads.length
+          return { done: readsAt(reads, [cam(['Me'], 1)]) }
+        })
+        const { promise: checked, resolve } = Promise.withResolvers<void>()
+        checkUpgradedWatch = resolve
+        setResult(JSON.stringify({ watching: true }))
+        await checked
+        // From the last read before the upgrade on.
+        setResult(JSON.stringify({ reads: (await onServerPublisherReads(roomId)).slice(readsBefore - 1) }))
+        releaseRoom()
+        releaseMe()
+        releaseView()
+      })}
+      <button id="test-room-watchers-upgrade-check" onClick={() => checkUpgradedWatch?.()}>
+        Check the watch
+      </button>
+
+      {scenario('change-once', null, "A task's changes", async () => {
+        const tag: { set?: (memberId: string, tag: string) => void } = {}
+        defineParticipantField<string>('e2eTag', {
+          initial: '',
+          attach: ({ set }) => {
+            tag.set = set
+            return () => {}
+          },
+        })
+        const [roomId, room] = await createRoom('change-once')
+        const releaseRoom = keepReachable(room)
+        const ann = await room.join({ meta: { name: 'Ann' } })
+        const bob = await room.join({ meta: { name: 'Bob' } })
+        // As `useSyncExternalStore()` takes it, unbound: of a `me` the page joined, and of one a server returned alone.
+        const alone = await onJoinHiddenHeld(roomId)
+        for (const subscribe of [ann.onChange, alone.onChange]) subscribe(() => {})()
+        let changes = 0
+        room.onChange(() => changes++)
+        const before = room.snapshot()
+        const setTag = present(tag.set, "the field's set")
+        setTag(ann.id, 'a')
+        setTag(bob.id, 'b')
+        setTag(ann.id, 'c')
+        // After the microtask the first change queued, and before anything else can arrive.
+        await Promise.resolve()
+        setResult(JSON.stringify({ changes, changed: room.snapshot() !== before }))
+        releaseRoom()
+      })}
+
+      {scenario('member-keeps-room', 'A member keeps its room', 'Join, then let go of the room', async () => {
+        const roomId = await createRoomId('member-keeps-room')
+        // The page keeps only `me`, not the room it joined through.
+        const me = await (await onGetRoom(roomId)).join({ meta: { name: 'Kept' } })
+        let left: string | null = null
+        me.onLeave((cause) => (left = cause.type))
+        const { promise: checked, resolve } = Promise.withResolvers<void>()
+        checkKeptMember = resolve
+        setResult(JSON.stringify({ roomId }))
+        await checked
+        const watcher = await onGetRoom(roomId)
+        const releaseWatcher = keepReachable(watcher)
+        const received: unknown[] = []
+        watcher.subscribe((data) => received.push(data))
+        const published = await me.publish('after-gc', { retain: true }).then(
+          () => 'ok',
+          (error: Error) => error.message,
+        )
+        await pollUntil(() => ({
+          result: { published, received, left },
+          done: received.length > 0 || published !== 'ok',
+        }))
+        releaseWatcher()
+      })}
+      <button id="test-room-member-keeps-room-check" onClick={() => checkKeptMember?.()}>
+        Check the member
+      </button>
+
+      {scenario(
+        'members-let-go',
+        null,
+        'Let go of a member, of one that left, and of one in a closed room',
+        async () => {
+          // Closing 500 ms after their member left and nothing holds them. A short `emptyTimeout` too would close them
+          // before the first join on a slow backend.
+          const dropped = `e2e-let-go-dropped:${crypto.randomUUID()}`
+          const left = `e2e-let-go-left:${crypto.randomUUID()}`
+          const timeouts = { departureTimeout: 500 }
+          await Promise.all([onCreateRoomWith(dropped, timeouts), onCreateRoomWith(left, timeouts)])
+          const closed = await createRoomId('let-go-closed')
+          const guarded = await createRoomId('let-go-guarded')
+          const unhandled: unknown[] = []
+          const onUnhandled = (event: PromiseRejectionEvent) => unhandled.push(event.reason)
+          window.addEventListener('unhandledrejection', onUnhandled)
+          const droppedLeaves: string[] = []
+          await joinAndLetGo(dropped, droppedLeaves)
+          // The page keeps only a member that left.
+          const leaver = await (await onGetRoom(left)).join({ meta: { name: 'Leaver' } })
+          await leaver.leave()
+          const stays = await (await onGetRoom(closed)).join({ meta: { name: 'Stays' } })
+          const closedLeaves: string[] = []
+          stays.onLeave((cause) => closedLeaves.push(cause.type))
+          await onCloseRoom(closed)
+          const rejected = await (await onOpenGuardedRoom(guarded)).join({ meta: { name: 'Banned' } }).then(
+            () => 'joined',
+            (error: Error) => error.message,
+          )
+          const { promise: checked, resolve } = Promise.withResolvers<void>()
+          checkLetGo = resolve
+          setResult(JSON.stringify({ ready: true }))
+          await checked
+          await pollUntil(async () => {
+            const result = {
+              droppedLeaves,
+              droppedOpen: await onIsOpen(dropped),
+              leftOpen: await onIsOpen(left),
+              leaverPublish: await Promise.resolve()
+                .then(() => leaver.publish('x'))
+                .then(
+                  () => 'ok',
+                  (error: Error) => error.message,
+                ),
+              closedLeaves,
+              rejected,
+              unhandled: unhandled.length,
+            }
+            return { result, done: !result.droppedOpen && !result.leftOpen }
+          })
+          window.removeEventListener('unhandledrejection', onUnhandled)
+        },
+      )}
+      <button id="test-room-members-let-go-check" onClick={() => checkLetGo?.()}>
+        Check the members let go of
+      </button>
+
+      {scenario('tail', 'Tail (single-call history)', 'Tail holds pre-subscribe messages', async () => {
+        const [roomId, owner] = await createRoom('tail')
+        const me = await owner.join({ meta: { name: 'Src' } })
+
+        const tailed = await onGetRoomTail(roomId)
+        const existing = await onGetOrCreateRoomTail(roomId)
+        const plain = await onGetRoom(roomId)
+        await me.publish({ t: 'between' })
+
+        const createdId = `e2e-tail-created:${crypto.randomUUID()}`
+        const created = await onGetOrCreateRoomTail(createdId)
+        const createdSrc = await (await onGetRoom(createdId)).join({ meta: { name: 'Src' } })
+        await createdSrc.publish({ t: 'between' })
+
+        const subscribe = (view: RoomView) => {
+          const texts: string[] = []
+          view.subscribe((data) => texts.push(textAt(data, 't')))
+          return texts
+        }
+        const result = {
+          received: subscribe(tailed),
+          existing: subscribe(existing),
+          created: subscribe(created),
+          plain: subscribe(plain),
+        }
+        await me.updateMeta({ ready: true }) // same-channel ack orders the subscriptions before the live publish
+        await me.publish({ t: 'after' })
+
+        await pollUntil(() => ({
+          result,
+          done:
+            result.received.includes('between') &&
+            result.existing.includes('between') &&
+            result.created.includes('between') &&
+            result.plain.includes('after'),
+        }))
+      })}
+
+      {scenario('hooks', 'After-hooks (persistence receipts)', 'After-join/publish/send receipts', async () => {
+        const roomId = await createRoomId('hooks')
+        const room = await onOpenAuditedRoom(roomId)
+        const a = await room.join({ meta: { name: 'A' } })
+        const b = await room.join({ meta: { name: 'B' } })
+        await a.publish('hello')
+        await a.send(b.id, 'dm')
+
+        await pollUntil(async () => {
+          const auditLog = await onGetAudit(roomId)
+          const joins = auditLog.filter((e) => e.kind === 'join')
+          const joinA = joins.find((e) => e.name === 'A')
+          const publish = auditLog.find((e) => e.kind === 'publish')
+          const send = auditLog.find((e) => e.kind === 'send')
+          return {
+            result: {
+              joins: joins.map((e) => e.name).sort(),
+              joinHasTs: typeof joinA?.joinedAt === 'number',
+              publish: publish ? { name: publish.name, data: publish.data, seqOk: publish.seq > 0 } : null,
+              send: send ? { name: send.name, to: send.to, seqOk: send.seq > 0 } : null,
+            },
+            done: !!joinA && !!publish && !!send,
+          }
+        })
+      })}
+
+      {scenario('member-sub', 'Member-selective receive', 'Follow one member', async () => {
+        const [roomId, room] = await createRoom('membersub')
+        // A GC pass would close `room`, and X leaving with it drops the observer's subscription to X's frames.
+        const releaseRoom = keepReachable(room)
+        const x = await room.join({ meta: { name: 'X' } })
+        const y = await room.join({ meta: { name: 'Y' } })
+
+        const observer = await onGetRoom(roomId)
+        const remoteX = await getParticipantWhenJoined(observer, x.id)
+        const xText: string[] = []
+        const xBin: string[] = []
+        remoteX.subscribe((data, { from }) => xText.push(`${from.meta.name}:${data}`))
+        remoteX.subscribeBinary((data, { from }) => xBin.push(`${from.meta.name}:${data[0]}`), { track: 'main' })
+        // Room-level control: proves Y's traffic really was delivered, so xText's absence means something.
+        const all: string[] = []
+        observer.subscribe((data) => all.push(textOf(data)))
+
+        await x.publish('x1')
+        await y.publish('y1')
+        await x.publishBinary(new Uint8Array([7]))
+        await y.publishBinary(new Uint8Array([8]))
+
+        await pollUntil(() => ({
+          result: { xText, xBin, all: [...all].sort() },
+          done: all.includes('x1') && all.includes('y1') && xBin.includes('X:7'),
+        }))
+        releaseRoom()
+      })}
+
+      {scenario('member-resub', null, 'Follow one member again in one task', async () => {
+        const [roomId, room] = await createRoom('memberresub')
+        // A GC pass would close `room`, and X leaving with it deletes the message it retained.
+        const releaseRoom = keepReachable(room)
+        const x = await room.join({ meta: { name: 'X' } })
+        await x.publish('pinned', { retain: true })
+
+        const observer = await onGetRoom(roomId)
+        const remoteX = await getParticipantWhenJoined(observer, x.id)
+        const first: string[] = []
+        const second: string[] = []
+        const off = remoteX.subscribe((data) => first.push(textOf(data)))
+        await pollUntil(() => ({ done: first.length >= 1 }))
+        // What a React effect over `[remoteX]` does when it runs again.
+        off()
+        remoteX.subscribe((data) => second.push(textOf(data)))
+        const { promise: published, resolve } = Promise.withResolvers<void>()
+        publishToResubscribed = resolve
+        setResult(JSON.stringify({ ready: true }))
+        await published
+        await x.publish('live')
+        await pollUntil(() => ({ result: { first, second }, done: second.includes('live') }))
+        releaseRoom()
+      })}
+      <button id="test-room-member-resub-publish" onClick={() => publishToResubscribed?.()}>
+        Publish to the member's listener
+      </button>
+
+      {scenario('member-sub-order', null, 'Follow one member and publish in one task', async () => {
+        const [roomId, room] = await createRoom('membersuborder')
+        const releaseRoom = keepReachable(room)
+        const x = await room.join({ meta: { name: 'X' } })
+
+        const observer = await onGetRoom(roomId)
+        const remoteX = await getParticipantWhenJoined(observer, x.id)
+        const received: string[] = []
+        remoteX.subscribe((data) => received.push(textOf(data)))
+        await x.publish('live')
+        await x.publish('end')
+        await pollUntil(() => ({ result: { received }, done: received.includes('end') }))
+        releaseRoom()
+      })}
+
+      {scenario(
+        'retain-budget',
+        null,
+        'A late listener whose retained read waits past 1 MiB of live messages',
+        async () => {
+          const [roomId, view] = await createRoom('retainbudget')
+          const releaseRoom = keepReachable(view)
+          await onJoinSpeaker(roomId)
+          const track = { binary: false, track: true }
+          await onSpeakerPublishes(roomId, 'older-retained', { ...track, retain: true })
+          // Delivers the track on the server already, so live messages reach the late view while its replay reads.
+          await onWatchRoomTrack(roomId, 't')
+          await onHoldRetainedReads(roomId)
+          const late = await onGetRoom(roomId)
+          const order: string[] = []
+          late.subscribe((data) => order.push(String(data).replace(/\|.*/s, '')), { track: 't' })
+          await pollUntil(async () => ({ done: (await onHeldRetainedReads(roomId)) >= 1 }))
+          for (let n = 1; n <= 10; n++) await onSpeakerPublishes(roomId, `live-${n}|${'x'.repeat(150_000)}`, track)
+          await pollUntil(() => ({ done: order.length >= 10 }))
+          await onReleaseRetainedReads(roomId)
+          await onSpeakerPublishes(roomId, 'end', track)
+          await pollUntil(() => ({ result: { order }, done: order.includes('end') }))
+          releaseRoom()
+        },
+      )}
+
+      {scenario('meta-read-only', null, "Change each kind of value in a participant's meta as read", async () => {
+        const [roomId, room] = await createRoom('meta-read-only')
+        const releaseRoom = keepReachable(room)
+        const id = await onJoinWithEveryKindOfMeta(roomId)
+        await getParticipantWhenJoined(room, id)
+        const metaOf = (participants: readonly { id: string; meta: object }[]) =>
+          participants.find((participant) => participant.id === id)?.meta
+        const at = (value: unknown, ...path: Array<string | number>): unknown =>
+          path.reduce<unknown>(
+            (v, key) => (typeof v === 'object' && v !== null ? Reflect.get(v, key) : undefined),
+            value,
+          )
+        const changes = [
+          (meta: unknown) => {
+            const tags = at(meta, 'tags')
+            if (tags instanceof Map) tags.set('role', 'changed')
+          },
+          (meta: unknown) => {
+            const seen = at(meta, 'seen')
+            if (seen instanceof Set) seen.add('changed')
+          },
+          (meta: unknown) => {
+            const since = at(meta, 'since')
+            if (since instanceof Date) since.setTime(1)
+          },
+          (meta: unknown) => {
+            const bytes = at(meta, 'bytes')
+            if (bytes instanceof Uint8Array) bytes[0] = 9
+          },
+          (meta: unknown) => {
+            const deep = at(meta, 'nested', 'deep')
+            if (typeof deep === 'object' && deep !== null) Reflect.set(deep, 'n', 9)
+          },
+          (meta: unknown) => {
+            const listed = at(meta, 'nested', 'list', 0)
+            if (typeof listed === 'object' && listed !== null) Reflect.set(listed, 'n', 9)
+          },
+        ]
+        for (const change of changes) {
+          try {
+            change(metaOf(room.snapshot().participants))
+          } catch {}
+        }
+        const read = (meta: unknown) => {
+          const [tags, seen, bytes, since] = [at(meta, 'tags'), at(meta, 'seen'), at(meta, 'bytes'), at(meta, 'since')]
+          return {
+            role: tags instanceof Map ? tags.get('role') : null,
+            seen: seen instanceof Set ? [...seen] : null,
+            since: since instanceof Date ? since.getTime() : null,
+            bytes: bytes instanceof Uint8Array ? [...bytes] : null,
+            deep: at(meta, 'nested', 'deep', 'n'),
+            listed: at(meta, 'nested', 'list', 0, 'n'),
+          }
+        }
+        setResult(
+          JSON.stringify({
+            snapshot: read(metaOf(room.snapshot().participants)),
+            getParticipants: read(metaOf(room.getParticipants())),
+          }),
+        )
+        releaseRoom()
+      })}
+
+      {(['lost', 'burst'] as const).map((form) => (
+        <React.Fragment key={form}>
+          {scenario(`chat-history-${form}`, null, `The guide's chat example, ${form}`, async () => {
+            const roomId = `e2e-chat-history-${form}:${crypto.randomUUID()}`
+            await onJoinChatWriter(roomId)
+            // The check's lost case: a message sent as the page loads, whose save waits until it has loaded.
+            if (form === 'lost') {
+              await onHoldSave('before')
+              await onWriterPublishes(roomId, ['before'])
+            }
+            const rendered: string[] = []
+            const render = (message: { text: string }) => rendered.push(message.text)
+
+            // The guide's `Chat.js`, `render()` above.
+            const { room, me } = await onJoinChat(roomId, { id: 'reader', name: 'Reader' })
+            // The check's burst: 257 messages between `onJoinChat()` returning and `subscribe()`.
+            if (form === 'burst')
+              await onWriterPublishes(
+                roomId,
+                Array.from({ length: 257 }, (_, n) => `burst-${n + 1}`),
+              )
+            const shown = new Set<string>()
+            const show = (message: { id: string; text: string }) => {
+              if (shown.has(message.id)) return // the history and the room can both bring it
+              shown.add(message.id)
+              render(message)
+            }
+            let arrived: Array<{ id: string; text: string }> | null = [] // what the room brings before the history is shown
+            room.subscribe((message) => (arrived ? arrived.push(message) : show(message)))
+            // Runs once the subscription is in effect: a message sent before is in the history, one sent after reaches subscribe().
+            const history = await onLoadHistory(roomId)
+            for (const message of history) show(message)
+            for (const message of arrived) show(message)
+            arrived = null
+
+            await me.publish({ id: crypto.randomUUID(), text: 'hello' }) // saved by onBeforePublish()
+
+            if (form === 'lost') await onReleaseSave('before')
+            await onWriterPublishes(roomId, ['control'])
+            await pollUntil(async () => ({
+              result: { rendered, saved: await onSavedTexts(roomId) },
+              done: rendered.includes('control'),
+            }))
+          })}
+        </React.Fragment>
+      ))}
+
+      {scenario('dm-hold', 'DM pre-listen hold', 'Send before listen', async () => {
+        const [roomId, observer] = await createRoom('dmhold')
+        const bob = await onJoinAsServer(roomId, 'Bob')
+        const ally = await observer.join({ meta: { name: 'Ally' } })
+
+        await ally.send(bob.id, 'early')
+        const held: string[] = []
+        bob.listen((data) => held.push(textOf(data)))
+
+        await pollUntil(() => ({ result: { held }, done: held.includes('early') }))
+      })}
+
+      {scenario('dm-info', 'DM info per listener', 'Two listeners, the first clears its info', async () => {
+        const [, room] = await createRoom('dm-info')
+        const me = await room.join({ meta: { name: 'Me' } })
+        const alice = await room.join({ meta: { name: 'Alice' } })
+        const senders: (string | null)[] = []
+        me.listen((_data, info) => {
+          info.from = null
+        })
+        me.listen((data, info) => {
+          senders.push(info.from?.id ?? null)
+          return data === 'ack' ? 'ok' : undefined
+        })
+
+        await alice.send(me.id, 'plain')
+        const reply = await alice.send(me.id, 'ack', { ack: true })
+
+        await pollUntil(() => ({ result: { senders, alice: alice.id, reply }, done: senders.length === 2 }))
+      })}
+
+      {scenario('self', 'selfDelivery: false', 'Own frames suppressed', async () => {
+        const roomId = await createRoomId('self')
+        await onWatchRoom(roomId)
+        const room = await onGetRoom(roomId)
+        const me = await room.join({ meta: { name: 'Solo' }, selfDelivery: false })
+        const mine: string[] = []
+        room.subscribe((data) => mine.push(textOf(data)))
+
+        await me.publish('hi')
+
+        await pollUntil(async () => {
+          const theirs = textListOf(await onGetWatched(roomId))
+          // `theirs` arriving proves the publish propagated, so `mine` staying empty is meaningful.
+          return { result: { mine, theirs, selfDelivery: me.selfDelivery }, done: theirs.includes('hi') }
+        })
+      })}
+
+      {scenario('sub-then-call', null, 'Subscribe, then call a telefunction that publishes', async () => {
+        // Per form, whether the first message published by the call right after the subscribe reached it.
+        const firsts: Record<string, string> = {}
+        for (const form of ['member', 'track', 'member binary', 'track binary']) {
+          const binary = form.endsWith('binary')
+          const track = form.startsWith('track')
+          const [roomId, room] = await createRoom('subthencall')
+          const releaseRoom = keepReachable(room)
+          const speaker = await getParticipantWhenJoined(room, await onJoinSpeaker(roomId))
+          const received: string[] = []
+          const push = (data: unknown) =>
+            received.push(data instanceof Uint8Array ? new TextDecoder().decode(data) : String(data))
+          if (track && binary) room.subscribeBinary(push, { track: 't' })
+          else if (track) room.subscribe(push, { track: 't' })
+          else if (binary) speaker.subscribeBinary(push)
+          else speaker.subscribe(push)
+          await onSpeakerPublishes(roomId, 'first', { binary, track })
+          await onSpeakerPublishes(roomId, 'end', { binary, track })
+          await pollUntil(() => ({ done: received.includes('end') }))
+          firsts[form] = received[0] ?? 'none'
+          releaseRoom()
+        }
+        setResult(JSON.stringify({ firsts }))
+      })}
+
+      {scenario(
+        'self-server',
+        'selfDelivery: false (server co-return + client join on one stub)',
+        'Co-return suppressed, client join delivered',
+        async () => {
+          const roomId = await createRoomId('self-server')
+          await onWatchRoom(roomId) // a different (server-side) client, which receives everything
+
+          const { room, me } = await onJoinRoomAsServerSelf(roomId, 'Solo')
+          const mine: string[] = []
+          room.subscribe((data) => mine.push(textOf(data)))
+          await me.publish('from-me')
+
+          const notMe = await room.join({ meta: { name: 'NotMe' } })
+          await notMe.publish('from-notme')
+
+          await pollUntil(async () => {
+            const theirs = textListOf(await onGetWatched(roomId))
+            // Gate on the client seeing notMe's frame (published last) and the watcher seeing me's.
+            return {
+              result: { mine, theirs, selfDelivery: me.selfDelivery },
+              done: mine.includes('from-notme') && theirs.includes('from-me'),
+            }
+          })
+        },
+      )}
+
+      {scenario(
+        'self-separate',
+        'selfDelivery: false (the room and me from two calls)',
+        'The room, then me, and me, then the room',
+        async () => {
+          const roomFirst = await createRoomId('self-separate')
+          await onWatchRoomTrack(roomFirst, 'cam')
+          const room = await onGetRoom(roomFirst)
+          const me = await onJoinAsServerSelf(roomFirst, 'Me')
+          const received = await receivedBesideMe(roomFirst, room, () => publishMine(me))
+          const meFirst = await createRoomId('self-separate')
+          await onWatchRoomTrack(meFirst, 'cam')
+          const meBefore = await onJoinAsServerSelf(meFirst, 'Me')
+          const receivedReversed = await receivedBesideMe(meFirst, await onGetRoom(meFirst), () =>
+            publishMine(meBefore),
+          )
+          setResult(JSON.stringify({ roomFirst: received, meFirst: receivedReversed }))
+        },
+      )}
+
+      {scenario('self-two-connections', null, 'The room, then me from a call on another connection', async () => {
+        const roomId = await createRoomId('self-two-connections')
+        await onWatchRoomTrack(roomId, 'cam')
+        const room = await onGetRoom(roomId)
+        const me = await withContext(onJoinAsServerSelf, { channel: { connectionKey: 'me' } })(roomId, 'Me')
+        setResult(JSON.stringify(await receivedBesideMe(roomId, room, () => publishMine(me))))
+      })}
+
+      {scenario('self-returned', null, 'Me from a call that publishes as me right after returning it', async () => {
+        const roomId = await createRoomId('self-returned')
+        await onWatchRoomTrack(roomId, 'cam')
+        const room = await onGetRoom(roomId)
+        let releaseMe = () => {}
+        const received = await receivedBesideMe(roomId, room, async () => {
+          releaseMe = keepReachable(await onJoinAsServerSelfPublishing(roomId, 'Me'))
+        })
+        releaseMe()
+        setResult(JSON.stringify(received))
+      })}
+
+      {scenario('self-greeting', null, 'Me greets the room before the call returns it', async () => {
+        const roomId = await createRoomId('self-greeting')
+        const open = await onGetRoom(roomId)
+        const earlier: unknown[] = []
+        open.subscribe((data) => earlier.push(data))
+        const other = await open.join({ meta: { name: 'Other' } })
+        const { room, me } = await onJoinTailAsServerSelfGreeting(roomId, 'Me')
+        const returned: unknown[] = []
+        room.subscribe((data) => returned.push(data))
+        await me.publish('after')
+        await other.publish('bye')
+        await pollUntil(() => ({
+          result: { earlier, returned, selfDelivery: me.selfDelivery },
+          done: earlier.includes('bye') && returned.includes('bye'),
+        }))
+      })}
+
+      {scenario('self-server-listener', null, "A server's room that listens joins me", async () => {
+        const [roomId, view] = await createRoom('self-server-listener')
+        const me = await onWatchRoomAsSelf(roomId)
+        await me.publish('mine on the page')
+        const other = await view.join({ meta: { name: 'Other' } })
+        await other.publish('other')
+        await pollUntil(async () => {
+          const heard = textListOf(await onGetWatched(roomId))
+          return { result: { heard }, done: heard.includes('other') }
+        })
+      })}
+
+      {scenario('self-removed', null, 'Remove me, which came from a call on another connection', async () => {
+        const roomId = await createRoomId('self-removed')
+        const room = await onGetRoom(roomId)
+        const closes: unknown[] = []
+        room.onClose((cause) => closes.push(cause))
+        const me = await withContext(onJoinAsServer, { channel: { connectionKey: 'me' } })(roomId, 'Me')
+        let myCause: unknown = null
+        me.onLeave((cause) => (myCause = cause))
+        await pollUntil(() => ({ done: me.isConnected }))
+        await onKick(roomId, me.id)
+        await pollUntil(() => ({
+          result: { myCause, closes, isClosed: room.isClosed },
+          done: room.isClosed && myCause !== null,
+        }))
+      })}
+
+      {scenario('self-upgrade', null, 'The room and me from two calls while the connection upgrades', async () => {
+        const roomId = await createRoomId('self-upgrade')
+        await onWatchRoomTrack(roomId, 'cam')
+        const room = await onGetRoom(roomId)
+        const me = await onJoinAsServerSelf(roomId, 'Me')
+        const received = await receivedBesideMe(
+          roomId,
+          room,
+          () => publishMine(me),
+          async () => {
+            const { promise: upgraded, resolve } = Promise.withResolvers<void>()
+            publishUpgradedSelf = resolve
+            setResult(JSON.stringify({ ready: true }))
+            await upgraded
+          },
+        )
+        setResult(JSON.stringify(received))
+      })}
+      <button id="test-room-self-upgrade-publish" onClick={() => publishUpgradedSelf?.()}>
+        Publish as me
+      </button>
+
+      {scenario('reconfig', 'Reconfigure, list, getOrCreate', 'Update, list, getOrCreate', async () => {
+        const base = `e2e-reconfig:${crypto.randomUUID()}`
+        const roomId = `${base}:a`
+        await onCreateRoom(roomId)
+        const room = await onGetRoom(roomId)
+        await room.join({ meta: { name: 'R' } })
+        const updates: string[] = []
+        room.onChange(() => updates.push(optionalTextOf(room.meta.topic) ?? ''))
+
+        await onUpdateRoom(roomId, { topic: 'updated' })
+        const secondRoomId = `${base}:b`
+        await onCreateRoom(secondRoomId) // a second room under the same prefix, for list()
+        const same = await onGetOrCreateRoom(roomId) // idempotent: returns the existing room
+        const listed = await onListRooms(base)
+
+        await pollUntil(() => {
+          return {
+            result: {
+              updates,
+              topic: optionalTextOf(room.meta.topic) ?? null,
+              expectedIds: [roomId, secondRoomId],
+              listed,
+              sameId: same.id === roomId,
+              sameCount: same.count,
+            },
+            done: updates.includes('updated'),
+          }
+        })
+      })}
+
+      {scenario('removed', "Remove the page's participant", 'Alone three ways, then one of two', async () => {
+        /** The view's messages and closes, and the room as it is. */
+        const watch = (room: RoomView) => {
+          const seen: { text: unknown[]; closes: number; closeCause: unknown } = {
+            text: [],
+            closes: 0,
+            closeCause: null,
+          }
+          room.subscribe((data) => seen.text.push(data))
+          room.onClose((cause) => {
+            seen.closes++
+            seen.closeCause = cause
+          })
+          return () => ({ ...seen, isClosed: room.isClosed })
+        }
+        /** The page's participant `me` removed between two messages: what the view got, once the server's own view got
+         *  both, and how `me` left. */
+        const removeMe = async (
+          roomId: string,
+          me: Pick<ServerJoined, 'id' | 'onLeave'>,
+          seen: ReturnType<typeof watch>,
+        ) => {
+          let myCause: unknown = null
+          me.onLeave((cause) => (myCause = cause))
+          await onRoomBurst(roomId, 1, 0)
+          await pollUntil(() => ({ done: seen().text.length === 1 }))
+          await onKick(roomId, me.id)
+          await pollUntil(() => ({ done: myCause !== null }))
+          await onRoomBurst(roomId, 1, 0)
+          await pollUntil(async () => ({
+            done: (await onGetWatched(roomId)).length === 2 && (seen().isClosed || seen().text.length === 2),
+          }))
+          return { ...seen(), myCause }
+        }
+
+        const aloneId = await createRoomId('removed')
+        await onWatchRoom(aloneId)
+        const alone = await onGetRoom(aloneId)
+        const me = await onJoinAsServer(aloneId, 'Me')
+        // A participant the page doesn't hold stays in the room, and leaves only the closed view.
+        let pubCause: unknown = null
+        let pubJoined = false
+        alone.onJoin((member) => {
+          if (member.meta.name !== 'Pub') return
+          pubJoined = true
+          member.onLeave((cause) => (pubCause = cause))
+        })
+        await onPublishOnServer(aloneId)
+        await pollUntil(() => ({ done: pubJoined }))
+        const aloneSeen = watch(alone)
+        // A same-channel ack orders the view's subscription before the server's publish.
+        await (await alone.join()).leave()
+
+        /** The page's participant from its own join on the view. */
+        const joinedOnView = async () => {
+          const roomId = await createRoomId('removed')
+          await onWatchRoom(roomId)
+          const room = await onGetRoom(roomId)
+          const seen = watch(room)
+          return removeMe(roomId, await room.join(), seen)
+        }
+        /** The view and the page's participant from one call. */
+        const returnedTogether = async () => {
+          const roomId = await createRoomId('removed')
+          await onWatchRoom(roomId)
+          const { room, me } = await onJoinRoomAsServer(roomId, 'Me')
+          const seen = watch(room)
+          await (await room.join()).leave()
+          return removeMe(roomId, me, seen)
+        }
+        const [aloneRemoved, joined, together] = await Promise.all([
+          removeMe(aloneId, me, aloneSeen),
+          joinedOnView(),
+          returnedTogether(),
+        ])
+
+        const twoId = await createRoomId('removed')
+        const two = await onGetRoom(twoId)
+        const gone = await onJoinAsServer(twoId, 'Gone')
+        const stays = await onJoinAsServer(twoId, 'Stays')
+        const twoSeen = watch(two)
+        await (await two.join()).leave()
+        await onKick(twoId, gone.id)
+        await stays.publish('still here')
+        await pollUntil(() => ({ done: twoSeen().text.includes('still here') }))
+        setResult(JSON.stringify({ alone: { ...aloneRemoved, pubCause }, joined, together, two: twoSeen() }))
+      })}
+
+      {scenario('removed-identity', null, 'Watch a room whose participant is removed by identity', async () => {
+        const roomId = await createRoomId('removed-identity')
+        const room = await onGetRoom(roomId)
+        const text: unknown[] = []
+        room.subscribe((data) => text.push(data))
+        const { promise: removing, resolve } = Promise.withResolvers<void>()
+        removeByIdentity = resolve
+        setResult(JSON.stringify({ roomId }))
+        await removing
+        await onKickByIdentity(roomId, 'user:Multi')
+        await onRoomBurst(roomId, 1, 0)
+        await pollUntil(() => ({ result: { text, isClosed: room.isClosed }, done: text.length === 1 }))
+      })}
+      <button id="test-room-removed-identity-remove" onClick={() => removeByIdentity?.()}>
+        Remove Multi
+      </button>
+      {scenario('removed-identity-held', null, 'Hold Multi in the room named in the URL', async () => {
+        const roomId = searchParam('roomId')
+        const room = await onGetRoom(roomId)
+        const me = await onJoinAsServer(roomId, 'Multi')
+        keepReachable(room)
+        keepReachable(me)
+        const seen: { text: unknown[]; closes: number; cause: unknown } = { text: [], closes: 0, cause: null }
+        const show = () => setResult(JSON.stringify({ ...seen, isClosed: room.isClosed }))
+        room.subscribe((data) => {
+          seen.text.push(data)
+          show()
+        })
+        room.onClose(() => {
+          seen.closes++
+          show()
+        })
+        me.onLeave((cause) => {
+          seen.cause = cause
+          show()
+        })
+        setResult(JSON.stringify({ ready: true }))
+      })}
+
+      {scenario('identity', 'Kick by identity, onEmpty', 'Remove by identity', async () => {
+        const [roomId, observer] = await createRoom('identity')
+        let empty = false
+        observer.onEmpty(() => {
+          empty = true
+        })
+
+        const multi = await onJoinAsServer(roomId, 'Multi')
+        let cause: { type: string; reason?: unknown } | null = null
+        multi.onLeave((c) => {
+          cause = c
+        })
+        await pollUntil(() => ({ done: observer.count >= 1 }))
+
+        await onKickByIdentity(roomId, 'user:Multi')
+        await pollUntil(() => ({
+          result: { cause, count: observer.count, empty },
+          done: cause !== null && observer.count === 0,
+        }))
+      })}
+
+      {scenario('listeners', 'Listener registrations', 'Same callback twice, unlisten each', async () => {
+        const [, room] = await createRoom('listeners')
+        const calls: string[] = []
+        const a = () => void calls.push('a')
+        const offFirst = room.onJoin(a)
+        room.onJoin(() => void calls.push('b'))
+        const offSecond = room.onJoin(a)
+        const joinAndWait = async (expected: number) => {
+          await room.join()
+          await pollUntil(() => ({ done: calls.length >= expected }))
+        }
+        await joinAndWait(3)
+        offFirst()
+        await joinAndWait(5)
+        offSecond()
+        await joinAndWait(6)
+        setResult(JSON.stringify({ calls }))
+      })}
+
+      {scenario(
+        'retain-late',
+        'Retained replay, once and in order',
+        'Late subscribers get what is retained',
+        async () => {
+          const [roomId, pubView] = await createRoom('retain-late')
+          // A GC pass would close `pubView`, and its members leaving with it delete what they retained.
+          const releasePubView = keepReachable(pubView)
+          const a = await pubView.join({ meta: { name: 'A' } })
+          const b = await pubView.join({ meta: { name: 'B' } })
+          await a.publishBinary(new Uint8Array([1]), { track: 'cam', retain: true })
+          await b.publishBinary(new Uint8Array([2]), { track: 'cam', retain: true })
+          await b.publishBinary(new Uint8Array([3]), { track: 'mic', retain: true })
+          await a.publish('pinned', { retain: true })
+          await b.leave()
+
+          await onWatchRoomTrack(roomId, 'cam')
+          const late = await onGetRoom(roomId)
+          const text: string[] = []
+          const frames: Array<[string, number, unknown]> = []
+          late.subscribe((data) => text.push(textOf(data)))
+          late.subscribeBinary((data, info) => frames.push([info.track, byteAt(data), info.from.meta.name]))
+          await a.publish('live')
+          await a.publishBinary(new Uint8Array([4]), { track: 'cam' })
+          await pollUntil(async () => {
+            const server = await onGetWatchedTrack(roomId)
+            return { done: text.includes('live') && frames.length >= 2 && server.frames.includes(4) }
+          })
+
+          const later: string[] = []
+          late.subscribe((data) => later.push(textOf(data)))
+          await a.publish('live-2')
+          await pollUntil(async () => {
+            const server = await onGetWatchedTrack(roomId)
+            return {
+              result: { text, frames, later, server },
+              done: later.includes('live-2') && server.text.includes('live-2'),
+            }
+          })
+          releasePubView()
+        },
+      )}
+
+      {scenario('retain-leave', null, 'A member leaves while a late view replays', async () => {
+        const [roomId, pubView] = await createRoom('retain-leave')
+        const releasePubView = keepReachable(pubView)
+        const a = await pubView.join({ meta: { name: 'A' } })
+        const b = await pubView.join({ meta: { name: 'B' } })
+        await a.publishBinary(new Uint8Array([1]), { track: 'cam', retain: true })
+        // Delivers the cam track on the server already, so live frames reach a late view while its replay reads.
+        await onWatchRoomTrack(roomId, 'cam')
+
+        await onHoldRetainedReads(roomId)
+        const late = await onGetRoom(roomId)
+        const frames: Array<[string, number, unknown]> = []
+        const left: unknown[] = []
+        late.subscribeBinary((data, info) => frames.push([info.track, byteAt(data), info.from.meta.name ?? null]))
+        late.onLeave((member) => left.push(member.meta.name))
+        await onWatchEveryFrame(roomId)
+        // The page's replay and the server view's each wait on the retained read.
+        await pollUntil(async () => ({ done: (await onHeldRetainedReads(roomId)) >= 2 }))
+        await a.publishBinary(new Uint8Array([4]), { track: 'cam' })
+        await b.publishBinary(new Uint8Array([5]), { track: 'cam' })
+        await pollUntil(async () => {
+          const seen = (await onGetWatchedTrack(roomId)).frames
+          return { done: seen.includes(4) && seen.includes(5) }
+        })
+        await a.leave()
+        await pollUntil(() => ({ done: left.includes('A') }))
+        await onReleaseRetainedReads(roomId)
+
+        await b.publishBinary(new Uint8Array([9]), { track: 'cam' })
+        await pollUntil(async () => {
+          const server = await onGetEveryFrame(roomId)
+          return {
+            result: { frames, server },
+            done: frames.some(([, n]) => n === 9) && server.some(([n]) => n === 9),
+          }
+        })
+        releasePubView()
+      })}
+
+      {scenario('hidden', 'Hidden participants', 'Hidden member handed to one page', async () => {
+        const [roomId, view] = await createRoom('hidden')
+        const events: string[] = []
+        view.onJoin((m) => events.push(`join:${m.meta.name}`))
+        view.onLeave((m) => events.push(`leave:${m.meta.name}`))
+        let empty = false
+        view.onEmpty(() => (empty = true))
+        const player = await view.join({ meta: { name: 'P' } })
+
+        const handed = await onJoinHiddenAndHand(roomId)
+        const handedEvents: string[] = []
+        handed.room.onJoin((m) => handedEvents.push(`join:${m.meta.name}`))
+        handed.room.onLeave((m) => handedEvents.push(`leave:${m.meta.name}`))
+        const memberEvents: string[] = []
+        const bot = present(handed.member, 'the handed member')
+        bot.onChange(() => memberEvents.push(`change:${bot.meta.name}`))
+        bot.onLeave((cause) => memberEvents.push(`leave:${cause.type}`))
+        const counts = [view.count, handed.room.count]
+
+        await onHiddenSetMeta(roomId, 'Bot2')
+        await pollUntil(() => ({ done: memberEvents.includes('change:Bot2') }))
+        await player.leave()
+        await pollUntil(() => ({ done: empty }))
+        await onHiddenLeave(roomId)
+        await pollUntil(() => ({ done: memberEvents.includes('leave:left') }))
+        // Delivered after the hidden member's events, so they had their chance to reach `view`.
+        await view.join({ meta: { name: 'Q' } })
+        await pollUntil(() => ({ done: events.includes('join:Q') && handedEvents.includes('join:Q') }))
+
+        const aloneId = `e2e-hidden-alone:${crypto.randomUUID()}`
+        await onHiddenAfterPlayers(aloneId)
+        await pollUntil(async () => {
+          const alone = await onGetHiddenAfterPlayers(aloneId)
+          return {
+            result: { events, handedEvents, memberEvents, counts, empty, alone },
+            done: alone.closed && alone.cause !== null,
+          }
+        })
+      })}
+
+      {scenario('departed-returned', null, 'Members returned after they left', async () => {
+        const { room, members } = await onReturnDeparted(await createRoomId('departed-returned'))
+        const causes = members.map((member) => {
+          let cause: string | null = null
+          present(member, 'a returned member').onLeave(({ type }) => (cause = type))
+          return cause
+        })
+        const { participants, count } = room.snapshot()
+        setResult(
+          JSON.stringify({
+            names: participants.map(({ meta }) => meta.name),
+            count,
+            causes,
+            listed: members.map((member) =>
+              participants.some(({ id }) => id === present(member, 'a returned member').id),
+            ),
+          }),
+        )
+      })}
+
+      {scenario('proxy', 'Room methods as React reads them', 'Stable and detached methods', async () => {
+        const [roomId, room] = await createRoom('proxy')
+        const sameMethods = room.onChange === room.onChange && room.snapshot === room.snapshot
+        const { join, snapshot } = room
+        await join({ meta: { name: 'Detached' } })
+        await pollUntil(() => ({ done: snapshot().count === 1 }))
+        setLiveRoom(room)
+        // A GC pass would close Bob's channel, and Bob leaving with it takes the live count the test reads from 2 to 1.
+        keepReachable(await onJoinAsServer(roomId, 'Bob'))
+
+        const closed = await onCloseRoomWithMember(`e2e-proxy-closed:${crypto.randomUUID()}`)
+        const causes: unknown[] = []
+        present(closed.member, "the closed room's member").onLeave((cause) => causes.push(cause))
+        setResult(
+          JSON.stringify({
+            sameMethods,
+            detachedCount: snapshot().count,
+            causes,
+            closedIsClosed: closed.room.isClosed,
+          }),
+        )
+      })}
+
+      {scenario('errors', 'Background errors', 'Failing listeners and un-awaited writes', async () => {
+        const [, room] = await createRoom('errors')
+        room.subscribe(async () => {
+          throw new Error('room-listener-bug: async subscribe')
+        })
+        const me = await room.join({ meta: { name: 'Me' } })
+        await me.publish('hello')
+        await me.leave()
+        me.publish('after-leave')
+        me.publish('after-leave', { track: 'cursor', lossy: true })
+        me.publishBinary(new Uint8Array([1]))
+        me.send(me.id, 'after-leave')
+        const awaited = await me.publish('after-leave').then(
+          () => null,
+          (err: Error) => err.message,
+        )
+        const server = await onBackgroundErrors(`e2e-errors-server:${crypto.randomUUID()}`)
+        setResult(JSON.stringify({ awaited, server }))
+      })}
+
+      {scenario('close-while-subscribing', null, 'Rooms closed while a server view subscribes', async () => {
+        setResult(JSON.stringify(await onCloseWhileSubscribing()))
+      })}
+
+      {scenario('tracks', 'Named tracks and demand', 'Tracks reach who asked', async () => {
+        const [roomId, pubView] = await createRoom('tracks')
+        // A GC pass would close `pubView`, and its members leaving with it end the demand this reads.
+        const releasePubView = keepReachable(pubView)
+        const pub = await pubView.join({ meta: { name: 'Pub' } })
+        const other = await pubView.join({ meta: { name: 'Other' }, selfDelivery: false })
+        const demand = demandLog(pub)
+        const otherDemand = demandLog(other)
+        // Other's own side: its frames never come back to this page, so the page wants nothing of Other.
+        pubView.subscribeBinary(() => {}, { track: 'own' })
+
+        const tracks = Array.from({ length: 1_000 }, (_, i) => `t${i}`)
+        const viewer = await onGetRoom(roomId)
+        const remote = await getParticipantWhenJoined(viewer, pub.id)
+        const frames: Record<string, number[]> = {}
+        const offs = tracks.map((track) =>
+          remote.subscribeBinary((data, info) => (frames[present(info.track, 'its track')] ??= []).push(byteAt(data)), {
+            track,
+          }),
+        )
+        const defaultTrack: number[] = []
+        viewer.subscribeBinary((data) => defaultTrack.push(byteAt(data)), { track: 'main' })
+        await pollUntil(() => ({
+          done:
+            demand.some(([track]) => track === 't999') &&
+            demand.some(([t]) => t === 'main') &&
+            demand.some(([t]) => t === 'own'),
+        }))
+
+        await Promise.all([
+          ...tracks.flatMap((track) => [1, 2].map((n) => pub.publishBinary(new Uint8Array([n]), { track }))),
+          pub.publishBinary(new Uint8Array([7])),
+        ])
+        await pollUntil(() => ({
+          done: tracks.every((track) => frames[track]?.length === 2) && defaultTrack.length > 0,
+        }))
+        present(offs[0], "the first track's unsubscribe")()
+        await pollUntil(() => ({ done: demand.some(([track, wanted]) => track === 't0' && !wanted) }))
+
+        const many = await onGetRoom(roomId)
+        // Collecting `many` would end its subscriptions, and the demand this waits for with them.
+        const releaseMany = keepReachable(many)
+        for (let i = 0; i < 4_096; i++) many.subscribeBinary(() => {}, { track: `x${i}` })
+        const tooMany = (() => {
+          try {
+            many.subscribeBinary(() => {}, { track: 'past' })
+            return null
+          } catch (err) {
+            return messageOf(err)
+          }
+        })()
+        const manyWanted = () => pub.demand.filter(({ track }) => track.startsWith('x')).length
+        // Pub's demand holds the 4,096 tracks `many` wants as well.
+        await pollUntil(() => ({ done: manyWanted() === 4_096 }))
+        setResult(
+          JSON.stringify({
+            inOrder: tracks.filter((track) => frames[track]?.join() === '1,2').length,
+            defaultTrack,
+            demand: demand.filter(([track]) => track === 'main' || track === 't0' || track === 't999'),
+            wanted: new Set(
+              demand.filter(([track, wanted]) => wanted && !track.startsWith('x')).map(([track]) => track),
+            ).size,
+            manyWanted: manyWanted(),
+            pubOwn: demand.filter(([track]) => track === 'own'),
+            otherOwn: otherDemand.filter(([track]) => track === 'own'),
+            tooMany,
+          }),
+        )
+        releaseMany()
+        releasePubView()
+      })}
+
+      {scenario('away', 'Back from offline', 'What the room did while away', async () => {
+        const [roomId, view] = await createRoom('away')
+        const messages: string[] = []
+        const leaves: string[] = []
+        let closed = false
+        view.subscribe((data) => messages.push(textOf(data)))
+        view.onLeave((member, cause) => leaves.push(`${member.meta.name}:${cause.type}`))
+        view.onClose(() => (closed = true))
+        const me = await view.join({ meta: { name: 'Me' } })
+        let myCause: unknown = null
+        me.onLeave((cause) => (myCause = cause))
+        await onRoomWhileAway(roomId, me.id)
+        await pollUntil(() => ({ done: view.count === 3 }))
+        setResult(JSON.stringify({ roomId }))
+        await pollUntil(() => ({ done: closed && myCause !== null }), 150)
+        setResult(
+          JSON.stringify({
+            roomId,
+            messages,
+            leaves: leaves.sort(),
+            topic: optionalTextOf(view.meta.topic) ?? null,
+            myCause,
+            closed,
+          }),
+        )
+      })}
+
+      {scenario('meta-away', 'Back from offline, twice', "The room's meta, each time", async () => {
+        const [roomId, view] = await createRoom('meta-away')
+        await view.join({ meta: { name: 'Me' } })
+        await onRoomMetaWhileAway(roomId)
+        keepReachable(view)
+        const update = () => {
+          const { meta, participants } = view.snapshot()
+          const srv = participants.find((member) => member.meta.name === 'Srv')
+          setResult(
+            JSON.stringify({
+              roomId,
+              topic: optionalTextOf(meta.topic) ?? null,
+              filler: optionalTextOf(srv?.meta.filler)?.trim() ?? null,
+            }),
+          )
+        }
+        update()
+        view.onChange(update)
+      })}
+
+      {scenario('overflow', 'Offline past maxMemory', 'Let go with ChannelOverflowError', async () => {
+        const [roomId, view] = await createRoom('overflow')
+        const seen: string[] = []
+        view.subscribe((data) => seen.push(textOf(data).trim()))
+        let closed = false
+        view.onClose(() => (closed = true))
+        const me = await view.join({ meta: { name: 'Me' } })
+        let myCause: unknown = null
+        me.onLeave((cause) => (myCause = cause))
+        await onRoomOverflow(roomId)
+        await pollUntil(() => ({ done: seen.includes('before') }))
+        setResult(JSON.stringify({ roomId }))
+        await pollUntil(() => ({ done: closed && myCause !== null }), 150)
+        const leaves = await onGetRoomOverflow(roomId)
+        setResult(JSON.stringify({ roomId, seen, myCause, closed, isClosed: view.isClosed, leaves }))
+      })}
+
+      {scenario('participant-overflow', null, 'A server-joined participant offline past maxMemory', async () => {
+        const [roomId] = await createRoom('participant-overflow')
+        const me = await onJoinAsServer(roomId, 'Bob')
+        const got: string[] = []
+        me.listen((data) => got.push(textOf(data).trim()))
+        let myCause: unknown = null
+        me.onLeave((cause) => (myCause = cause))
+        await onParticipantOverflow(roomId, me.id)
+        await pollUntil(() => ({ done: got.includes('before') }))
+        setResult(JSON.stringify({ roomId }))
+        await pollUntil(() => ({ done: myCause !== null }), 150)
+        setResult(JSON.stringify({ roomId, got, myCause }))
+      })}
+
+      {scenario('behind', null, 'Connected, behind what the server holds', async () => {
+        const [roomId, view] = await createRoom('behind')
+        const seen: number[] = []
+        view.subscribe((data) => seen.push(Number.parseInt(textOf(data))))
+        let closed = false
+        view.onClose(() => (closed = true))
+        await view.join({ meta: { name: 'Me' } })
+        await onRoomFlood(roomId, 16, 256 * 1024)
+        await pollUntil(() => ({ done: closed }), 150)
+        setResult(JSON.stringify({ seen, closed }))
+      })}
+
+      {scenario('track-lossy', null, 'Each publish on a track says its lossy, of either kind', async () => {
+        const [, view] = await createRoom('track-lossy')
+        const me = await view.join({ meta: { name: 'Me' } })
+        const frame = new Uint8Array(1)
+        const thrown = (publish: () => unknown) => {
+          try {
+            publish()
+            return null
+          } catch (err) {
+            return messageOf(err)
+          }
+        }
+        setResult(
+          JSON.stringify({
+            first: thrown(() => me.publishBinary(frame, { track: 'cursor', lossy: true })),
+            omitted: thrown(() => me.publishBinary(frame, { track: 'cursor' })),
+            text: thrown(() => me.publish('a', { track: 'cursor' })),
+            plain: thrown(() => me.publishBinary(frame, { track: 'drawing' })),
+            lossyAfterPlain: thrown(() => me.publishBinary(frame, { track: 'drawing', lossy: true })),
+            defaultTrack: thrown(() => me.publishBinary(frame, { lossy: true })),
+            // @ts-expect-error `lossy` needs a `track`, which the JavaScript caller gets told at the call.
+            noTrack: thrown(() => me.publish('a', { lossy: true })),
+          }),
+        )
+      })}
+
+      {scenario('meta-flood', null, 'Connected, behind on room events alone', async () => {
+        const [roomId, view] = await createRoom('meta-flood')
+        let closeCause: unknown = null
+        view.onClose((cause) => (closeCause = cause))
+        const me = await view.join({ meta: { name: 'Me' } })
+        let myCause: unknown = null
+        me.onLeave((cause) => (myCause = cause))
+        await onRoomMetaFlood(roomId)
+        await pollUntil(() => ({ done: closeCause !== null && myCause !== null }), 150)
+        setResult(JSON.stringify({ closeCause, myCause }))
+      })}
+
+      {scenario('meta-past-memory', null, 'A setMeta() larger than maxMemory', async () => {
+        const [roomId, view] = await createRoom('meta-past-memory')
+        const other = await onGetRoom(roomId)
+        const leaves: unknown[] = []
+        other.onLeave((member) => leaves.push(member.meta.name))
+        let closed = false
+        view.onClose(() => (closed = true))
+        const me = await view.join({ meta: { name: 'Me' } })
+        let myCause: unknown = null
+        me.onLeave((cause) => (myCause = cause))
+        const refused = await me.setMeta({ name: 'Me', blob: 'x'.repeat(3 * 1024 * 1024) }).then(
+          () => null,
+          (err: Error) => err.name,
+        )
+        const next = await me.updateMeta({ next: true }).then(
+          () => 'accepted',
+          (err: Error) => err.name,
+        )
+        setResult(JSON.stringify({ refused, next, closed, myCause, leaves }))
+      })}
+
+      {scenario('reliable-gap', null, 'Offline past 7/8 of maxMemory on reliable messages, a receipt due', async () => {
+        const roomId = await createRoomId('reliable-gap')
+        const view = await onOpenReliableGapRoom(roomId)
+        const received: string[] = []
+        view.subscribe((data) => received.push(present(textOf(data).split(' ')[0], 'its first word')))
+        let closed = false
+        view.onClose(() => (closed = true))
+        const me = await view.join({ meta: { name: 'Me' } })
+        let myCause: unknown = null
+        me.onLeave((cause) => (myCause = cause))
+        await me.publish('before')
+        await pollUntil(() => ({ done: received.includes('before') }))
+        let receipt: string | null = null
+        me.publish('held').then(
+          () => (receipt = 'answered'),
+          (err: Error) => (receipt = err.name),
+        )
+        setResult(JSON.stringify({ roomId }))
+        await pollUntil(() => ({ done: closed ? receipt !== null : receipt === 'answered' }), 150)
+        setResult(JSON.stringify({ roomId, received, receipt, closed, myCause }))
+      })}
+
+      {scenario('text-cursor', null, 'Offline past maxMemory on a text track, lossy', async () => {
+        const roomId = await createRoomId('text-cursor')
+        const view = await onGetRoom(roomId)
+        const cursor: { n: number | 'plain'; seq: number }[] = []
+        view.subscribe(
+          (data, info) => {
+            const n = fieldOf(data, 'n')
+            cursor.push({ n: n === 'plain' ? n : numberOf(n), seq: info.seq })
+          },
+          { track: 'cursor' },
+        )
+        let closed = false
+        view.onClose(() => (closed = true))
+        const me = await view.join({ meta: { name: 'Me' } })
+        let myCause: unknown = null
+        me.onLeave((cause) => (myCause = cause))
+        await onRoomTextCursor(roomId)
+        await pollUntil(() => ({ done: cursor.length > 0 }))
+        setResult(JSON.stringify({ roomId }))
+        await pollUntil(() => ({ done: cursor.at(-1)?.n === 15 || closed }), 150)
+        setResult(JSON.stringify({ roomId, cursor, closed, myCause }))
+      })}
+
+      {scenario('tracks-cursor', null, 'Offline past maxMemory on a track, lossy', tracksBehind('cursor'))}
+
+      {scenario('tracks-drawing', null, 'Offline past maxMemory on a reliable track', tracksBehind('drawing'))}
+
+      {scenario('lossy-near-budget', null, 'Offline with only lossy frames near maxMemory', async () => {
+        const [roomId, view] = await createRoom('lossy-near-budget')
+        const [backlogRoomId, backlog] = await createRoom('lossy-near-budget-backlog')
+        const got = new Set<string>()
+        view.subscribeBinary((_data, info) => got.add(info.track))
+        backlog.subscribe(() => {})
+        let closed = false
+        view.onClose(() => (closed = true))
+        let backlogClosed = false
+        backlog.onClose(() => (backlogClosed = true))
+        await view.join({ meta: { name: 'Me' } })
+        await backlog.join({ meta: { name: 'Me' } })
+        await onRoomLossyNearBudget(roomId, backlogRoomId)
+        setResult(JSON.stringify({ roomId }))
+        await pollUntil(() => ({ done: (got.size === 3 && backlogClosed) || closed }), 150)
+        setResult(JSON.stringify({ roomId, tracks: [...got].sort(), closed, backlogClosed }))
+      })}
+
+      {scenario('lossy-uplink', null, "Lossy frames waiting for the page's uplink", async () => {
+        const [, view] = await createRoom('lossy-uplink')
+        const seen: number[] = []
+        view.subscribeBinary((_data, info) => seen.push(numberAt(info.meta, 'n')), { track: 'cursor' })
+        const me = await view.join({ meta: { name: 'Me' } })
+        const { promise: away, resolve } = Promise.withResolvers<void>()
+        const stop = me.onDisconnect(resolve)
+        setResult(JSON.stringify({ ready: true }))
+        await away
+        stop()
+        const queued = Promise.all(
+          Array.from({ length: 20 }, (_, n) =>
+            me.publishBinary(new Uint8Array(256 * 1024), { track: 'cursor', meta: { n }, lossy: true }),
+          ),
+        )
+        setResult(JSON.stringify({ queued: true }))
+        const receipts = await queued
+        await pollUntil(() => ({ done: seen.at(-1) === 19 }))
+        await new Promise((resolve) => setTimeout(resolve))
+        // The room's own channel: its handle holds it, as its state's owner. Its connection lists a stream's newest lossy
+        // frame until the server confirms it.
+        const end = roomEnd(view)
+        const channels = fieldOf(fieldOf(fieldOf(end, 'connection'), 'lifecycle'), 'channels')
+        if (!isChannelTable(channels)) throw new Error("The room's connection has no table of its channels")
+        const replaceable = optionalFieldOf(channels.of(end), 'replaceable')
+        const receiptSeqs = new Set(receipts.map((receipt) => receipt.seq))
+        const listed = replaceable instanceof Map ? replaceable.size : 0
+        setResult(JSON.stringify({ receipts: receiptSeqs.size, seen, listed }))
+      })}
+
+      {scenario('slow-link', 'Slow link', '640 KB each way', async () => {
+        const [roomId, view] = await createRoom('slow-link')
+        await onWatchRoom(roomId)
+        const received: number[] = []
+        view.subscribe((data) => received.push(Number.parseInt(textOf(data))))
+        const me = await view.join({ meta: { name: 'Me' }, selfDelivery: false })
+        await onRoomBurst(roomId, 40, 16_000)
+        await pollUntil(() => ({ done: received.length >= 40 }))
+        await Promise.all(Array.from({ length: 40 }, (_, n) => me.publish(String(n).padEnd(16_000))))
+        // The server's view hears the speaker's 40 and the page's 40.
+        let watched = 0
+        await pollUntil(async () => {
+          watched = await onGetWatchedCount(roomId)
+          return { done: watched >= 80 }
+        }, 100)
+        setResult(JSON.stringify({ received, watched }))
+      })}
+
+      {scenario('release', 'What the server lets go', 'Unheld view, left member, closed room', async () => {
+        const roomId = `e2e-release:${crypto.randomUUID()}`
+        await onRoomRelease(roomId)
+        setResult(JSON.stringify({ roomId }))
+      })}
+
+      {scenario('tail-order', 'Tail: order and cap', 'Held text flushed in order', async () => {
+        const [roomId, owner] = await createRoom('tail-order')
+        const me = await owner.join({ meta: { name: 'Src' } })
+        const tailed = await onGetRoomTail(roomId)
+        await me.publish('a')
+        await onSystemPublish(roomId, 'system')
+        await me.publish('b')
+        const received: string[] = []
+        tailed.subscribe((data) => received.push(textOf(data)))
+        await pollUntil(() => ({ done: received.includes('b') }))
+        const flushed = [...received]
+
+        const capped = await onGetRoomTail(roomId)
+        await Promise.all(Array.from({ length: 300 }, (_, n) => me.publish(`n${n}`)))
+        // A publish resolves once stored; the server hands it to every view here, `capped`'s tail too, by the time
+        // `tailed` gets it.
+        await pollUntil(() => ({ done: received.includes('n299') }))
+        const kept: string[] = []
+        capped.subscribe((data) => kept.push(textOf(data)))
+        await pollUntil(() => ({ done: kept.includes('n299') }))
+        setResult(JSON.stringify({ received: flushed, kept }))
+      })}
+
+      {scenario('tail-lease', null, 'Subscribe to a tail after its lease', async () => {
+        const [roomId, owner] = await createRoom('tail-lease')
+        const me = await owner.join({ meta: { name: 'Src' } })
+        const tailed = await onGetRoomTail(roomId)
+        await me.publish('held')
+        setResult(JSON.stringify({ waiting: true }))
+        await new Promise((resolve) => setTimeout(resolve, 61_000))
+        const received: string[] = []
+        tailed.subscribe((data) => received.push(textOf(data)))
+        await me.updateMeta({ ready: true }) // same-channel ack orders the subscription before the live publish
+        await me.publish('live')
+        await pollUntil(() => ({ result: { received }, done: received.includes('live') }))
+      })}
+
+      {scenario('stale-read', null, 'Read a kept room a heartbeat later', async () => {
+        const [keptId, freshId] = [`e2e-stale-kept:${crypto.randomUUID()}`, `e2e-stale-fresh:${crypto.randomUUID()}`]
+        await Promise.all([onKeepRoom(keptId), onKeepRoom(freshId)])
+        setResult(JSON.stringify({ waiting: true }))
+        // Past the 30 s heartbeat after each room's Room.get().
+        await new Promise((resolve) => setTimeout(resolve, 31_000))
+        const [kept, fresh] = await Promise.all([onCountKeptRoom(keptId), onCountRoom(freshId)])
+        setResult(JSON.stringify({ keptId, kept, fresh }))
+      })}
+
+      {scenario('hiccups', 'Store hiccups', 'A store write fails once', async () => {
+        const settle = (promise: Promise<unknown>) =>
+          promise.then(
+            () => 'ok',
+            (err: Error) => err.message,
+          )
+
+        const [leaveRoomId, leaveView] = await createRoom('hiccup-leave')
+        const leaves: string[] = []
+        leaveView.onLeave((member, cause) => leaves.push(`${member.meta.name}:${cause.type}`))
+        const me = await leaveView.join({ meta: { name: 'Me' } })
+        await onFailBackend({ op: 'runOperation', roomId: leaveRoomId, key: 'leave' })
+        const firstLeave = await settle(me.leave())
+        const publishAfter = await settle(me.publish('still-here'))
+        const secondLeave = await settle(me.leave())
+        await pollUntil(() => ({ done: leaveView.count === 0 }))
+
+        const [joinRoomId, joinView] = await createRoom('hiccup-join')
+        await onFailBackend({ op: 'runJoin', roomId: joinRoomId })
+        const firstJoin = await settle(joinView.join({ meta: { name: 'First' } }))
+        await joinView.join({ meta: { name: 'Second' } })
+        await pollUntil(() => ({ done: joinView.count === 1 }))
+        const listed = await onListParticipantNames(joinRoomId)
+
+        const [lostRoomId, lostView] = await createRoom('hiccup-lost-leave')
+        const lostLeaves: string[] = []
+        lostView.onLeave((member, cause) => lostLeaves.push(`${member.meta.name}:${cause.type}`))
+        const leaver = await lostView.join({ meta: { name: 'Leaver' } })
+        // The leave commits, but its event never reaches this server, and its reply is lost.
+        await onFailBackend({ op: 'deliver', roomId: lostRoomId, key: 'control' })
+        await onFailBackend({ op: 'runOperation', roomId: lostRoomId, key: 'leave', after: true })
+        const lostLeave = await settle(leaver.leave())
+        // The next control frame shows the server the one it missed, which a roster read repairs.
+        await lostView.join({ meta: { name: 'Next' } })
+        await pollUntil(() => ({ done: lostLeaves.length > 0 }))
+
+        const [dmRoomId, dmView] = await createRoom('hiccup-lost-dm')
+        const sender = await dmView.join({ meta: { name: 'Sender' } })
+        const recipient = await dmView.join({ meta: { name: 'Recipient' } })
+        const dms: unknown[] = []
+        recipient.listen((data) => void dms.push(data))
+        // The DM commits, but its handoff fails and it never reaches the recipient.
+        await onFailBackend({ op: 'deliver', roomId: dmRoomId, key: 'inbox' })
+        await onFailBackend({ op: 'handoff', roomId: dmRoomId, key: 'inbox' })
+        const lostDm = await settle(sender.send(recipient.id, 'lost'))
+        await sender.send(recipient.id, 'after')
+        await pollUntil(() => ({ done: dms.length > 0 }))
+
+        const [laneRoomId, laneView] = await createRoom('hiccup-lane')
+        const got: string[] = []
+        laneView.subscribe((data) => got.push(textOf(data)))
+        const speaker = await laneView.join({ meta: { name: 'Speaker' } })
+        await speaker.publish('before')
+        await pollUntil(() => ({ done: got.includes('before') }))
+        const dropped = await onDropBackendSubscriptions(laneRoomId)
+        await speaker.publish('after')
+        await pollUntil(() => ({ done: got.includes('after') }))
+
+        setResult(
+          JSON.stringify({
+            leave: { firstLeave, publishAfter, secondLeave, leaves, count: leaveView.count },
+            join: { firstJoin, count: joinView.count, listed },
+            lost: { leave: lostLeave, leaves: lostLeaves, dm: lostDm, dms },
+            lane: { dropped: dropped > 0, got },
+          }),
+        )
+      })}
+
+      {scenario('hiccups-departed', null, "A departed member's eviction fails once", async () => {
+        const [roomId, room] = await createRoom('hiccup-departed')
+        const events: string[] = []
+        room.onJoin((member) => events.push(`join:${member.meta.name}`))
+        room.onLeave((member, cause) => events.push(`leave:${member.meta.name}:${cause.type}`))
+        // The test joins `Mallory` from another tab, whose malformed request then drops its connection.
+        await onFailBackend({ op: 'runOperation', roomId, key: 'leave' })
+        await pollUntil(() => ({ result: { roomId, events }, done: events.length === 2 }), 150)
+      })}
+
+      {scenario('hiccups-heartbeat', null, 'A failed write healed by the heartbeat', async () => {
+        const viewRoomId = `e2e-hiccup-view:${crypto.randomUUID()}`
+        // Past the 30 s heartbeat, which restores what the store failed to keep.
+        await onCreateRoomClosingAfter(viewRoomId, 35_000)
+        // The room closes then unless the heartbeat restored its view's hold; 5 s for that close to land.
+        const closedUnlessHealedAt = performance.now() + 40_000
+        // The write of this page's view, which holds the room.
+        await onFailBackend({ op: 'runOperation', roomId: viewRoomId, key: 'holdViews' })
+        const view = await onGetRoom(viewRoomId)
+
+        const [joinRoomId, joinView] = await createRoom('hiccup-join')
+        await onFailBackend({ op: 'runJoin', roomId: joinRoomId })
+        const firstJoin = await joinView.join({ meta: { name: 'First' } }).then(
+          () => 'ok',
+          (err: Error) => err.message,
+        )
+        await joinView.join({ meta: { name: 'Second' } })
+        setResult(JSON.stringify({ waiting: true }))
+
+        await pollUntil(async () => {
+          const listed = await onListParticipantNames(joinRoomId)
+          return { done: listed.length === 1 && performance.now() >= closedUnlessHealedAt }
+        }, CLOSED_TAB_POLLS)
+        setResult(
+          JSON.stringify({
+            viewRoom: { listed: await onListRooms(viewRoomId), isClosed: view.isClosed },
+            joinRoom: { firstJoin, listed: await onListParticipantNames(joinRoomId), count: joinView.count },
+          }),
+        )
+      })}
+
+      {scenario('scale', null, 'A room of 100,000 members', async () => {
+        const roomId = `e2e-scale:${crypto.randomUUID()}`
+        const seedStart = performance.now()
+        await onSeedRoom(roomId, 100_000)
+        const seedMs = Math.round(performance.now() - seedStart)
+        const view = await onGetRoom(roomId)
+        await onSeedChurn(roomId)
+        let names: string[] = []
+        await pollUntil(async () => {
+          names = view.getParticipants().map((member) => textOf(member.meta.name))
+          return { done: names.includes('late') }
+        }, 300)
+        const roster = {
+          count: view.count,
+          listed: new Set(names).size,
+          late: names.includes('late'),
+          m0: names.includes('m0'),
+        }
+        // Through the room's next 30 s heartbeat.
+        const pings: number[] = []
+        const pingUntil = performance.now() + 32_000
+        while (performance.now() < pingUntil) {
+          const start = performance.now()
+          await onPing()
+          pings.push(performance.now() - start)
+          await new Promise((r) => setTimeout(r, 50))
+        }
+        setResult(
+          JSON.stringify({
+            roster,
+            pings: pings.length,
+            maxPingMs: Math.round(Math.max(...pings)),
+            seedMs,
+          }),
+        )
+      })}
+
+      {scenario('away-join', 'Joining while offline', 'Another member leaves meanwhile', async () => {
+        const [roomId, view] = await createRoom('away-join')
+        const leaves: unknown[] = []
+        view.onLeave((member, cause) => leaves.push([member.meta.name, cause]))
+        await onRoomLeaveWhileJoining(roomId)
+        await pollUntil(() => ({ done: view.count === 1 }))
+        const { promise: joinStarted, resolve } = Promise.withResolvers<void>()
+        startAwayJoin = resolve
+        setResult(JSON.stringify({ roomId }))
+        await joinStarted
+        const me = await view.join({ meta: { name: 'Me' } })
+        await pollUntil(() => ({ done: leaves.length > 0 }))
+        setResult(JSON.stringify({ roomId, joined: me.id !== undefined, leaves, count: view.count }))
+      })}
+      <button id="test-room-away-join-now" onClick={() => startAwayJoin?.()}>
+        Join now
+      </button>
+    </div>
+  )
+}

@@ -1,0 +1,72 @@
+export { readPrefix, readPrefixAt, readOpenCells, deleteCells }
+export type { CellsAt, Kept }
+
+import type { CellsBeside, CellsRead } from '../../backend/contract.js'
+import type { RoomStore } from '../../backend/RoomStore.js'
+import { Slice } from '../../shared/Slice.js'
+import { roomClosedError } from '../../shared/errors.js'
+
+// A room's cells, read and deleted by the incarnation's server code: a read that throws once the incarnation closed.
+
+/** The cells under `prefix`, a page and a `ROOM_PLAN_SLICE_MS` slice at a time. */
+async function readPrefix(
+  store: RoomStore,
+  roomId: string,
+  inc: string,
+  prefix: string,
+): Promise<Map<string, Uint8Array>> {
+  return (await readPrefixAt(store, roomId, inc, prefix)).cells
+}
+
+/** Cells read, the authority time of the last page's read, the keys of those that lapsed by their page's read, and the
+ *  keys of the cells a `Kept` left out. */
+type CellsAt = { cells: Map<string, Uint8Array>; now: number; lapsed: Set<string>; left: string[] }
+
+/** A read's `beside`, and which of a read's cells to keep, judged by the read they came in. */
+type Kept = { beside: CellsBeside; keeps(read: Extract<CellsRead, { kind: 'read' }>, key: string): boolean }
+
+async function readPrefixAt(
+  store: RoomStore,
+  roomId: string,
+  inc: string,
+  prefix: string,
+  kept?: Kept,
+): Promise<CellsAt> {
+  const cells = new Map<string, Uint8Array>()
+  const lapsed = new Set<string>()
+  const left: string[] = []
+  let now = 0
+  const slice = new Slice()
+  for await (const page of store.reads.readCellPages(roomId, inc, prefix, kept?.beside)) {
+    if (page.kind === 'stale-incarnation') throw roomClosedError(roomId)
+    for (const [key, raw] of page.cells) {
+      if (kept !== undefined && !kept.keeps(page, key)) left.push(key)
+      else {
+        cells.set(key, raw)
+        if (page.lapsed.has(key)) lapsed.add(key)
+      }
+    }
+    now = page.now
+    if (slice.over) await slice.next()
+  }
+  return { cells, now, lapsed, left }
+}
+
+async function readOpenCells(
+  store: RoomStore,
+  roomId: string,
+  inc: string,
+  keys: string[],
+  beside?: CellsBeside,
+): Promise<Extract<CellsRead, { kind: 'read' }>> {
+  const read = await store.reads.readCells(roomId, inc, beside === undefined ? { keys } : { keys, beside })
+  if (read.kind === 'stale-incarnation') throw roomClosedError(roomId)
+  return read
+}
+
+/** Deletes `keys` in one exchange; false once the incarnation is stale. */
+async function deleteCells(store: RoomStore, roomId: string, inc: string, keys: Iterable<string>): Promise<boolean> {
+  const mutations = Array.from(keys, (key) => ({ key, bytes: null }))
+  const result = await store.compareExchangeCells(roomId, inc, { expect: [], mutations })
+  return result.kind !== 'stale-incarnation'
+}

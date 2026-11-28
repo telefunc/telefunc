@@ -4,37 +4,34 @@ import type { Readable } from 'node:stream'
 import { parseTransform, type Reviver } from '@brillout/json-serializer/parse'
 import { assertUsage, getProjectError, assert } from '../../../utils/assert.js'
 import { getTelefunctionKey } from '../../../utils/getTelefunctionKey.js'
-import { getUrlPathname } from '../../../utils/getUrlPathname.js'
+import { getRequestPathname } from '../../../utils/getUrlPathname.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/values/server/request/registry.js'
-import { BodyReader } from '../../../wire-protocol/wire/BodyReader.js'
+import { BodyReader, OversizeFrameError, StreamTruncatedError } from '../../../wire-protocol/wire/BodyReader.js'
+import type { ClientLeft } from './clientLeft.js'
+import type { TakesUpgrades } from './takesUpgrades.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire-protocol/wire/requestKind.js'
 import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
 import { getChannelMux } from '../../../wire-protocol/channel/server/ChannelMux.js'
+import { carryChannel } from './carryChannel.js'
 import { ChannelStreamSource } from '../../../wire-protocol/values/ChannelStreamSource.js'
-import { GcRegistry } from '../../../utils/GcRegistry.js'
+import { queueMemory } from '../../../wire-protocol/channel/server/channelMemory.js'
 import { wrapProxy } from '../../../utils/wrapProxy.js'
-import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import type { ServerReviverContext } from '../../../wire-protocol/values/types.js'
-import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
-import { handleStreamFlowRequest } from '../../../wire-protocol/values/server/response/StreamFlow.js'
+import { CALL_METADATA_MAX_BYTES, isStreamTransport, type StreamTransport } from '../../../wire-protocol/constants.js'
+import { isCallWant, type CallWant } from '../../../wire-protocol/wire/payloads.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/channel/server/sse.js'
+import { REQUEST_KIND_REFUSAL, type Refusal } from '../../../wire-protocol/refusal.js'
 import { buildShieldValidators, getArgumentShields, type ShieldLogConfig } from '../shield.js'
 import { toPathKey } from '../../../utils/pathKey.js'
 import type { Telefunction } from '../types.js'
 import { getServerExtensionTypes } from '../serverConfig.js'
-
-// Holder-side GC tracking of revived request stubs (callback channels, streams). One shared
-// instance: it's a passive FinalizationRegistry, and its scan timer runs only while stubs are
-// tracked (see GcRegistry) — so it keeps nothing alive and doesn't block hibernation when idle.
-// It must NOT be created per-request: a per-request closure hung on the (rooted) request context
-// pins that request's `envelope.args` via the V8 scope chain, so the stub is never collected.
-const globalObject = getGlobalObject('node/server/runTelefunc/parseHttpRequest.ts', {
-  gcRegistry: new GcRegistry(),
-})
+import { handleTelefunctionBug } from './validateTelefunctionError.js'
+import { holdUploadResponse } from '../../../workarounds/denoUploadResponseHold.js'
+import { node22AbortSignalLag } from '../../../workarounds/node22AbortSignalLag.js'
 
 type RunContext = {
   request: Request
@@ -42,6 +39,14 @@ type RunContext = {
    *  consumers (SSE upstream, binary RPC) prefer it over `request.body` to skip Node's
    *  webstreams `dequeueValue` overhead. Other runtimes only ever pass `request`. */
   readable?: Readable
+  /** Whether a failed read of the body is the client leaving, as the adapter that received the request says. */
+  clientLeft: ClientLeft
+  /** Aborts once the client left, and only then, as the same adapter says. */
+  clientGone: AbortSignal
+  /** Whether the server that received the request takes WebSocket upgrades, as its adapter says. */
+  takesUpgrades: TakesUpgrades
+  /** The adapter's, called once the body is read: `HttpRequestResolved['onBodyRead']`. */
+  onBodyRead?: () => void
   requestContext: RequestContext
   logMalformedRequests: boolean
   serverConfig: {
@@ -65,18 +70,21 @@ type ParseResult =
       telefuncFilePath: string
       telefunctionName: string
       telefunctionKey: string
+      /** The wants of the page's broadcasts the server hasn't confirmed to it, where there are any. */
+      wants: CallWant[] | undefined
       resolveRequest: (telefunction: Telefunction) => ResolvedRequest
-      wireResponse?: undefined
+      isSseRequest: false
       isMalformedRequest: false
     }
-  | { isMalformedRequest: false; wireResponse: SseChannelHttpResponse }
-  | { isMalformedRequest: true }
+  | { isMalformedRequest: false; isSseRequest: true; sseResponse: SseChannelHttpResponse }
+  /** `refusal`: Telefunc's own, which the answer marks. */
+  | { isMalformedRequest: true; refusal?: Refusal }
 
 async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   assertUrl(runContext)
   if (isWrongMethod(runContext)) return { isMalformedRequest: true }
 
-  const { request, readable, requestContext, serverConfig } = runContext
+  const { request, readable, clientLeft, takesUpgrades, onBodyRead, requestContext, serverConfig } = runContext
   const requestKind = getRequestKind(request, serverConfig.telefuncUrl)
 
   if (requestKind === REQUEST_KIND.INVALID) {
@@ -84,32 +92,27 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
       `The \`${REQUEST_KIND_HEADER}\` header of the HTTP request is missing, invalid, or contradicts the \`_telefunc\` URL parameter.`,
       runContext,
     )
-    return { isMalformedRequest: true }
+    return { isMalformedRequest: true, refusal: REQUEST_KIND_REFUSAL }
   }
   if (requestKind === REQUEST_KIND.SSE) {
-    const sseResponse = await handleSseChannelRequest(request, readable)
-    return { isMalformedRequest: false, wireResponse: sseResponse }
-  }
-  if (requestKind === REQUEST_KIND.FLOW) {
-    const { text } = await readBody(request, readable, REQUEST_KIND.TEXT)
-    return { isMalformedRequest: false, wireResponse: handleStreamFlowRequest(text) }
+    const sseResponse = await handleSseChannelRequest(request, readable, clientLeft, takesUpgrades, onBodyRead)
+    return { isMalformedRequest: false, isSseRequest: true, sseResponse }
   }
 
   // Body + base reviver context (file handling differs between binary and text; channels are the same).
-  const mux = getChannelMux()
   const createChannel = <ClientToServer, ServerToClient>(opts: { id: string; ack?: boolean }) => {
     const channel = new ServerChannel<ClientToServer, ServerToClient>(opts)
-    mux.registerChannel(channel)
-    channel._setResponseAbort(requestContext.responseAbort.abort)
-    channel.onClose(requestContext.trackPending())
+    carryChannel(channel, requestContext)
     return channel
   }
-  const { text, registerFile, consumeFile } = await readBody(request, readable, requestKind)
+  const body = await readBody(request, readable, clientLeft, requestKind, runContext)
+  if (body.isMalformedRequest) return body
+  const { text, registerFile } = body
   const baseContext: Omit<ServerReviverContext, 'validators'> = {
     registerFile,
-    consumeFile,
     createChannel,
-    receiveStream: ({ channelId }) => ChannelStreamSource.create(createChannel({ id: channelId })),
+    receiveStream: ({ channelId }) =>
+      ChannelStreamSource.create(createChannel({ id: channelId }), { memory: queueMemory() }),
   }
 
   // Routing must be known before the target telefunc module can load. Parse JSON structure only;
@@ -117,10 +120,18 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   const envelope = parseEnvelope(text, runContext)
   if (envelope.isMalformedRequest) return envelope
 
+  const wants = wantsOf(envelope.raw)
+  if (wants === null) {
+    logParseError('Telefunc request body has unexpected `wants`', runContext)
+    return { isMalformedRequest: true }
+  }
+
   return {
     telefuncFilePath: envelope.telefuncFilePath,
     telefunctionName: envelope.telefunctionName,
     telefunctionKey: envelope.telefunctionKey,
+    wants,
+    isSseRequest: false,
     isMalformedRequest: false,
     resolveRequest(telefunction) {
       const { requestTypes } = getServerExtensionTypes()
@@ -142,14 +153,20 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
           ...baseContext,
           validators: buildShieldValidators(shields[toPathKey(segments)] ?? {}, shieldCtx),
         }),
-        ({ value, close, abort }) => {
+        ({ value, close, abort, onEnd }) => {
           assert(isObjectOrFunction(value))
           // Holder side: the telefunction gets a GC-anchor wrapper; once it drops it, the
           // underlying channel/stream closes and the client releases the original.
           const wrapper = wrapProxy(value)
-          // Forgotten once the call's channels have closed, so the scan doesn't wait for a collection to stop.
-          requestContext.onClose(globalObject.gcRegistry.register(wrapper, close))
-          requestContext.onTopLevelError(close)
+          // Holder-side GC tracking of revived request stubs (callback channels, streams), in the mux's registry: its
+          // scan timer runs only while stubs are tracked, so it keeps nothing alive and doesn't block hibernation when idle.
+          const forget = getChannelMux().gcRegistry.register(wrapper, close)
+          // Forgotten once nothing is left for `close` to do, so the scan doesn't wait for a collection to stop: at the
+          // value's end where it has one (a File's, once its bytes are gone, which may be past the call), else once the
+          // call's channels have closed.
+          if (onEnd) onEnd(forget)
+          else requestContext.onClose(forget)
+          requestContext.onCallFailed(close)
           requestContext.responseAbort.onAbort(abort)
           return wrapper
         },
@@ -165,35 +182,144 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
 }
 
 /** Reads the HTTP body and returns the metadata text plus the file handlers appropriate for the
- *  request kind. Binary requests frame files after the JSON envelope; text requests carry no files. */
+ *  request kind. Binary requests frame files after the JSON envelope; text requests carry no files. A binary request
+ *  whose metadata declares more than the server reads (`CALL_METADATA_MAX_BYTES`) is malformed, refused before any of its metadata is read,
+ *  and so is one whose body ends before its envelope is complete. A
+ *  binary request's body is read off to its end at the call's answer where a returned value holds the request
+ *  (`keepRest`), else at its end (`readOffBody`), kept for the files a File can still read. */
 async function readBody(
   request: Request,
   readable: Readable | undefined,
+  clientLeft: ClientLeft,
   requestKind: typeof REQUEST_KIND.BINARY | typeof REQUEST_KIND.TEXT,
-): Promise<{
-  text: string
-  registerFile: ServerReviverContext['registerFile']
-  consumeFile: ServerReviverContext['consumeFile']
-}> {
+  runContext: RunContext,
+): Promise<
+  | {
+      isMalformedRequest: false
+      text: string
+      registerFile: ServerReviverContext['registerFile']
+    }
+  | { isMalformedRequest: true }
+> {
   if (requestKind === REQUEST_KIND.BINARY) {
     const source = readable ?? request.body
-    assert(source)
-    const reader = new BodyReader(source)
+    // No Telefunc client sends a binary request without a body.
+    if (!source) {
+      logParseError('The binary request ends before its envelope is complete.', runContext)
+      return { isMalformedRequest: true }
+    }
+    const reader = new BodyReader(source, clientLeft, queueMemory)
+    reader.onEnd = runContext.onBodyRead
+    // On Deno, the hold keeps the response open until the upload is over (workarounds/denoUploadResponseHold.ts).
+    const hold = holdUploadResponse(request, runContext.clientGone, reader.restRead)
+    runContext.requestContext.responseHold = hold
+    const clientGone = hold?.clientGone ?? runContext.clientGone
+    // While an unattached channel's upload is still arriving (for example on half-duplex clients that read the response
+    // only after the upload finishes), each chunk resets its connectTtl inactivity window. An upload that stops, at its
+    // end or as its client goes silent, leaves its last byte as the sign; one that stopped short for a whole connect
+    // window is given up on, with its files.
+    let lastByteAt = performance.now()
+    reader.onChunk = () => {
+      lastByteAt = performance.now()
+    }
+    runContext.requestContext.page = { lastSign: () => lastByteAt, neverCame: () => reader.clientGaveUp() }
+    // From the answer on, a read of the body may not end where its client leaves (Node no longer watches the request):
+    // the adapter's evidence says it. Watched again, it adds nothing.
+    const leftByClient = () => reader.leftByClient(clientGone.reason)
+    const watchClient = () => {
+      clientGone.removeEventListener('abort', leftDuringCall)
+      if (clientGone.aborted) leftByClient()
+      else clientGone.addEventListener('abort', leftByClient, { once: true })
+    }
+    // While the call runs, the file reads end as the client leaves, once a read of the body under way took its failure.
+    const leftDuringCall = () => void giveUpOnceReadSettled(reader)
+    clientGone.addEventListener('abort', leftDuringCall, { once: true })
+    // Half-duplex clients deliver the answer only once they have sent the whole body: where a returned value holds the
+    // request on, the rest of the body is read now, and kept for the call's files within what the channels' memory
+    // allows.
+    runContext.requestContext.onAnswered(() => {
+      reader.keepRest()
+      watchClient()
+    })
+    runContext.requestContext.onClose(() => void readOffBody(reader, clientGone, watchClient))
+    const metadata = await reader
+      .readFrame(CALL_METADATA_MAX_BYTES)
+      .catch((err: unknown): 'oversize' | StreamTruncatedError => {
+        if (err instanceof OversizeFrameError) return 'oversize'
+        if (err instanceof StreamTruncatedError) return err
+        throw err
+      })
+    if (metadata === 'oversize') {
+      logParseError(
+        `The binary request declares more metadata than the server reads (over ${CALL_METADATA_MAX_BYTES} bytes).`,
+        runContext,
+      )
+      return { isMalformedRequest: true }
+    }
+    const envelope = metadata ?? reader.truncation()
+    if (envelope instanceof StreamTruncatedError) {
+      // A client that left, or a read nothing explains: the call's truncation.
+      if (envelope.by !== 'body') throw envelope
+      logParseError('The binary request ends before its envelope is complete.', runContext)
+      return { isMalformedRequest: true }
+    }
     return {
-      text: await reader.readMetadata(Number.POSITIVE_INFINITY),
+      isMalformedRequest: false,
+      text: new TextDecoder().decode(envelope),
       registerFile: (i, s) => reader.registerFile(i, s),
-      consumeFile: (i, s) => reader.consumeFile(i, s),
     }
   }
+  const text = await readText(request, clientLeft)
+  runContext.onBodyRead?.()
   return {
-    text: await request.text(),
-    registerFile: () => {},
-    consumeFile: () =>
-      new ReadableStream<Uint8Array<ArrayBuffer>>({
-        start(controller) {
-          controller.error(new Error('No binary frame'))
-        },
-      }),
+    isMalformedRequest: false,
+    text,
+    registerFile: () => ({
+      stream: () =>
+        new ReadableStream<Uint8Array<ArrayBuffer>>({
+          start(controller) {
+            controller.error(new Error('No binary frame'))
+          },
+        }),
+      letGo() {},
+      onGone: (callback) => callback(),
+    }),
+  }
+}
+
+/** Ends the file reads of `reader`, whose client left, once the read of the body under way took its failure. */
+async function giveUpOnceReadSettled(reader: BodyReader): Promise<void> {
+  await reader.readSettled()
+  reader.clientGaveUp()
+}
+
+/** At the call's end, reads the rest of its body, kept for each File the app can still read and else dropped: a
+ *  connection the client keeps alive carries its next request only after this one's body (Node's HTTP server parses it
+ *  from there). On Node, the server's `requestTimeout` bounds the read; Bun and Deno let a client that trickles its body
+ *  hold the connection as long as it sends, as they do without Telefunc. A failure that is the app's own error is a bug;
+ *  a client that left ends it quietly. `watchClient`: from now on, the client's leaving ends the read. */
+async function readOffBody(reader: BodyReader, signal: AbortSignal, watchClient: () => void): Promise<void> {
+  // A client that left (on Node 22.0, the Node adapter's `AbortSignal.any()` signal says so only once its source's
+  // `abort` listeners ran, so the wait lets that dispatch finish) fails the read under way, which settles first to keep
+  // its own failure; an answered call's read may wait on the client, so it isn't awaited.
+  if (!signal.aborted) await node22AbortSignalLag()
+  if (signal.aborted) await reader.readSettled()
+  watchClient()
+  try {
+    await reader.endCall(signal.aborted ? 'client' : 'server')
+  } catch (err: unknown) {
+    handleTelefunctionBug(err)
+  }
+}
+
+/** A text call's body, as the platform reads it. A read that fails as its client leaves is a truncated body, as a binary
+ *  call's is; any other failure, and one nothing explains (`noTransportEvidence`), is thrown as it is. */
+async function readText(request: Request, clientLeft: ClientLeft): Promise<string> {
+  try {
+    return await request.text()
+  } catch (err) {
+    if (clientLeft(err)) throw new StreamTruncatedError('client', { cause: err })
+    throw err
   }
 }
 
@@ -257,6 +383,13 @@ function envelopeFrom(parsed: unknown, runContext: RunContext): Envelope {
   }
 }
 
+/** The call's `wants`, of the page's broadcasts on all its connections: null where they're malformed. */
+function wantsOf(raw: object): CallWant[] | undefined | null {
+  if (!hasProp(raw, 'wants')) return undefined
+  const { wants } = raw
+  return Array.isArray(wants) && wants.every(isCallWant) ? wants : null
+}
+
 function logParseException(err: unknown, runContext: RunContext) {
   logParseError(
     ["Telefunc request body couldn't be parsed.", !hasProp(err, 'message') ? null : `Parse error: ${err.message}.`]
@@ -266,16 +399,10 @@ function logParseException(err: unknown, runContext: RunContext) {
   )
 }
 
-const VALID_STREAM_TRANSPORTS: StreamTransport[] = [
-  STREAM_TRANSPORT.BINARY_INLINE,
-  STREAM_TRANSPORT.SSE_INLINE,
-  STREAM_TRANSPORT.CHANNEL,
-]
-
 function resolveStreamTransport(parsed: object, fallback: StreamTransport): StreamTransport {
-  if (!hasProp(parsed, 'stream', 'object') || !hasProp(parsed.stream, 'transport', 'string')) return fallback
-  const transport = parsed.stream.transport as StreamTransport
-  return VALID_STREAM_TRANSPORTS.includes(transport) ? transport : fallback
+  if (!hasProp(parsed, 'stream', 'object') || !hasProp(parsed.stream, 'transport')) return fallback
+  const { transport } = parsed.stream
+  return isStreamTransport(transport) ? transport : fallback
 }
 
 function isWrongMethod(runContext: { request: Request; logMalformedRequests: boolean }) {
@@ -287,7 +414,7 @@ function isWrongMethod(runContext: { request: Request; logMalformedRequests: boo
 }
 
 function assertUrl(runContext: { request: Request; serverConfig: { telefuncUrl: string } }) {
-  const urlPathname = getUrlPathname(runContext.request.url)
+  const urlPathname = getRequestPathname(runContext.request.url)
   assertUsage(
     urlPathname === runContext.serverConfig.telefuncUrl,
     `serve({ url }): The pathname of \`url\` is \`${urlPathname}\` but it's expected to be \`${runContext.serverConfig.telefuncUrl}\`. Either make sure that \`url\` is the HTTP request URL, or set \`config.telefuncUrl\` to \`${urlPathname}\`.`,

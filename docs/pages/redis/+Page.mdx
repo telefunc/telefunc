@@ -5,15 +5,15 @@ import { TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
-Redis-backed <Link href="/channel#broadcast">broadcast</Link> fan-out across server instances — a `publish()` on any instance reaches every `subscribe()` on every other instance.
-
-> You only need this if you scale horizontally — see <Link href="/stream/scale" />.
+Use Redis to share <Link href="/channel#broadcast">broadcasts</Link> and <Link href="/room">rooms</Link> across your Telefunc servers.
 
 ## Install
 
 ```bash
 npm install @telefunc/redis ioredis
 ```
+
+Point every Telefunc server at the same Redis 5 or later:
 
 ```ts
 // Environment: server
@@ -25,11 +25,46 @@ const redis = new IORedis('redis://localhost:6379')
 installRedis(redis)
 ```
 
-That swaps the default in-memory broadcast transport for one backed by Redis Pub/Sub. All subscribers across the cluster observe the same publish order for a given key.
+Call `installRedis()` in your server entry before using Broadcast or Room. Pass your existing [ioredis](https://github.com/redis/ioredis) client to reuse its TLS or authentication settings. To rotate credentials, call `installRedis()` again with a new client for the same Redis deployment.
 
-### Sharing an existing client
+> Use `maxmemory-policy noeviction` when running rooms, whose state is stored in Redis.
 
-Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster instance when you want to share a connection or set custom options such as TLS or a retry strategy.
+> Use `installRedis(redis, { prefix })` for a dedicated key and channel prefix (default: `tf:`). Configure <Link href="/stream/scale#sticky-sessions">sticky sessions</Link> for browser connections.
+
+### Redis Cluster
+
+```ts
+// Environment: server
+
+import { Cluster } from 'ioredis'
+import { installRedis } from '@telefunc/redis'
+
+installRedis(new Cluster([{ host: '127.0.0.1', port: 7000 }]))
+```
+
+### Redis Sentinel
+
+```ts
+// /server/index.ts
+// Environment: server
+
+import IORedis from 'ioredis'
+import { installRedis } from '@telefunc/redis'
+
+installRedis(new IORedis({ sentinels: [{ host: '127.0.0.1', port: 26379 }], name: 'mymaster' }))
+```
+
+> Set `name` to the primary group Sentinel monitors. Set `password` for Redis authentication and `sentinelPassword` for Sentinel authentication.
+
+### A Redis user of its own
+
+To give Telefunc a Redis user that may do only what it needs, create it on Redis 7 or later with this [ACL](https://redis.io/docs/latest/operate/oss_and_stack/management/security/acl/) rule, with your prefix in place of `tf:`:
+
+```bash
+redis-cli ACL SETUSER telefunc on '>your-password' '~tf:*' resetchannels '&tf:*' +evalsha +eval +get +set +del +unlink +exists +type +incr +pexpireat +time +hget +hmget +hset +hdel +hexists +hlen +hkeys +hscan +sadd +srem +scard +smembers +sscan +zadd +zrem +zrangebylex +zrangebyscore +publish +subscribe +unsubscribe +ping +info +client\|setname +cluster\|slots +cluster\|info +asking
+```
+
+Then connect as that user, with the same prefix:
 
 ```ts
 // Environment: server
@@ -37,17 +72,48 @@ Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster 
 import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 
-const redis = new IORedis(process.env.REDIS_URL, { tls: {} })
-installRedis(redis)
+const redis = new IORedis('redis://telefunc:your-password@localhost:6379')
+installRedis(redis, { prefix: 'tf:' })
 ```
 
-Internally, Telefunc calls `duplicate()` on the client to open a dedicated subscriber connection — your instance is never mutated or disconnected. You can continue to use it alongside Telefunc without interference.
+## Errors
 
-## Channels
+When Redis can't run a publish or Room operation, use <Link href="/error-handling">`BackendError`</Link> to handle the failure:
 
-`Channel` is per-instance. Reconnects must land on the instance holding the channel's state, so multi-instance deployments need sticky sessions at the load balancer. See <Link href="/stream/scale" />.
+```ts
+// Environment: server
+
+import { Broadcast, BackendError } from 'telefunc'
+
+try {
+  await Broadcast.publish('chat', { text: 'hello' })
+} catch (err) {
+  if (!(err instanceof BackendError)) throw err
+  console.error(err.code, err.outcome, err.message)
+}
+```
+
+| `code` | When |
+|---|---|
+| `unreachable` | Redis is disconnected or took too long to answer. |
+| `unavailable` | Redis can't serve the operation, for example while loading data or at its memory limit. |
+| `denied` | Credentials, permissions, or disabled commands prevent the operation. |
+| `failed` | Redis returned another error. |
+
+Retry a read or a call with `outcome: 'not-run'` after resolving the error. With `'may-have-run'`, check the current state before retrying a write. Repeating a publish or private send can deliver it twice.
+
+## Subscriptions
+
+Await the subscription's `opened` before relying on delivery. A subscription waiting to open during a disconnect can open when Redis comes back. If Redis refuses it, restore access and subscribe again. See <Link href="/channel#delivery" /> for messages missed during a disconnect.
+
+## Limitations
+
+- A message is 28 MiB at most: a `publish()` or `publishBinary()` over that rejects with `ChannelOverflowError`. At its default [output buffer limits](https://redis.io/docs/latest/develop/reference/clients/#output-buffer-limits), Redis closes the connection that receives a larger message. For a larger payload, publish a reference to it, such as a URL.
+- Redis replicates asynchronously, so a failover can lose a write the old primary acknowledged, such as a `Room.updateMeta()` that resolved just before it. The rooms on every server then catch up to what the new primary holds.
+- Telefunc follows a failover through Redis Sentinel or Redis Cluster. A `FAILOVER` of a standalone Redis without Sentinel gives no new primary to follow: use Sentinel or Cluster for automatic failover.
 
 ## See also
 
 - <Link href="/stream/scale" />
 - <Link href="/channel" />
+- <Link href="/room" />

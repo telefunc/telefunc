@@ -65,6 +65,8 @@ import { TelefuncStreamBeta } from '../../components'
 
 1. <Link href="#channel"><code>Channel</code></Link>: API for advanced real-time use cases.
 
+1. <Link href="#room"><code>Room</code></Link>: presence, messages, and media tracks for a group.
+
 > A single telefunction can [mix primitives](https://gist.github.com/brillout/155c8eb4cbaa043bc52e96c0c2ed7086) (generators, channels, promises, ...) side by side, each resolving independently.
 
 #### Integrations
@@ -78,7 +80,7 @@ import { TelefuncStreamBeta } from '../../components'
 
 ✅ **Runtime type validation** — automatically validates every value sent from the client to the server <Link href="/shield#typescript-automatic">against your TypeScript types</Link> (no need for Zod).  
 ✅ **Transport** — automatically picks the most performant available <Link href="/transport">transport (HTTP, SSE, WebSocket)</Link>.  
-✅ **Backpressure** — <Link href="/channel#backpressure">automatic backpressure</Link> when the network is the bottleneck, and for each returned stream on its own <Link href="/transport">where the page can reach the server holding it</Link>: one the page isn't reading stops its producer while the others keep flowing.  
+✅ **Backpressure** — <Link href="/channel#backpressure">automatic backpressure</Link> when the network is the bottleneck.  
 ✅ **Reconnection** — <Link href="/channel#reconnection">automatic recovery</Link> from network issues.  
 
 
@@ -301,7 +303,9 @@ while (true) {
 
 > You can also return a `File` or `Blob` instead, see: <Link href="/file-download" />.
 
-> If a call returns several streams, the client holds the data of a stream your code isn't reading until your code reads or cancels that stream.
+##### Limitations {#inline-stream-limitations}
+
+> By default, returned values share one HTTP response, so a stream left unread past 1 MiB pauses later values until you read or cancel it. Read returned streams concurrently or cancel the ones you don't need.
 
 
 #### Client → server
@@ -432,6 +436,10 @@ channel.listen((metrics) => updateCharts(metrics))
 ```
 
 
+## Primitive: `Room` {#room}
+
+Use <Link href="/room">`Room`</Link> for chat, game lobbies, and other shared spaces with a participant list.
+
 ## Cleanup
 
 **Environment**: server.
@@ -514,7 +522,7 @@ onClose((err) => {
     // Either side called abort(value)
     console.log(err.abortValue)
   } else if (err instanceof NetworkError) {
-    // Connection lost (couldn't reconnect, or missed too much while offline)
+    // Connection lost (couldn't reconnect)
   }
 })
 ```
@@ -571,16 +579,12 @@ export async function* onSearch(query: string) {
 
 ## Scaling
 
-You can scale Telefunc horizontally (multiple server instances across multiple processes, containers, or machines) by adding sticky sessions and a cross-instance broadcast transport.
-
-See: <Link href="/stream/scale" />.
+Use <Link href="/stream/scale">sticky sessions</Link> to run channels on multiple servers. To share broadcasts and rooms across servers, install <Link href="/redis" />.
 
 
 ## Cloudflare
 
-On Cloudflare Workers, Telefunc routes channels through Durable Objects and fans out broadcasts across regions automatically — so neither a sticky load balancer nor a broadcast transport is needed.
-
-See: <Link href="/stream/cloudflare" />.
+Use the <Link href="/stream/cloudflare">Cloudflare adapter</Link> to run channels, broadcasts, and rooms on Workers.
 
 
 ## See also

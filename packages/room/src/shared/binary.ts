@@ -1,0 +1,254 @@
+export {
+  isMemberId,
+  encodeBinaryFrame,
+  encodeMessageFrame,
+  decodeBinaryFrame,
+  decodeFrameMessage,
+  DEFAULT_TRACK,
+  EVERY_MEMBER,
+  EVERY_TRACK,
+  publicTrack,
+  trackKey,
+  isNamedTrack,
+  isRoomTrack,
+}
+export type { TrackKey, EveryMember, EveryTrack, BinaryWantChange, BinaryFrame }
+
+import { utf8ByteLength } from 'telefunc/__internal'
+import { parse } from '@brillout/json-serializer/parse'
+import { stringify } from '@brillout/json-serializer/stringify'
+import { assert, assertUsage } from '../utils/assert.js'
+import { assertKnownOptions, isRecord } from './arguments.js'
+import type { BinaryPublishOptions } from '../types.js'
+
+// Member IDs: UUIDs, framed as a fixed 16-byte prefix on binary messages
+const MEMBER_ID_BYTE_LENGTH = 16
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const BYTE_TO_HEX: string[] = []
+for (let byte = 0; byte < 256; byte++) BYTE_TO_HEX.push(byte.toString(16).padStart(2, '0'))
+
+function isMemberId(value: unknown): value is string {
+  return typeof value === 'string' && UUID_REGEX.test(value)
+}
+
+/** Canonical UUID string → 16 bytes. */
+function uuidToBytes(uuid: string): Uint8Array {
+  assert(isMemberId(uuid), 'room member IDs are UUIDs')
+  const hex = uuid.split('-').join('')
+  const bytes = new Uint8Array(MEMBER_ID_BYTE_LENGTH)
+  for (let i = 0; i < MEMBER_ID_BYTE_LENGTH; i++) bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16)
+  return bytes
+}
+
+/** First 16 bytes → canonical lowercase UUID string. */
+function bytesToUuid(bytes: Uint8Array): string {
+  let uuid = ''
+  for (let i = 0; i < MEMBER_ID_BYTE_LENGTH; i++) {
+    if (i === 4 || i === 6 || i === 8 || i === 10) uuid += '-'
+    const byte = bytes[i]
+    const hex = byte === undefined ? undefined : BYTE_TO_HEX[byte]
+    assert(hex !== undefined)
+    uuid += hex
+  }
+  return uuid
+}
+
+/** Binary frame flags (one byte after the member ID). */
+const FRAME_FLAG_META = 0b0000_0001
+const FRAME_FLAG_TRACK = 0b0000_0010
+const FRAME_FLAG_RETAIN = 0b0000_0100
+/** Set where its publisher passed `lossy: true`. */
+const FRAME_FLAG_LOSSY = 0b0000_1000
+/** Set on a message `publish()` sent on a track: the payload is the message, serialized. */
+const FRAME_FLAG_TEXT = 0b0001_0000
+/** The only bits the framer defines. Any other bit set is a malformed or forward-incompatible frame. */
+const FRAME_FLAGS_KNOWN = FRAME_FLAG_META | FRAME_FLAG_TRACK | FRAME_FLAG_RETAIN | FRAME_FLAG_LOSSY | FRAME_FLAG_TEXT
+/** Structural maxima of the one-byte track-length and two-byte metadata-length fields. */
+const TRACK_LENGTH_FIELD_MAX = 0xff
+const META_LENGTH_FIELD_MAX = 0xffff
+const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
+const frameTextDecoder = /* @__PURE__ */ new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+
+function encodeBinaryFrame(memberId: string, payload: Uint8Array, opts?: BinaryPublishOptions): Uint8Array {
+  assertKnownOptions(opts, ['track', 'meta', 'retain', 'lossy'], 'publishBinary()')
+  return encodeFrame(memberId, payload, opts, 0)
+}
+
+/** The frame of a message `publish()` sends on a track: its payload is the message, serialized. */
+function encodeMessageFrame(memberId: string, message: unknown, opts: BinaryPublishOptions | undefined): Uint8Array {
+  return encodeFrame(memberId, frameTextEncoder.encode(stringify(message)), opts, FRAME_FLAG_TEXT)
+}
+
+function encodeFrame(
+  memberId: string,
+  payload: Uint8Array,
+  opts: BinaryPublishOptions | undefined,
+  kindFlag: number,
+): Uint8Array {
+  assertUsage(
+    opts?.retain === undefined || typeof opts.retain === 'boolean',
+    'publishBinary() options.retain should be a boolean',
+  )
+  assertUsage(
+    opts?.lossy === undefined || typeof opts.lossy === 'boolean',
+    'publishBinary() options.lossy should be a boolean',
+  )
+  const idBytes = uuidToBytes(memberId)
+  let flags = kindFlag | (opts?.retain === true ? FRAME_FLAG_RETAIN : 0)
+  if (opts?.lossy === true) flags |= FRAME_FLAG_LOSSY
+  let trackBytes: Uint8Array | null = null
+  if (opts?.track !== undefined) {
+    assertUsage(
+      isNamedTrack(opts.track),
+      `track should be a non-empty well-formed string of at most ${TRACK_LENGTH_FIELD_MAX} bytes`,
+    )
+    // A frame names the default track by naming none.
+    const track = trackKey(opts.track)
+    if (track !== DEFAULT_TRACK) {
+      trackBytes = frameTextEncoder.encode(track)
+      flags |= FRAME_FLAG_TRACK
+    }
+  }
+  let metaBytes: Uint8Array | null = null
+  if (opts?.meta !== undefined) {
+    assertUsage(isRecord(opts.meta), 'publishBinary() meta should be an object')
+    metaBytes = frameTextEncoder.encode(stringify(opts.meta))
+    assertUsage(
+      metaBytes.byteLength <= META_LENGTH_FIELD_MAX,
+      `publishBinary() meta should be at most ${META_LENGTH_FIELD_MAX} bytes once serialized`,
+    )
+    flags |= FRAME_FLAG_META
+  }
+  const headerLength =
+    MEMBER_ID_BYTE_LENGTH +
+    1 +
+    (trackBytes ? 1 + trackBytes.byteLength : 0) +
+    (metaBytes ? 2 + metaBytes.byteLength : 0)
+  const framed = new Uint8Array(headerLength + payload.byteLength)
+  framed.set(idBytes, 0)
+  framed[MEMBER_ID_BYTE_LENGTH] = flags
+  let offset = MEMBER_ID_BYTE_LENGTH + 1
+  if (trackBytes) {
+    framed[offset] = trackBytes.byteLength
+    framed.set(trackBytes, offset + 1)
+    offset += 1 + trackBytes.byteLength
+  }
+  if (metaBytes) {
+    framed[offset] = (metaBytes.byteLength >> 8) & 0xff
+    framed[offset + 1] = metaBytes.byteLength & 0xff
+    framed.set(metaBytes, offset + 2)
+    offset += 2 + metaBytes.byteLength
+  }
+  framed.set(payload, headerLength)
+  return framed
+}
+
+/** The message a text frame carries, of the listener's own; throws on one no client library framed. */
+function decodeFrameMessage(frame: BinaryFrame): unknown {
+  return parse(frameTextDecoder.decode(frame.payload))
+}
+
+type FrameCursor = { offset: number }
+
+function decodeFrameText(bytes: Uint8Array): string | undefined {
+  try {
+    return frameTextDecoder.decode(bytes)
+  } catch {
+    return undefined
+  }
+}
+
+function readTrackSection(data: Uint8Array, cursor: FrameCursor): string | undefined {
+  const length = data[cursor.offset++]
+  if (length === undefined || length === 0 || data.byteLength < cursor.offset + length) return undefined
+  const track = decodeFrameText(data.subarray(cursor.offset, cursor.offset + length))
+  if (track === undefined) return undefined
+  cursor.offset += length
+  return track
+}
+
+function readMetaSection(data: Uint8Array, cursor: FrameCursor): Record<string, unknown> | undefined {
+  // Past the frame's end, a byte is undefined.
+  const high = data[cursor.offset]
+  const low = data[cursor.offset + 1]
+  if (high === undefined || low === undefined) return undefined
+  const length = (high << 8) | low
+  cursor.offset += 2
+  if (data.byteLength < cursor.offset + length) return undefined
+  const serialized = decodeFrameText(data.subarray(cursor.offset, cursor.offset + length))
+  if (serialized === undefined) return undefined
+  let meta: unknown
+  try {
+    meta = parse(serialized)
+  } catch {
+    return undefined
+  }
+  if (!isRecord(meta)) return undefined
+  cursor.offset += length
+  return meta
+}
+
+type BinaryFrame = {
+  from: string
+  payload: Uint8Array
+  track: TrackKey
+  meta: Record<string, unknown> | null
+  retain: boolean
+  lossy: boolean
+  text: boolean
+}
+
+function decodeBinaryFrame(data: Uint8Array): BinaryFrame | null {
+  const flags = data[MEMBER_ID_BYTE_LENGTH]
+  if (flags === undefined) return null
+  if (flags & ~FRAME_FLAGS_KNOWN) return null
+  const cursor = { offset: MEMBER_ID_BYTE_LENGTH + 1 }
+  const track = flags & FRAME_FLAG_TRACK ? readTrackSection(data, cursor) : DEFAULT_TRACK
+  if (track === undefined) return null
+  const meta = flags & FRAME_FLAG_META ? readMetaSection(data, cursor) : null
+  if (meta === undefined) return null
+  return {
+    from: bytesToUuid(data),
+    payload: data.subarray(cursor.offset),
+    track,
+    meta,
+    retain: !!(flags & FRAME_FLAG_RETAIN),
+    lossy: !!(flags & FRAME_FLAG_LOSSY),
+    text: !!(flags & FRAME_FLAG_TEXT),
+  }
+}
+
+// Tracks
+/** A track inside Room: a name, or `DEFAULT_TRACK`, which the public API calls `'main'`. */
+type TrackKey = string
+/** The default track's key; named tracks are non-empty, so `''` is unambiguous. */
+const DEFAULT_TRACK: TrackKey = ''
+/** The default track's name in the public API: what `publishBinary()` without `track` publishes on. */
+const MAIN_TRACK = 'main'
+/** Every member, and every track, as a want's target; the wire carries `null`. */
+const EVERY_MEMBER: unique symbol = Symbol.for('telefunc.RoomEveryMember')
+const EVERY_TRACK: unique symbol = Symbol.for('telefunc.RoomEveryTrack')
+type EveryMember = typeof EVERY_MEMBER
+type EveryTrack = typeof EVERY_TRACK
+
+function publicTrack(track: TrackKey): string {
+  return track === DEFAULT_TRACK ? MAIN_TRACK : track
+}
+
+/** The track a public name names inside Room. */
+function trackKey(track: string): TrackKey {
+  return track === MAIN_TRACK ? DEFAULT_TRACK : track
+}
+
+/** One change of a holder's binary wants: `track` (or `EVERY_TRACK`) of `member` (or `EVERY_MEMBER`), on or off. */
+type BinaryWantChange = { member: string | EveryMember; track: TrackKey | EveryTrack; on: boolean }
+
+/** Bounded by UTF-8 bytes, the unit of the frame's one-byte track length; a `.length` count could admit a track that
+ *  doesn't fit. */
+function isRoomTrack(track: unknown): track is string {
+  return typeof track === 'string' && track.isWellFormed() && utf8ByteLength(track) <= TRACK_LENGTH_FIELD_MAX
+}
+
+function isNamedTrack(track: unknown): track is string {
+  return isRoomTrack(track) && track.length > 0
+}

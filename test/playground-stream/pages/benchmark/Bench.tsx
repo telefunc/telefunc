@@ -6,8 +6,13 @@ import {
   onBenchBinaryEchoLatency,
   onBenchBinaryServerPush,
   onBenchBinaryThroughput,
+  onBenchBroadcastBinaryPublish,
+  onBenchBroadcastPublish,
+  onBenchBroadcastRoom,
   onBenchEchoLatency,
   onBenchInfo,
+  onBenchRoomTrack,
+  onBenchRoomTrackPublish,
   onBenchServerPush,
   onBenchTextThroughput,
 } from './Bench.telefunc'
@@ -57,6 +62,11 @@ const DRAIN_DEADLINE_MS = 800
 
 const PUSH_COUNT = 60
 const PUSH_SIZES = [64, 4096, 32768, 131072, 524288]
+// The Broadcast and Room Track cards time a burst of about a second or more: BURST_BYTES of messages, at most BURST_MAX,
+// of which the first BURST_WARMUP_SHARE warm the path up and are left out.
+const BURST_BYTES = 192 * 1024 * 1024
+const BURST_MAX = 300_000
+const BURST_WARMUP_SHARE = 0.1
 
 // ── Scenarios ──────────────────────────────────────────────────────────────
 // One entry = one card. Comment / reorder / mix freely. Each card also gets
@@ -79,6 +89,8 @@ type RoutedScenario = {
   binary: boolean
   kind: 'throughput' | 'push'
   routing: Routing
+  /** What a push cell pushes through: a `Channel` when left out, a `BroadcastChannel`, or a member's track in a `Room`. */
+  via?: 'broadcast' | 'room'
 }
 type Scenario = LatencyScenario | RoutedScenario
 
@@ -191,6 +203,34 @@ const SCENARIOS: Scenario[] = [
     kind: 'push',
     routing: 'pinned',
   },
+
+  {
+    id: 'push-broadcast-text-ws-pin',
+    label: 'Broadcast Push (text)',
+    transport: 'ws',
+    binary: false,
+    kind: 'push',
+    routing: 'pinned',
+    via: 'broadcast',
+  },
+  {
+    id: 'push-broadcast-bin-ws-pin',
+    label: 'Broadcast Push (binary)',
+    transport: 'ws',
+    binary: true,
+    kind: 'push',
+    routing: 'pinned',
+    via: 'broadcast',
+  },
+  {
+    id: 'push-room-track-bin-ws-pin',
+    label: 'Room Track Push (binary)',
+    transport: 'ws',
+    binary: true,
+    kind: 'push',
+    routing: 'pinned',
+    via: 'room',
+  },
 ]
 
 // ── Run state ──────────────────────────────────────────────────────────────
@@ -200,7 +240,7 @@ type CellStatus = 'pending' | 'running' | 'done'
 type LatencyCell = { bytes: number; status: CellStatus; p50?: number; p99?: number; instance?: string }
 
 // Push: one-way (server → client only), one rate per cell.
-type RateCell = { bytes: number; status: CellStatus; msgS?: number; mbps?: number; instances?: string[] }
+type RateCell = { bytes: number; status: CellStatus; msgS?: number; mbps?: number; ms?: number; instances?: string[] }
 type RateGroup = { instances: number; cells: RateCell[] }
 
 // Throughput: pure-direction. TX = client→server (server-counted), RX = server→client (client-counted).
@@ -419,7 +459,8 @@ function bestPlateauWindow(samples: number[], k: number): number {
   return bestMean
 }
 
-/** What the servers received per second from the end of the warmup to the end of the flood, each on its own clock. */
+/** What the servers received per second, summed over the channels: each channel's server counts on its own clock, from
+ *  `WARMUP_MS` after its first receipt to as long after that receipt as the client's flood lasted (`floodMs`). */
 function serverReceiveRate(channels: { at: number; total: number }[][], floodMs: number): number {
   let rate = 0
   for (const samples of channels) {
@@ -454,9 +495,6 @@ async function measureThroughputCell(
     ),
   )
   const instanceList = opens.map((o) => o.instance)
-  // Each channel has a connection of its own, and while one of a page's WebSockets floods a host, Chrome holds up its
-  // next handshake to that host for seconds: a channel still connecting as the others flood can miss connectTtl.
-  await Promise.all(opens.map((o) => o.channel.opened))
   const binaryPayload = scenario.binary ? new Uint8Array(bytes).fill(0xab) : null
   const textPayload = scenario.binary ? null : 'x'.repeat(bytes)
 
@@ -473,6 +511,10 @@ async function measureThroughputCell(
   }
 
   try {
+    // Each channel has a connection of its own, and while one of a page's WebSockets floods a host, Chrome holds up its
+    // next handshake to that host for seconds: a channel still connecting as the others flood can miss connectTtl.
+    // Inside the `try`: a channel that fails to open leaves the others to the `finally`, which closes them.
+    await Promise.all(opens.map((o) => o.channel.opened))
     // ── Phase TX: client floods, server counts (no echoes). Workers run
     // continuously while `measureRate` waits on the local `sent` counter for the
     // flood to plateau, which only decides when the flood stops: `sent` counts
@@ -531,58 +573,126 @@ async function measureThroughputCell(
   }
 }
 
+type PushRate = { msgS: number; mbps: number; ms: number; instances: string[] }
+
+/** Counts arrivals up to `total`: `aborted` settles with `false` once all arrived, or with `true` if `signal` aborts first.
+ *  `warmedAt()` is when arrival `warmup` came, for a cell that times only the ones after it. */
+function countArrivals(total: number, signal: AbortSignal, warmup = 0) {
+  let received = 0
+  let warmedAt = 0
+  let resolveDone!: () => void
+  const done = new Promise<void>((resolve) => {
+    resolveDone = resolve
+  })
+  const onAbort = new Promise<boolean>((resolve) =>
+    signal.addEventListener('abort', () => resolve(true), { once: true }),
+  )
+  const onReceive = () => {
+    if (++received === warmup) warmedAt = performance.now()
+    if (received === total) resolveDone()
+  }
+  return { onReceive, aborted: Promise.race([done.then(() => false), onAbort]), warmedAt: () => warmedAt }
+}
+
+function pushRate(count: number, elapsed: number, bytes: number, opens: { instance: string }[]): PushRate {
+  const msgS = (count / elapsed) * 1000
+  const instances = opens.map((o) => o.instance)
+  return {
+    msgS: Math.round(msgS),
+    mbps: +((msgS * bytes) / (1024 * 1024)).toFixed(2),
+    ms: Math.round(elapsed),
+    instances,
+  }
+}
+
+/** The messages a Broadcast or Room Track cell of `bytes` sends to each page, and how many of them warm up. */
+function burstOf(bytes: number): { count: number; warmup: number } {
+  const count = Math.min(BURST_MAX, Math.ceil(BURST_BYTES / bytes))
+  return { count, warmup: Math.ceil(count * BURST_WARMUP_SHARE) }
+}
+
+function slots(instances: number): number[] {
+  return Array.from({ length: instances }, (_, slot) => slot)
+}
+
 async function measurePushCell(
   scenario: RoutedScenario,
   instances: number,
   bytes: number,
   signal: AbortSignal,
-): Promise<{ msgS: number; mbps: number; instances: string[] } | null> {
-  const totalExpected = instances * PUSH_COUNT
-  let received = 0
-  let resolveDone!: () => void
-  const done = new Promise<void>((resolve) => {
-    resolveDone = resolve
-  })
-  const onReceive = () => {
-    if (++received === totalExpected) resolveDone()
-  }
-  const aborted = new Promise<boolean>((resolve) =>
-    signal.addEventListener('abort', () => resolve(true), { once: true }),
+): Promise<PushRate | null> {
+  if (scenario.via === 'broadcast') return measureBroadcastPushCell(scenario, instances, bytes, signal)
+  if (scenario.via === 'room') return measureRoomTrackPushCell(scenario, instances, bytes, signal)
+  const total = instances * PUSH_COUNT
+  const { onReceive, aborted } = countArrivals(total, signal)
+  const push = scenario.binary ? onBenchBinaryServerPush : onBenchServerPush
+  const opens = await Promise.all(
+    slots(instances).map((slot) => openWith(push, scenario, { instances, slot, bytes })(PUSH_COUNT, bytes)),
   )
-
-  if (scenario.binary) {
-    const opens = await Promise.all(
-      Array.from({ length: instances }, (_, slot) =>
-        openWith(onBenchBinaryServerPush, scenario, { instances, slot, bytes })(PUSH_COUNT, bytes),
-      ),
-    )
-    const instanceList = opens.map((o) => o.instance)
-    for (const r of opens) r.channel.listenBinary(onReceive)
-    const t0 = performance.now()
-    for (const r of opens) void r.channel.send('go')
-    const wasAborted = await Promise.race([done.then(() => false), aborted])
-    const elapsed = performance.now() - t0
-    for (const r of opens) await r.channel.close()
-    if (wasAborted) return null
-    const msgS = (totalExpected / elapsed) * 1000
-    return { msgS: Math.round(msgS), mbps: +((msgS * bytes) / (1024 * 1024)).toFixed(2), instances: instanceList }
-  } else {
-    const opens = await Promise.all(
-      Array.from({ length: instances }, (_, slot) =>
-        openWith(onBenchServerPush, scenario, { instances, slot, bytes })(PUSH_COUNT, bytes),
-      ),
-    )
-    const instanceList = opens.map((o) => o.instance)
-    for (const r of opens) r.channel.listen(onReceive)
-    const t0 = performance.now()
-    for (const r of opens) void r.channel.send('go')
-    const wasAborted = await Promise.race([done.then(() => false), aborted])
-    const elapsed = performance.now() - t0
-    for (const r of opens) await r.channel.close()
-    if (wasAborted) return null
-    const msgS = (totalExpected / elapsed) * 1000
-    return { msgS: Math.round(msgS), mbps: +((msgS * bytes) / (1024 * 1024)).toFixed(2), instances: instanceList }
+  for (const r of opens) {
+    if (scenario.binary) r.channel.listenBinary(onReceive)
+    else r.channel.listen(onReceive)
   }
+  const t0 = performance.now()
+  for (const r of opens) void r.channel.send('go')
+  const wasAborted = await aborted
+  const elapsed = performance.now() - t0
+  for (const r of opens) await r.channel.close()
+  if (wasAborted) return null
+  return pushRate(total, elapsed, bytes, opens)
+}
+
+/** One server publishes a burst (`burstOf`) on a broadcast that a page subscribes to on each slot. */
+async function measureBroadcastPushCell(
+  scenario: RoutedScenario,
+  instances: number,
+  bytes: number,
+  signal: AbortSignal,
+): Promise<PushRate | null> {
+  const { count, warmup } = burstOf(bytes)
+  const { onReceive, aborted, warmedAt } = countArrivals(instances * count, signal, instances * warmup)
+  const key = `bench-${crypto.randomUUID()}`
+  const opens = await Promise.all(
+    slots(instances).map((slot) => openWith(onBenchBroadcastRoom, scenario, { instances, slot, bytes })(key)),
+  )
+  for (const r of opens) {
+    if (scenario.binary) r.room.subscribeBinary(onReceive)
+    else r.room.subscribe(onReceive)
+  }
+  await Promise.all(opens.map((r) => r.room.opened))
+  const publish = scenario.binary ? onBenchBroadcastBinaryPublish : onBenchBroadcastPublish
+  void openWith(publish, scenario, { instances, bytes })(key, count, bytes)
+  const wasAborted = await aborted
+  const elapsed = performance.now() - warmedAt()
+  await Promise.all(opens.map(close))
+  if (wasAborted) return null
+  return pushRate(instances * (count - warmup), elapsed, bytes, opens)
+}
+
+/** A server's member publishes a burst (`burstOf`) of frames on its track, without `lossy`, in a room that a page watches
+ *  on each slot. */
+async function measureRoomTrackPushCell(
+  scenario: RoutedScenario,
+  instances: number,
+  bytes: number,
+  signal: AbortSignal,
+): Promise<PushRate | null> {
+  const { count, warmup } = burstOf(bytes)
+  const { onReceive, aborted, warmedAt } = countArrivals(instances * count, signal, instances * warmup)
+  const roomId = `bench-${crypto.randomUUID()}`
+  const opens = await Promise.all(
+    slots(instances).map((slot) => openWith(onBenchRoomTrack, scenario, { instances, slot, bytes })(roomId)),
+  )
+  for (const r of opens) r.room.subscribeBinary(onReceive, { track: 'bench' })
+  // A join is answered after the subscriptions sent before it, so the member's frames find them.
+  const viewers = await Promise.all(opens.map((r) => r.room.join({ meta: { name: 'Viewer' } })))
+  void openWith(onBenchRoomTrackPublish, scenario, { instances, bytes })(roomId, count, bytes)
+  const wasAborted = await aborted
+  const elapsed = performance.now() - warmedAt()
+  await Promise.all(viewers.map((viewer) => viewer.leave()))
+  await Promise.all(opens.map(close))
+  if (wasAborted) return null
+  return pushRate(instances * (count - warmup), elapsed, bytes, opens)
 }
 
 // ── Per-scenario execution ─────────────────────────────────────────────────
@@ -1120,19 +1230,23 @@ function Bench() {
           <strong>Throughput:</strong> {INSTANCE_COUNTS.join('/')} channels. <code>round-robin</code> uses{' '}
           <code>?bench_instances=N</code> (Caddy distributes). <code>pinned</code> uses{' '}
           <code>?bench_instance=&lt;letter&gt;</code> (fixed backend per slot). Pure one-direction measurement:{' '}
-          <strong>TX</strong> = client floods, the server's received count from the end of the warmup to the end of the
-          flood (no echoes); <strong>RX</strong> = server pushes fire-and-forget, client counts. Two sequential phases
-          per cell. Each phase burns {WARMUP_MS / 1000}s of warmup (workers running, no samples collected) so the BDP
-          credit window ramps before measurement starts. Then samples the rate every {SAMPLE_MS}ms and terminates when
-          the rate has held within {(PLATEAU_TOLERANCE * 100).toFixed(0)}% of its mean for a continuous{' '}
-          {PLATEAU_HOLD_MS}ms window — BDP ramp produces shifting samples that can't form a plateau, so the hold-window
-          naturally waits past it. Measurement capped at {MAX_MEASURE_MS / 1000}s. No RTT in the loop. Each cell: msg/s
-          + MB/s. Green = best per row. Scale = top / base.
+          <strong>TX</strong> = client floods, each channel's server counts what it received (no echoes), on its own
+          clock: from the end of the warmup after its first receipt to as long after that receipt as the flood lasted;{' '}
+          <strong>RX</strong> = server pushes fire-and-forget, client counts. Two sequential phases per cell. Each phase
+          burns {WARMUP_MS / 1000}s of warmup (workers running, no samples collected) so the BDP credit window ramps
+          before measurement starts. Then samples the rate every {SAMPLE_MS}ms and terminates when the rate has held
+          within {(PLATEAU_TOLERANCE * 100).toFixed(0)}% of its mean for a continuous {PLATEAU_HOLD_MS}ms window — BDP
+          ramp produces shifting samples that can't form a plateau, so the hold-window naturally waits past it.
+          Measurement capped at {MAX_MEASURE_MS / 1000}s. No RTT in the loop. Each cell: msg/s + MB/s. Green = best per
+          row. Scale = top / base.
         </p>
         <p>
           <strong>Server Push:</strong> {INSTANCE_COUNTS.join('/')} channels. Each cell: {PUSH_COUNT}-msg burst across N
           parallel channels — aggregate download rate. Green = best per row (msg/s and MB/s independently). Scale ={' '}
-          {INSTANCE_COUNTS[INSTANCE_COUNTS.length - 1]}i / 1i.
+          {INSTANCE_COUNTS[INSTANCE_COUNTS.length - 1]}i / 1i. <strong>Broadcast Push</strong> and{' '}
+          <strong>Room Track Push</strong>: one server publishes {BURST_BYTES / (1024 * 1024)} MiB of messages (at most{' '}
+          {BURST_MAX}), without <code>lossy</code>, to a page subscribed on each of the N channels; the rate leaves out
+          the first {BURST_WARMUP_SHARE * 100}%.
         </p>
         <p>
           <strong>hit:</strong> backend instances actually reached (verify routing — pinned should show the expected

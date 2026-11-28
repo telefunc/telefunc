@@ -1,26 +1,14 @@
 export { Telefunc }
 
-import crossws from 'crossws/adapters/node'
-import { serve as serveTelefunc, serveNode } from '../node/server/telefunc.js'
+import { serveNode, serveRuntimeRequest } from '../node/server/telefunc.js'
+import { noTransportEvidence } from '../node/server/runTelefunc/clientLeft.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
-import { getServerConfig } from '../node/server/serverConfig.js'
-import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
-import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
-import { isTelefuncRequest, toResponse } from './shared.js'
-import { getGlobalObject } from '../utils/getGlobalObject.js'
-import { getRequestPathname } from '../utils/getUrlPathname.js'
-import type { IncomingMessage, ServerResponse, Server } from 'node:http'
-import type { Http2SecureServer } from 'node:http2'
-import type { Duplex } from 'node:stream'
-import type { Peer } from 'crossws'
+import { preloadServerProductionEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
+import { installWebSocketOn, takeUpgradesOfNewServer, type HttpServer } from './nodeUpgrades.js'
+import { upgradesOfRequest } from './requestServer.js'
+import { getTelefuncRequestUrl, isTelefuncUrl, toResponse } from './shared.js'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 
-declare module 'crossws' {
-  interface PeerContext {
-    socket?: Duplex
-  }
-}
-
-type HttpServer = Server | Http2SecureServer
 type HttpServerOrWrapper = HttpServer | { node?: { server?: HttpServer } }
 type NodeRequest = IncomingMessage & { originalUrl?: string }
 
@@ -43,10 +31,6 @@ interface TelefuncServe<Req extends NodeRequest, Res extends ServerResponse> {
   serve(input: ServeInputRequest): Promise<Response | undefined>
 }
 
-const { registeredServers } = getGlobalObject('serve/node.ts', {
-  registeredServers: new WeakSet<HttpServer>(),
-})
-
 interface Telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerResponse = ServerResponse>
   extends TelefuncServe<Req, Res> {}
 class Telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerResponse = ServerResponse> {
@@ -59,16 +43,6 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
   Req,
   Res
 > {
-  // TODO: remove once Telefunc's own WebSocket adapter replaces crossws.
-  // Each upgrade's socket, by the request its upgrade hook gets.
-  const sockets = new WeakMap<Request, Duplex>()
-  const ws = crossws({
-    hooks: getTelefuncChannelHooks({
-      upgrade: (request) => ({ context: { socket: sockets.get(request) } }),
-      send: sendInTaskWrite,
-    }),
-  })
-
   function installWebSocket(server: HttpServerOrWrapper): void {
     const httpServer: HttpServer = (server as any)?.node?.server ?? (server as HttpServer)
     if (typeof (httpServer as any)?.on !== 'function') {
@@ -76,21 +50,7 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
         'installWebSocket() received an unsupported server object. Pass a Node.js `http.Server` or a srvx-compatible wrapper.',
       )
     }
-    if (registeredServers.has(httpServer)) return
-    registeredServers.add(httpServer)
-
-    httpServer.on('upgrade', (req, socket, head) => {
-      const config = getServerConfig()
-      if (getRequestPathname(req.url ?? '') !== config.telefuncUrl) return
-      if (!config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) {
-        socket.once('finish', socket.destroy)
-        socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
-        return
-      }
-      const request = new Request('http://localhost' + req.url)
-      sockets.set(request, socket)
-      ws.handleUpgrade(req, socket, head, request)
-    })
+    installWebSocketOn(httpServer)
   }
 
   function inferServer(req: Req): HttpServer | undefined {
@@ -104,23 +64,29 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
   async function serve(input: ServeInputNode<Req, Res>): Promise<boolean>
   async function serve(input: ServeInputRequest): Promise<Response | undefined>
   async function serve(input: ServeInput<Req, Res>): Promise<boolean | Response | undefined> {
+    await preloadServerProductionEntry()
     if (!isNodeServeInput(input)) {
-      if (!isTelefuncRequest(input.request)) return undefined
-      const httpResponse = await serveTelefunc(
+      if (getTelefuncRequestUrl(input.request) === null) return undefined
+      const httpResponse = await serveRuntimeRequest(
         input.context ? { request: input.request, context: input.context } : { request: input.request },
+        {
+          clientLeft: noTransportEvidence,
+          clientGone: input.request.signal,
+          takesUpgrades: upgradesOfRequest(input.request),
+        },
       )
       return toResponse(httpResponse)
     }
 
     const { req, res, context } = input
     const server = inferServer(req)
-    if (server) installWebSocket(server)
+    if (server) takeUpgradesOfNewServer(server)
 
     if (res.headersSent) return false
 
     const url = req.originalUrl || req.url
     if (!url) return false
-    if (getRequestPathname(url) !== getServerConfig().telefuncUrl) return false
+    if (!isTelefuncUrl(url)) return false
 
     const serveInput = {
       url,
@@ -139,16 +105,4 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
   }
 
   return { installWebSocket, serve }
-}
-
-/** Sends `frame` in one write with the task's other frames, up to the socket's mark: written alone, each frame costs a
- *  syscall while the socket has room. Past the mark it goes at once, or the page would wait for the whole task. */
-function sendInTaskWrite(peer: Peer, frame: Uint8Array<ArrayBuffer>): void {
-  const socket = peer.context.socket!
-  if (!socket.writableCorked) {
-    socket.cork()
-    process.nextTick(() => socket.uncork())
-  }
-  peer.send(frame)
-  if (socket.writableLength >= socket.writableHighWaterMark) socket.uncork()
 }

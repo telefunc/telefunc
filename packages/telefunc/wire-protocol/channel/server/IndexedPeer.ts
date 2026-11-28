@@ -2,13 +2,20 @@ export { IndexedPeer }
 export type { PeerSender }
 
 import { ACK_STATUS, encode } from '../../wire/frame.js'
-import type { AckResultStatus, ErrorReason, SequencedEncoder } from '../../wire/frame.js'
-import { ReplayBuffer } from '../ReplayBuffer.js'
+import type { AckResultStatus, SequencedEncoder } from '../../wire/frame.js'
+import { PublishBody } from './PublishBody.js'
+import type { Dropped, ServerReplay } from './ServerReplay.js'
+import { OWN_STREAM } from '../ownStream.js'
 import type { SendWait } from '../../flowControl/SendWaits.js'
 import type { Urgency } from '../../flowControl/credit.js'
+import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
 
-interface PeerSender {
+interface PeerSender extends WireQueue {
+  /** How long a lossy page on the wire may leave a publish unconfirmed before it counts as behind, where a confirmation
+   *  takes at least `roundTrip` ms: `Infinity` before one was measured. */
+  behindAfter(roundTrip: number): number
   send(frame: Uint8Array): void
+  sendPublish(index: number, seq: number, body: Uint8Array<ArrayBuffer>): void
   /** Sends `frame` in the next message the wire sends, where it can carry one (see `PieceSender.carry`). */
   carry(frame: Uint8Array): void
   /** Bytes the wire holds for the peer, not yet written out; `undefined` where the runtime can't tell. */
@@ -17,19 +24,21 @@ interface PeerSender {
   sendWait(): SendWait
   /** The bytes the wire delivered in the `ms` before the frame it's handling arrived. */
   deliveredBefore(ms: number): number
+  /** Ends the wire, as a frame that breaks the protocol does. */
+  terminate(): void
 }
 
 type IndexedPeerOptions = {
   sender: PeerSender
   index: number
-  replay: ReplayBuffer
+  replay: ServerReplay
 }
 
 /** Encodes a channel's frames with its index; a sequenced one joins the replay buffer as it goes to the wire. */
 class IndexedPeer {
   readonly sender: PeerSender
-  private index: number
-  private replay: ReplayBuffer
+  readonly index: number
+  private replay: ServerReplay
 
   constructor({ sender, index, replay }: IndexedPeerOptions) {
     this.sender = sender
@@ -37,13 +46,27 @@ class IndexedPeer {
     this.replay = replay
   }
 
-  /** Encodes `data` by `encodeFrame` at the next seq; `onQueued` gets its seq and bytes before the wire has it. Returns
-   *  the bytes the frame counts against flow control. */
-  sendSequenced<T>(encodeFrame: SequencedEncoder<T>, data: T, onQueued?: (seq: number, bytes: number) => void): number {
+  /** Encodes `data` by `encodeFrame` at the next seq; `onQueued` gets its seq before the wire has it. Returns the bytes
+   *  the frame counts against flow control. */
+  sendSequenced<T>(encodeFrame: SequencedEncoder<T>, data: T, onQueued?: (seq: number) => void): number {
     const seq = this.replay.nextSeq()
     const frame = encodeFrame(this.index, data, seq)
-    onQueued?.(seq, frame.byteLength)
+    onQueued?.(seq)
     this.commit(seq, frame)
+    return frame.byteLength
+  }
+
+  /** Sends `body` behind a head naming this channel and its next seq; both join the replay and the wire in one call. */
+  sendPublish(body: PublishBody): void {
+    this.sendBehindHead(this.replay.nextSeq(), body)
+  }
+
+  /** Sends `data` by `encodeFrame` at the next seq as a publish of this channel's own, which a newer one may replace while
+   *  it waits on the wire. Returns the bytes the frame counts against flow control. */
+  sendOwn<T>(encodeFrame: SequencedEncoder<T>, data: T): number {
+    const seq = this.replay.nextSeq()
+    const frame = encodeFrame(this.index, data, seq)
+    this.sendBehindHead(seq, new PublishBody(frame, OWN_STREAM, true))
     return frame.byteLength
   }
 
@@ -54,24 +77,21 @@ class IndexedPeer {
     this.commit(seq, encode.ackRes(this.index, seq, ackedSeq, result, status))
   }
 
-  /** Returns its seq. */
-  sendCloseRequest(timeoutMs: number): number {
+  sendCloseRequest(timeoutMs: number): void {
     const seq = this.replay.nextSeq()
     this.commit(seq, encode.close(this.index, timeoutMs, seq))
-    return seq
   }
 
-  sendCloseAck(): void {
+  /** `lastSeq`: the last seq the server read from the page on this channel. */
+  sendCloseAck(lastSeq: number): void {
     const seq = this.replay.nextSeq()
-    this.commit(seq, encode.closeAck(this.index, seq))
+    this.commit(seq, encode.closeAck(this.index, lastSeq, seq))
   }
 
-  sendAbort(abortValue: string): void {
-    this.sendSequenced(encode.abort, abortValue)
-  }
-
-  sendError(reason: ErrorReason): void {
-    this.sendSequenced(encode.error, reason)
+  /** `lastSeq`: as `sendCloseAck`'s. */
+  sendCloseDone(lastSeq: number): void {
+    const seq = this.replay.nextSeq()
+    this.commit(seq, encode.closeDone(this.index, lastSeq, seq))
   }
 
   /** `lastSeq`: the last seq the server has of what the page sent on the channel. */
@@ -91,9 +111,56 @@ class IndexedPeer {
     this.sender.send(encode.bdpPingAck(this.index, probe, backlog, pathRtt))
   }
 
+  sendWanted(version: number): void {
+    this.sender.send(encode.wanted(this.index, version))
+  }
+
+  /** How many of its publishes no wire has taken: their heads still wait in its wire's queue, and they are the replay's
+   *  newest. */
+  unhanded(): number {
+    return this.sender.waitingPublishes(this.index)
+  }
+
+  /** For an aborted channel: takes its messages of which the socket has no byte back from the wire's queue and the
+   *  replay, whose newest they are: its lossy ones (`WireQueue.dropUngiven`). */
+  dropUngivenLossy(): void {
+    this.replay.dropUnhanded(this.sender.dropUngiven(this.index))
+  }
+
+  /** Takes back from the replay and the wire's queue its publishes that no wire has taken. */
+  dropUnhanded(): Dropped {
+    return this.offWire(this.replay.dropUnhanded(this.unhanded()))
+  }
+
+  /** Drops superseded replay entries. Only the wire's waiting suffix can be cancelled. */
+  dropSuperseded(stream: string): Dropped {
+    return this.offWire(this.replay.dropSuperseded(stream, this.unhanded()))
+  }
+
+  /** Takes back those of its lossy publishes, of every stream or only of `stream`, that no wire has taken and a newer
+   *  one of their stream made stale. */
+  dropStaleLossy(stream?: string): Dropped {
+    return this.offWire(this.replay.dropStaleLossy(this.unhanded(), stream))
+  }
+
+  /** Takes back its lossy publishes that no wire has taken. */
+  dropUnhandedLossy(): Dropped {
+    return this.offWire(this.replay.dropLossy(this.unhanded()))
+  }
+
+  private offWire(dropped: Dropped): Dropped {
+    if (dropped.seqs.length > 0) this.sender.dropWaitingPublishes(this.index, dropped.seqs)
+    return dropped
+  }
+
   private sendLimit(frame: Uint8Array, urgency: Urgency): void {
     if (urgency === 'acknowledgement') this.sender.carry(frame)
     else this.sender.send(frame)
+  }
+
+  private sendBehindHead(seq: number, body: PublishBody): void {
+    this.replay.pushPublish(seq, this.index, body)
+    this.sender.sendPublish(this.index, seq, body.frame)
   }
 
   /** Sends `frame` of `seq`, kept to replay, so a frame a dead wire lost goes again. */

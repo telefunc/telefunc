@@ -12,10 +12,10 @@
   },
   "dependencies": {
     "@brillout/import": "^0.2.6",
-    "@brillout/json-serializer": "^0.5.25",
+    "@brillout/json-serializer": "^0.5.27",
     "@brillout/picocolors": "^1.0.28",
     "@brillout/vite-plugin-server-entry": "^0.7.20",
-    "crossws": "^0.4.4",
+    "crossws": "^0.4.17",
     "es-module-lexer": "^1.7.0",
     "magic-string": "^0.30.17",
     "ts-morph": "^26.0.0"
@@ -107,8 +107,18 @@
       "default": "./dist/serve/cloudflare.js"
     },
     "./__internal": {
-      "types": "./dist/node/server/__internal.d.ts",
-      "default": "./dist/node/server/__internal.js"
+      "worker": {
+        "types": "./dist/node/server/__internal.d.ts",
+        "default": "./dist/node/server/__internal.js"
+      },
+      "browser": {
+        "types": "./dist/client/__internal.d.ts",
+        "default": "./dist/client/__internal.js"
+      },
+      "default": {
+        "types": "./dist/node/server/__internal.d.ts",
+        "default": "./dist/node/server/__internal.js"
+      }
     }
   },
   "type": "module",
@@ -117,10 +127,12 @@
     "@babel/parser": "7.29.0",
     "@babel/types": "7.29.0",
     "@cloudflare/workers-types": "^4.20260305.1",
+    "@hono/node-server": "^1.19.19",
     "@nuxt/types": "^2.18.1",
     "@types/express": "^5.0.3",
     "@types/node": "^24.0.4",
     "@types/react": "^19.2.14",
+    "hono": "^4.10.4",
     "next": "^15.3.4",
     "react": "^19.2.4",
     "react-streaming": "^0.4.17",

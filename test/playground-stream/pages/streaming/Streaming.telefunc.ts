@@ -1,6 +1,7 @@
 export {
   onReturnReadableStream,
   onReturnAsyncGenerator,
+  onReadRequestUser,
   onReturnGeneratorWithMeta,
   onReturnEmptyGenerator,
   onReturnDelayedStream,
@@ -16,19 +17,26 @@ export {
   onGeneratorAbortMidStream,
   onGeneratorAbortWithValue,
   onGeneratorBugMidStream,
+  onGeneratorThrowsNonObject,
   onAbortOneOfManyStreamingValues,
   onChannelAbortAbortsSiblingStreamingValues,
   onUploadWithProgress,
   onReturnTwoLargeStreams,
+  onReturnFileBesideLargeStream,
+  onReturnManyTinyChunks,
   onReturnTwoStreamsOfSmallChunks,
   onReturnOneLargeChunk,
   onReturnFinishedAndEndlessStreams,
-  onReturnTwoEndless,
   onReturnFailingStream,
   onGeneratorFinallyThrows,
+  onYieldLargeString,
+  onReturnPromiseOfLargeString,
+  onReturnStreamWithEmptyChunk,
+  onStreamThenCircular,
+  onReadUpload,
 }
 
-import { Abort, Channel, download, getContext } from 'telefunc'
+import { Abort, Channel, getContext } from 'telefunc'
 import { Subject, interval } from 'rxjs'
 import { map, take } from 'rxjs/operators'
 import { cleanupState } from '../../cleanup-state'
@@ -38,6 +46,19 @@ import { sleep } from '../../sleep'
 
 async function* onReturnAsyncGenerator(): AsyncGenerator<number> {
   for (const n of [1, 2, 3, 4, 5]) yield n
+}
+
+async function* onReadRequestUser(): AsyncGenerator<string | null> {
+  for (let i = 0; i < 3; i++) {
+    let user: string | null
+    try {
+      user = getContext<{ user: string | null }>().user
+    } catch {
+      user = null
+    }
+    await sleep(25)
+    yield user
+  }
 }
 
 async function* onReturnEmptyGenerator(): AsyncGenerator<number> {}
@@ -51,7 +72,8 @@ async function* onReturnDelayedGenerator(): AsyncGenerator<string> {
 
 const onReturnReadableStream = async (): Promise<ReadableStream<Uint8Array>> => {
   const encoder = new TextEncoder()
-  const chunks = ['hello', ' ', 'stream']
+  // An empty chunk says nothing about the stream's end.
+  const chunks = ['', 'hello', ' ', 'stream']
   let i = 0
   return new ReadableStream({
     pull(controller) {
@@ -234,6 +256,11 @@ async function* onGeneratorBugMidStream(): AsyncGenerator<string> {
   throw new Error('Unexpected generator error')
 }
 
+async function* onGeneratorThrowsNonObject(): AsyncGenerator<string> {
+  yield 'before-bug'
+  throw 'not-an-error'
+}
+
 const onAbortOneOfManyStreamingValues = async () => {
   // The test asserts that every sibling delivered at least one value to the
   // client before the abort error. Gating the Abort on server-side emission is
@@ -395,6 +422,39 @@ const onReturnTwoLargeStreams = async () => {
   return { first: byteStream(32), second: byteStream(32) }
 }
 
+/** Stays open once `chunks` tiny chunks went, for a test to look at the server while the stream is still running. */
+const onReturnManyTinyChunks = async (chunks: number) => {
+  let i = 0
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (i++ < chunks) controller.enqueue(new Uint8Array(8))
+      else return new Promise<void>(() => {})
+    },
+  })
+}
+
+const onReturnFileBesideLargeStream = async () => {
+  let pulled = 0
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (pulled === 512) return controller.close()
+      pulled++
+      controller.enqueue(new Uint8Array(64 * 1024))
+    },
+  })
+  const file = new File([new Uint8Array([7])], 'slow.bin')
+  file.stream = () =>
+    new ReadableStream({
+      async pull(controller) {
+        await sleep(700)
+        cleanupState.fileBesideStreamPulls = String(pulled)
+        controller.enqueue(new Uint8Array([7]))
+        controller.close()
+      },
+    })
+  return { stream, file }
+}
+
 function filledStream(byte: number) {
   return new ReadableStream<Uint8Array>({
     start(controller) {
@@ -434,43 +494,6 @@ const onReturnFinishedAndEndlessStreams = async () => {
   return { key, finished, endless }
 }
 
-type EndlessKind = 'stream' | 'generator' | 'download'
-
-/** Endless, each chunk carrying its number, and `cleanupState[name]` says how many chunks its producer made. */
-function endlessValue(kind: EndlessKind, name: string) {
-  let made = 0
-  const end = () => {
-    cleanupState[`${name}_end`] = 'cancelled'
-  }
-  if (kind === 'generator') {
-    return (async function* () {
-      try {
-        while (true) {
-          cleanupState[name] = String(made + 1)
-          yield { n: made++, pad: 'x'.repeat(64 * 1024) }
-        }
-      } finally {
-        end()
-      }
-    })()
-  }
-  const stream = new ReadableStream<Uint8Array<ArrayBuffer>>({
-    pull(controller) {
-      const chunk = new Uint8Array(64 * 1024)
-      new DataView(chunk.buffer).setUint32(0, made++)
-      cleanupState[name] = String(made)
-      controller.enqueue(chunk)
-    },
-    cancel: end,
-  })
-  return kind === 'download' ? download(stream, { name: 'endless.bin' }) : stream
-}
-
-const onReturnTwoEndless = async (firstKind: EndlessKind, secondKind: EndlessKind) => {
-  const key = crypto.randomUUID()
-  return { key, first: endlessValue(firstKind, `first_${key}`), second: endlessValue(secondKind, `second_${key}`) }
-}
-
 const onReturnFailingStream = async (chunksBeforeFailure: number) => {
   let i = 0
   return new ReadableStream<Uint8Array>({
@@ -481,6 +504,7 @@ const onReturnFailingStream = async (chunksBeforeFailure: number) => {
   })
 }
 
+/** cleanupState: generatorFinallyThrowsRan = 'true' once its `finally` ran, as the page's cancel returns it. */
 async function* onGeneratorFinallyThrows(): AsyncGenerator<string> {
   try {
     while (true) {
@@ -488,6 +512,50 @@ async function* onGeneratorFinallyThrows(): AsyncGenerator<string> {
       await sleep(50)
     }
   } finally {
+    cleanupState.generatorFinallyThrowsRan = 'true'
     throw Abort({ reason: 'generator-finally-failure' })
+  }
+}
+
+/** Each value is larger than the 1 MiB parts a channel sends it in. */
+async function* onYieldLargeString(): AsyncGenerator<string> {
+  yield 'x'.repeat(3_000_000)
+  yield 'done'
+}
+
+const onReturnPromiseOfLargeString = async () => {
+  return { promise: Promise.resolve('y'.repeat(3_000_000)) }
+}
+
+const onReturnStreamWithEmptyChunk = async () => {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of [[1], [], [2]]) controller.enqueue(new Uint8Array(chunk))
+      controller.close()
+    },
+  })
+}
+
+/** cleanupState: streamThenCircularCancelled = 'true' once the stream returned beside a value that can't be serialized is cancelled. */
+const onStreamThenCircular = async () => {
+  const bad: Record<string, unknown> = {}
+  bad.self = bad
+  return {
+    stream: new ReadableStream<Uint8Array>({
+      cancel() {
+        cleanupState.streamThenCircularCancelled = 'true'
+      },
+    }),
+    bad,
+  }
+}
+
+/** Returns the message reading the page's upload throws with. */
+const onReadUpload = async (stream: ReadableStream<Uint8Array>) => {
+  try {
+    for await (const _ of stream);
+    return 'read whole'
+  } catch (err) {
+    return (err as Error).message
   }
 }

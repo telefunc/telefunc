@@ -1,0 +1,75 @@
+export { RedisBackend }
+
+import type {
+  BackendReceiver,
+  BroadcastDriver,
+  BroadcastPayload,
+  BroadcastRoute,
+  DriverAttempt,
+  PublishResult,
+} from 'telefunc/__internal'
+import { planeKey, reportBroadcastDeliveryLost, servePlane } from 'telefunc/__internal'
+import type { RoomPlaneKey } from '@telefunc/room/backend'
+import { REDIS_COMMANDS } from './commands.js'
+import { broadcastChannel } from './keys.js'
+import type { RedisConnection } from './RedisConnection.js'
+import { neverReachedSubscription } from './RedisSubscriptions.js'
+import { RedisRoomDriver } from './RedisRoomDriver.js'
+import type { WaitRule } from './NewSubscriptionWait.js'
+
+type RedisBackendOptions = { connection: RedisConnection }
+
+/** The installed backend: Broadcast on `connection`, and Room's driver, built on the same connection. */
+class RedisBackend implements BroadcastDriver {
+  readonly connection: RedisConnection
+  readonly planes = [
+    servePlane(
+      planeKey<RoomPlaneKey>('telefunc.room.plane'),
+      (kit) => new RedisRoomDriver({ connection: this.connection, kit }),
+    ),
+  ]
+
+  constructor({ connection }: RedisBackendOptions) {
+    this.connection = connection
+  }
+
+  /** Publishes `payload` as it is at the call. */
+  publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
+    const { sends, prefix } = this.connection
+    const waiting = sends.sendsMayWait ? sends.waitTurn(broadcastWaitRule(prefix, route), payload, ownPayload) : null
+    if (waiting === null) return this.connection.run(REDIS_COMMANDS.publish, { route, payload })
+    return waiting.run((owned) => this.connection.run(REDIS_COMMANDS.publish, { route, payload: owned }))
+  }
+
+  subscribe(route: BroadcastRoute, receiver: BackendReceiver, holder: string): DriverAttempt {
+    const channel = broadcastChannel(this.connection.prefix, route)
+    return this.connection.subscriptions.subscribe({
+      channel,
+      invalidationChannel: null,
+      frames: { fanIn: false, placed: true, text: route.kind === 'text', lanesEndWithMembers: false },
+      laneChannel: null,
+      readStarts: async (on) => {
+        const { authority, read } = await this.connection.run(REDIS_COMMANDS.broadcastStart, route, on)
+        return { authority, starts: read }
+      },
+      receiver,
+      reportMissed: (count) =>
+        reportBroadcastDeliveryLost(route.key, neverReachedSubscription(count, `${route.kind} message`)),
+      holder,
+    })
+  }
+}
+
+/** A key's two kinds share its order, so a publish of either waits behind the key's waiting ones; only Redis's refusal
+ *  of its own kind's subscription fails it, as only that one would miss it. */
+function broadcastWaitRule(prefix: string, { key, kind }: BroadcastRoute): WaitRule {
+  const text = broadcastChannel(prefix, { key, kind: 'text' })
+  const binary = broadcastChannel(prefix, { key, kind: 'binary' })
+  const own = kind === 'text' ? text : binary
+  return { queue: text, channels: [text, binary], failsOn: [own], budget: own }
+}
+
+/** A waiting publish's own copy of its payload, which its caller may reuse. */
+function ownPayload(payload: BroadcastPayload): BroadcastPayload {
+  return typeof payload === 'string' ? payload : new Uint8Array(payload)
+}

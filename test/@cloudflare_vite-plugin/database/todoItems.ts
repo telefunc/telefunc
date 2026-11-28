@@ -28,19 +28,15 @@ async function resetTodoItems() {
   return todoItems
 }
 
-// wrangler's auto-generated Env types the namespace as `DurableObjectNamespace` without a
-// generic when `main` is a virtual module (`vike:server-entry`), so RPC methods aren't
-// surfaced. Cast once here to recover the typed stub.
+// The namespace is typed with its class in `env.d.ts`.
 async function getTodoItemsData(): Promise<DurableObjectStub<TodoListDurableObject>> {
-  const namespace = env.TO_DO_LIST_DURABLE_OBJECTS as DurableObjectNamespace<TodoListDurableObject>
-  return namespace.getByName('vike-todo-list-demo')
+  return env.TO_DO_LIST_DURABLE_OBJECTS.getByName('vike-todo-list-demo')
 }
 
 class TodoListDurableObject extends DurableObject {
   async getTodoItems() {
-    let todoItems = (await this.ctx.storage.get('all-todo-items')) as TodoItem[]
-    todoItems ??= Array.from(todoItemsInit)
-    return todoItems
+    const stored: unknown = await this.ctx.storage.get('all-todo-items')
+    return stored === undefined || stored === null ? Array.from(todoItemsInit) : readTodoItems(stored)
   }
   async addTodoItem(todoItem: TodoItem) {
     const todoItems = await this.getTodoItems()
@@ -51,4 +47,15 @@ class TodoListDurableObject extends DurableObject {
   async resetTodoItems() {
     await this.ctx.storage.put('all-todo-items', null)
   }
+}
+
+/** The todo items as `TodoListDurableObject` stores them. */
+function readTodoItems(stored: unknown): TodoItem[] {
+  if (!Array.isArray(stored)) throw new Error('Test: the stored todo items are no list')
+  const items: unknown[] = stored
+  return items.map((item) => {
+    if (typeof item !== 'object' || item === null || !('text' in item) || typeof item.text !== 'string')
+      throw new Error('Test: a stored todo item has no text')
+    return { text: item.text }
+  })
 }

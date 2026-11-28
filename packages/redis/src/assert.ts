@@ -1,9 +1,12 @@
-export { assert }
+export { assert, isBug }
 
 const projectName = '@telefunc/redis'
-const version = '0.1.0'
-const errorPrefix = `[${projectName}@${version}]`
-const bugPrefix = `${errorPrefix}[Bug]`
+const bugPrefix = `[${projectName}][Bug]`
+
+/** Whether `error` is one `assert()` threw. */
+function isBug(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith(bugPrefix)
+}
 
 function assert(condition: unknown, debugInfo?: unknown): asserts condition {
   if (condition) return

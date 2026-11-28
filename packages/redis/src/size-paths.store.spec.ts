@@ -1,0 +1,641 @@
+// Two paths where a refused size could leave a Room call's own effect half applied, on the oldest and the newest Redis
+// and Valkey Telefunc supports.
+// - A DM's acknowledged reply from a server recipient, over the size the store commits: the stored reply and the frame
+//   are the same bytes, the small overflow in the reply's place, and the sender is told that, by the frame, or by the
+//   stored reply once its wait times out with the frame lost. A timeout read before the reply is stored stays a
+//   timeout. A reply whose value changes between reads is stored as the frame carries it, and one that throws at a
+//   read after its first encode is stored and sent as that encode took it. A reply, a listener's failure and an overflow
+//   whose frame was lost are settled from the store by the next frame in the sender's inbox, which shows the skip. A
+//   timeout's read that finds nothing doesn't settle the sender ahead of a frame that settles it first. A sender removed,
+//   or a room closed, before the reply is stored is told that, with no reply left stored. A reply changed after its
+//   encode is stored, sent and told as encoded. The DM's own send failing after its reply's frame was committed is what
+//   the sender is told, not the reply.
+// - A removal by identity of a visible and a hidden tab, whose reason puts only the hidden tab's leave over the size:
+//   no tab goes, and nothing in the store changes. Its arguments are read once, before its first await: a reason the
+//   caller changes afterwards isn't the one committed, a reason that can't be serialized is refused when no tab
+//   matches too, and the ref is read once. The size is checked as of the removal's read of the tabs: a tab that left,
+//   or a room that closed, after that read doesn't change the refusal.
+import { randomBytes } from 'node:crypto'
+import { setTimeout as sleep } from 'node:timers/promises'
+import type { Redis } from 'ioredis'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
+import { Room, type LeaveCause } from '@telefunc/room'
+import {
+  getRoomPlane,
+  type CommitOptions,
+  type CommitResult,
+  type CommitTarget,
+  type OperationOptions,
+  type OperationResult,
+  type OperationArgs,
+  type OperationName,
+  type OperationOf,
+  type OperationValue,
+} from '@telefunc/room/backend'
+import { changedKeys, endReached, reached, runs, snapshot, STORES, type Store } from '../test/stores.js'
+import { RedisRoomDriver } from './RedisRoomDriver.js'
+
+afterAll(() => endReached())
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
+
+/** What the Redis backend commits at most, in bytes (packages/redis/src/commands.ts). */
+const CEILING = 28 * 1024 * 1024
+const LARGE = 'x'.repeat(29 * 1024 * 1024)
+
+function told(error: unknown) {
+  if (!(error instanceof Error)) return { value: typeof error }
+  return { name: error.name, outcome: 'outcome' in error ? String(error.outcome) : 'none' }
+}
+
+async function valuesKey(admin: Redis, id: string): Promise<string> {
+  const [values] = await admin.keys(`tf:0:room:{${id}}:g:*:values`)
+  if (values === undefined) throw new Error(`room ${id} has no cells`)
+  return values
+}
+
+async function until(check: () => Promise<boolean>, ms: number): Promise<boolean> {
+  for (const end = Date.now() + ms; Date.now() < end; await sleep(20)) if (await check()) return true
+  return check()
+}
+
+/** When a DM's reply goes out. */
+type Schedule = {
+  /** Held until the stored reply was read, or lost. */
+  frame: 'lost' | 'held'
+  /** When the reply is stored: at once; once the sender's wait timed out; or while the timeout's read, which finds
+   *  nothing, is on its way, and that read then returns only once the frame settled the sender. */
+  store?: 'at once' | 'after the timeout' | 'during the timeout read'
+  /** Runs as the recipient starts storing its reply, its encode done. */
+  beforeStore?: (room: { id: string; sender: string }) => Promise<unknown> | void
+  /** The DM's own send fails once its reply's frame was committed. */
+  sendFails?: boolean
+}
+
+function sent(value: unknown) {
+  return { resolved: typeof value === 'string' ? `${value.length} characters` : value }
+}
+
+/** A DM `bob` sends to `alice` with `{ ack: true }`, which alice's listener answers with `reply()`, in a new room on
+ *  `admin`'s store, its reply sent as `schedule` says. What is stored, what the frame carried and how it settled, how
+ *  long the sender waited on its clock, in steps of 5 s, and what it was told. */
+async function acknowledged(
+  admin: Redis,
+  id: string,
+  reply: () => unknown,
+  { frame, store = 'at once', beforeStore, sendFails = false }: Schedule,
+) {
+  const room = await Room.create(id)
+  const alice = await room.join({ meta: { name: 'alice' } })
+  const bob = await room.join({ meta: { name: 'bob' } })
+  alice.listen(reply)
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  const { direct } = getRoomPlane()
+  const commit = direct.commitLane.bind(direct)
+  const frameHeld = Promise.withResolvers<void>()
+  const carried = Promise.withResolvers<{ bytes: string; settled: unknown }>()
+  let sender: unknown = 'pending'
+  const settledSender = () => until(async () => sender !== 'pending', 30_000)
+  vi.spyOn(direct, 'commitLane').mockImplementation(
+    async (target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> => {
+      if (target.lane.kind !== 'inbox' || target.lane.member !== bob.id) return commit(target, payload, opts)
+      const bytes = Buffer.from(payload).toString()
+      if (frame === 'lost') {
+        carried.resolve({ bytes, settled: 'lost' })
+        return { kind: 'stale-cell', key: 'the row lost the frame' }
+      }
+      await frameHeld.promise
+      return commit(target, payload, opts).then(
+        (result) => {
+          carried.resolve({ bytes, settled: result.kind === 'accepted' ? 'committed' : result.kind })
+          return result
+        },
+        (error: unknown) => {
+          carried.resolve({ bytes, settled: told(error) })
+          throw error
+        },
+      )
+    },
+  )
+  if (sendFails) {
+    // The DM's own commit goes through the call's store, which reaches the driver.
+    const driverCommit = RedisRoomDriver.prototype.commitLane
+    vi.spyOn(RedisRoomDriver.prototype, 'commitLane').mockImplementation(async function (
+      this: RedisRoomDriver,
+      target: CommitTarget,
+      payload: Uint8Array,
+      opts?: CommitOptions,
+    ): Promise<CommitResult> {
+      const committed = await driverCommit.call(this, target, payload, opts)
+      if (target.lane.kind !== 'inbox' || target.lane.member !== alice.id || committed.kind !== 'accepted')
+        return committed
+      // Fails once the reply's frame was committed.
+      await carried.promise
+      await sleep(200)
+      throw new Error('Test: the send fails after its reply')
+    })
+  }
+  const run = direct.runOperation.bind(direct)
+  const storeHeld = Promise.withResolvers<void>()
+  vi.spyOn(direct, 'runOperation').mockImplementation(async function <N extends OperationName>(
+    roomId: string,
+    inc: string,
+    operation: OperationOf<N>,
+    args: OperationArgs[N],
+    options?: OperationOptions,
+  ): Promise<OperationResult<OperationValue[N]>> {
+    if (operation.name === 'storeDmReply') {
+      await beforeStore?.({ id, sender: bob.id })
+      if (store !== 'at once') await storeHeld.promise
+    }
+    return run(roomId, inc, operation, args, options)
+  })
+  const { reads } = direct
+  const read = reads.readCells.bind(reads)
+  vi.spyOn(reads, 'readCells').mockImplementation(async (roomId, inc, sel) => {
+    const cells = await read(roomId, inc, sel)
+    const isTimeoutRead = 'keys' in sel && sel.keys.some((key) => key.startsWith(`ack:${bob.id}:`))
+    if (isTimeoutRead && store === 'during the timeout read') {
+      storeHeld.resolve()
+      await settledSender()
+    }
+    return cells
+  })
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  const answer = bob.send(alice.id, 'question', { ack: true }).then(
+    (value: unknown) => {
+      sender = sent(value)
+    },
+    (error: unknown) => {
+      sender = { ...told(error), message: error instanceof Error ? error.message : '' }
+    },
+  )
+  const values = await valuesKey(admin, id)
+  const replyField = async () => (await admin.hkeys(values)).find((field) => field.startsWith(`ack:${bob.id}:`))
+  let stored: string | null = null
+  if (store === 'at once') {
+    await until(async () => (await replyField()) !== undefined || sender !== 'pending', 30_000)
+    const field = await replyField()
+    stored = field === undefined ? null : await admin.hget(values, field)
+  }
+  frameHeld.resolve()
+  let waited = 0
+  for (await sleep(200); sender === 'pending' && waited < 120_000; await sleep(50)) {
+    await vi.advanceTimersByTimeAsync(5_000)
+    waited += 5_000
+  }
+  vi.useRealTimers()
+  storeHeld.resolve()
+  await answer
+  const framed = await Promise.race([carried.promise, sleep(30_000).then(() => ({ bytes: '', settled: 'none' }))])
+  // What a reply that settled no one leaves stored.
+  await sleep(500)
+  const left = (await admin.exists(values)) === 1 && (await replyField()) !== undefined
+  return { stored, frame: framed, waited, sender, left }
+}
+
+/** A DM `bob` sends to `alice` with `{ ack: true }` in a new room on `admin`'s store, whose reply's frame is lost:
+ *  `answer` is alice's listener. Once the reply is stored, the row takes the seq the frame would have had in bob's inbox,
+ *  as a frame lost on its way would, and alice sends bob a DM, whose frame shows bob's inbox skipped one. How the sender
+ *  settled, how long it waited on its clock, in steps of 5 s, whether bob's stored replies were read, and whether the
+ *  reply is still stored. */
+async function acknowledgedThroughGap(admin: Redis, id: string, answer: (data: unknown) => unknown) {
+  const room = await Room.create(id)
+  const alice = await room.join({ meta: { name: 'alice' } })
+  const bob = await room.join({ meta: { name: 'bob' } })
+  alice.listen(answer)
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  // A first DM, so bob's inbox has a seq of its own to skip past.
+  await alice.send(bob.id, 'before')
+  const { direct } = getRoomPlane()
+  const commit = direct.commitLane.bind(direct)
+  vi.spyOn(direct, 'commitLane').mockImplementation(
+    async (target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> => {
+      const isReply =
+        target.lane.kind === 'inbox' &&
+        target.lane.member === bob.id &&
+        Buffer.from(payload.subarray(0, 16)).toString() === '{"__r":"dm-ack",'
+      return isReply ? { kind: 'stale-cell', key: 'the row lost the frame' } : commit(target, payload, opts)
+    },
+  )
+  const { reads } = direct
+  const pages = reads.readCellPages.bind(reads)
+  let repliesRead = false
+  vi.spyOn(reads, 'readCellPages').mockImplementation((roomId, inc, prefix) => {
+    if (prefix.startsWith(`ack:${bob.id}:`)) repliesRead = true
+    return pages(roomId, inc, prefix)
+  })
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  let sender: unknown = 'pending'
+  const settled = bob.send(alice.id, 'question', { ack: true }).then(
+    (value: unknown) => {
+      sender = sent(value)
+    },
+    (error: unknown) => {
+      sender = { ...told(error), message: error instanceof Error ? error.message : '' }
+    },
+  )
+  const values = await valuesKey(admin, id)
+  const replyField = async () => (await admin.hkeys(values)).find((field) => field.startsWith(`ack:${bob.id}:`))
+  await until(async () => (await replyField()) !== undefined, 30_000)
+  // Bob's inbox's order record, `<dc8>`: its last commit's place and id. One place more, under an id no frame carried,
+  // is a commit the inbox never got.
+  const [order] = await admin.keys(`tf:0:room:{${id}}:g:*:om:${bob.id}`)
+  const records = order === undefined ? {} : await admin.hgetallBuffer(order)
+  const [[lane, record] = ['', Buffer.alloc(16)]] = Object.entries(records)
+  if (order !== undefined) {
+    const skipped = randomBytes(16)
+    skipped.writeDoubleLE(record.readDoubleLE(0) + 1, 0)
+    await admin.hset(order, lane, skipped)
+  }
+  const after = alice.send(bob.id, 'after').catch((error: unknown) => told(error))
+  let waited = 0
+  for (await sleep(200); sender === 'pending' && waited < 120_000; await sleep(50)) {
+    await vi.advanceTimersByTimeAsync(5_000)
+    waited += 5_000
+  }
+  vi.useRealTimers()
+  await settled
+  await after
+  const stillStored = (await replyField()) !== undefined
+  return { skipped: Object.keys(records).length === 1, sender, waited, repliesRead, stillStored }
+}
+
+describe.runIf(runs)("a DM's acknowledged reply from a server recipient, over the size the store commits", () => {
+  for (const [i, store] of STORES.entries()) {
+    it(`${store.name}: the frame first: the overflow is stored and sent in the reply's place, and the sender told it before its timeout`, async () => {
+      const admin = await reached(store)
+      const { stored, frame, waited, sender } = await acknowledged(admin, `reply-frame-${i}`, () => LARGE, {
+        frame: 'held',
+      })
+      console.log(
+        JSON.stringify({ store: store.name, storedBytes: stored?.length, frame: frame.settled, waited, sender }),
+      )
+      admin.disconnect()
+
+      expect({
+        storedIsFrame: stored === frame.bytes,
+        storedBelowCeiling: (stored?.length ?? Infinity) < CEILING,
+        frame: frame.settled,
+        beforeTimeout: waited < 60_000,
+        sender,
+      }).toEqual({
+        storedIsFrame: true,
+        storedBelowCeiling: true,
+        frame: 'committed',
+        beforeTimeout: true,
+        sender: { name: 'ChannelOverflowError', outcome: 'none', message: expect.any(String) },
+      })
+    }, 180_000)
+
+    it(`${store.name}: the frame lost: the sender's timeout reads the stored overflow`, async () => {
+      const admin = await reached(store)
+      const { stored, frame, waited, sender } = await acknowledged(admin, `reply-lost-${i}`, () => LARGE, {
+        frame: 'lost',
+      })
+      console.log(JSON.stringify({ store: store.name, storedBytes: stored?.length, waited, sender }))
+      admin.disconnect()
+
+      expect({ storedIsFrame: stored === frame.bytes, timedOut: waited >= 60_000, sender }).toEqual({
+        storedIsFrame: true,
+        timedOut: true,
+        sender: { name: 'ChannelOverflowError', outcome: 'none', message: expect.any(String) },
+      })
+    }, 180_000)
+
+    it(`${store.name}: the timeout's read first, before the reply is stored: the sender is told it timed out`, async () => {
+      const admin = await reached(store)
+      const { waited, sender } = await acknowledged(admin, `reply-late-${i}`, () => LARGE, {
+        frame: 'held',
+        store: 'after the timeout',
+      })
+      console.log(JSON.stringify({ store: store.name, waited, sender }))
+      admin.disconnect()
+
+      expect({ timedOut: waited >= 60_000, sender }).toEqual({
+        timedOut: true,
+        sender: { name: 'RoomError', outcome: 'none', message: expect.stringContaining('timed out') },
+      })
+    }, 180_000)
+
+    it(`${store.name}: a reply small at its first reads and large after: what is stored is what the frame carries`, async () => {
+      const admin = await reached(store)
+      let reads = 0
+      const changing = {
+        get data() {
+          reads++
+          return reads <= 2 ? 'small' : LARGE
+        },
+      }
+      const { stored, frame, waited, sender } = await acknowledged(admin, `reply-getter-${i}`, () => changing, {
+        frame: 'held',
+      })
+      console.log(
+        JSON.stringify({ store: store.name, reads, storedBytes: stored?.length, frame: frame.settled, waited, sender }),
+      )
+      admin.disconnect()
+
+      expect({
+        storedIsFrame: stored === frame.bytes,
+        frame: frame.settled,
+        beforeTimeout: waited < 60_000,
+        sender,
+      }).toEqual({
+        storedIsFrame: true,
+        frame: 'committed',
+        beforeTimeout: true,
+        sender: { resolved: { data: 'small' } },
+      })
+    }, 180_000)
+
+    it(`${store.name}: the timeout's read on its way and finding nothing, the frame settling the sender before it returns: the sender is told what the frame carries`, async () => {
+      const admin = await reached(store)
+      const { frame, waited, sender } = await acknowledged(admin, `reply-race-${i}`, () => LARGE, {
+        frame: 'held',
+        store: 'during the timeout read',
+      })
+      console.log(JSON.stringify({ store: store.name, frame: frame.settled, waited, sender }))
+      admin.disconnect()
+
+      expect({ frame: frame.settled, timedOut: waited >= 60_000, sender }).toEqual({
+        frame: 'committed',
+        timedOut: true,
+        sender: { name: 'ChannelOverflowError', outcome: 'none', message: expect.any(String) },
+      })
+    }, 180_000)
+
+    for (const [j, [arm, before, message]] of (
+      [
+        [
+          'the sender removed',
+          ({ id, sender }) => Room.removeParticipant(id, { id: sender }),
+          'Participant left the room',
+        ],
+        ['the room closed', ({ id }) => Room.close(id), 'Room is closed'],
+      ] satisfies [string, NonNullable<Schedule['beforeStore']>, string][]
+    ).entries()) {
+      it(`${store.name}: ${arm} before the reply is stored: the sender is told that, and no reply is left stored`, async () => {
+        const admin = await reached(store)
+        const { sender, left } = await acknowledged(admin, `reply-gone-${j}-${i}`, () => LARGE, {
+          frame: 'held',
+          beforeStore: before,
+        })
+        console.log(JSON.stringify({ store: store.name, arm, sender, left }))
+        admin.disconnect()
+
+        expect({ sender, left }).toEqual({ sender: { name: 'RoomError', outcome: 'none', message }, left: false })
+      }, 180_000)
+    }
+
+    it(`${store.name}: a reply changed after its encode: what is stored, sent and told is the reply as encoded`, async () => {
+      const admin = await reached(store)
+      const answer = { v: 'as encoded' }
+      const { stored, frame, sender } = await acknowledged(admin, `reply-changed-${i}`, () => answer, {
+        frame: 'held',
+        beforeStore: () => {
+          answer.v = 'changed'
+        },
+      })
+      console.log(JSON.stringify({ store: store.name, stored, frame, sender }))
+      admin.disconnect()
+
+      expect({ storedIsFrame: stored === frame.bytes, frame: frame.settled, sender }).toEqual({
+        storedIsFrame: true,
+        frame: 'committed',
+        sender: { resolved: { v: 'as encoded' } },
+      })
+    }, 180_000)
+
+    it(`${store.name}: the DM's own send failing after its reply's frame was committed: the sender is told the send's failure, not the reply`, async () => {
+      const admin = await reached(store)
+      const { frame, sender, left } = await acknowledged(admin, `reply-send-fails-${i}`, () => 'small', {
+        frame: 'held',
+        sendFails: true,
+      })
+      console.log(JSON.stringify({ store: store.name, frame: frame.settled, sender, left }))
+      admin.disconnect()
+
+      expect({ frame: frame.settled, sender, left }).toEqual({
+        frame: 'committed',
+        sender: { name: 'Error', outcome: 'none', message: 'Test: the send fails after its reply' },
+        left: false,
+      })
+    }, 180_000)
+
+    for (const [j, [arm, answer, expected]] of (
+      [
+        ['a reply', () => 'small', { resolved: '5 characters' }],
+        [
+          'a listener that throws',
+          () => {
+            throw new Error('Test: the listener refuses')
+          },
+          { name: 'RoomError', outcome: 'none', message: expect.not.stringContaining('timed out') },
+        ],
+        ['an overflow', () => LARGE, { name: 'ChannelOverflowError', outcome: 'none', message: expect.any(String) }],
+      ] as const
+    ).entries()) {
+      it(`${store.name}: ${arm}, its frame lost: a later frame in the sender's inbox settles it from the store`, async () => {
+        const admin = await reached(store)
+        const result = await acknowledgedThroughGap(admin, `reply-gap-${j}-${i}`, answer)
+        console.log(JSON.stringify({ store: store.name, arm, ...result }))
+        admin.disconnect()
+
+        const { waited, ...settled } = result
+        expect({ ...settled, beforeTimeout: waited < 60_000 }).toEqual({
+          skipped: true,
+          sender: expected,
+          repliesRead: true,
+          stillStored: false,
+          beforeTimeout: true,
+        })
+      }, 180_000)
+    }
+
+    it(`${store.name}: a reply that throws at its third read: it is stored and sent as its first encode took it`, async () => {
+      const admin = await reached(store)
+      let reads = 0
+      const throwing = {
+        get data() {
+          reads++
+          if (reads === 3) throw new Error('Test: a reply read a third time')
+          return 'small'
+        },
+      }
+      const { stored, frame, waited, sender } = await acknowledged(admin, `reply-throw-${i}`, () => throwing, {
+        frame: 'held',
+      })
+      console.log(JSON.stringify({ store: store.name, reads, frame: frame.settled, waited, sender }))
+      admin.disconnect()
+
+      expect({
+        reads,
+        storedIsFrame: stored === frame.bytes,
+        frame: frame.settled,
+        beforeTimeout: waited < 60_000,
+        sender,
+      }).toEqual({
+        reads: 2,
+        storedIsFrame: true,
+        frame: 'committed',
+        beforeTimeout: true,
+        sender: { resolved: { data: 'small' } },
+      })
+    }, 180_000)
+  }
+})
+
+function leaveRecordBytes(id: string, reason: string, hidden: boolean): number {
+  const leave: Record<string, unknown> = { __r: 'leave', id, cause: 'removed', reason }
+  if (hidden) leave.hidden = true
+  return Buffer.byteLength(JSON.stringify(leave))
+}
+
+/** A removal by identity of a visible and a hidden tab in a new room, whose reason puts only the hidden tab's leave over
+ *  the size; `meanwhile` runs once the removal's lookup read both tabs and their meta, before its last read returns. What the removal was told,
+ *  and which tabs' member cells the store still holds. */
+async function removedMeanwhile(
+  admin: Redis,
+  id: string,
+  meanwhile: (tabs: { visible: string; hidden: string }) => Promise<unknown>,
+) {
+  await Room.create(id)
+  const visible = await Room.join(id, { identity: 'u1' })
+  const hidden = await Room.join(id, { identity: 'u1', hidden: true })
+  const reason = 'r'.repeat(CEILING - leaveRecordBytes(visible.id, '', false))
+  const values = await valuesKey(admin, id)
+  const { reads } = getRoomPlane().direct
+  const pages = reads.readCellPages.bind(reads)
+  // The lookup's last reads are each tab's meta pages: once both ended, `meanwhile` runs, then the lookup returns.
+  const metaRead = new Set<string>()
+  let ran = false
+  vi.spyOn(reads, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+    yield* pages(roomId, inc, prefix)
+    const tab = [visible.id, hidden.id].find((tabId) => prefix.endsWith(`${tabId}:`))
+    if (tab === undefined) return
+    metaRead.add(tab)
+    if (!ran && metaRead.size === 2) {
+      ran = true
+      await meanwhile({ visible: visible.id, hidden: hidden.id })
+    }
+  })
+  const refused = await Room.removeParticipant(id, { identity: 'u1', reason }).then(
+    () => 'resolved',
+    (error: unknown) => told(error),
+  )
+  // Room.getParticipants() lists no hidden tab, so each tab's member cell is read from the store.
+  const kept = {
+    visible: (await admin.hexists(values, `m:${visible.id}`)) === 1,
+    hidden: (await admin.hexists(values, `m:${hidden.id}`)) === 1,
+  }
+  return { ran, refused, kept }
+}
+
+describe.runIf(runs)('a removal by identity of a visible and a hidden tab', () => {
+  for (const [i, store] of STORES.entries()) {
+    it(`${store.name}: over the size for the hidden one only: no tab goes, and the store doesn't change`, async () => {
+      const admin = await reached(store)
+      const id = `tabs-${i}`
+      await Room.create(id)
+      const visible = await Room.join(id, { identity: 'u1' })
+      const hidden = await Room.join(id, { identity: 'u1', hidden: true })
+      const reason = 'r'.repeat(CEILING - leaveRecordBytes(visible.id, '', false))
+      const sizes = {
+        visible: leaveRecordBytes(visible.id, reason, false) - CEILING,
+        hidden: leaveRecordBytes(hidden.id, reason, true) - CEILING,
+      }
+      const before = await snapshot(admin)
+      const refused = await Room.removeParticipant(id, { identity: 'u1', reason }).then(
+        () => 'resolved',
+        (error: unknown) => told(error),
+      )
+      const after = await snapshot(admin)
+      // Room.getParticipants() lists no hidden tab, so each tab's member cell is read from the store.
+      const values = await valuesKey(admin, id)
+      const kept = {
+        visible: (await admin.hexists(values, `m:${visible.id}`)) === 1,
+        hidden: (await admin.hexists(values, `m:${hidden.id}`)) === 1,
+      }
+      const changed = changedKeys(before, after)
+      console.log(JSON.stringify({ store: store.name, sizes, refused, kept, changed }))
+      admin.disconnect()
+
+      expect({ sizes, refused, kept, changed }).toEqual({
+        sizes: { visible: 0, hidden: 14 },
+        refused: { name: 'ChannelOverflowError', outcome: 'none' },
+        kept: { visible: true, hidden: true },
+        changed: [],
+      })
+    }, 180_000)
+
+    it(`${store.name}: its arguments are read once, before its first await`, async () => {
+      const admin = await reached(store)
+      const id = `tabs-args-${i}`
+      const room = await Room.create(id)
+      await Room.join(id, { identity: 'u1' })
+      const causes: LeaveCause[] = []
+      room.onLeave((_member, cause) => void causes.push(cause))
+      // The reason changed while the call awaits its first read.
+      const target = { identity: 'u1', reason: 'at the call' }
+      const removed = Room.removeParticipant(id, target)
+      target.reason = 'changed after'
+      await removed
+      await until(async () => causes.length > 0, 10_000)
+      // A reason that can't be serialized, where no tab matches.
+      const unserializable = await Room.removeParticipant(id, { identity: 'nobody', reason: () => {} }).then(
+        () => 'resolved',
+        () => 'refused',
+      )
+      // The ref and the reason, read through getters.
+      const reads = { ref: 0, reason: 0 }
+      const counted = {
+        get identity() {
+          reads.ref++
+          return 'nobody'
+        },
+        get reason() {
+          reads.reason++
+          return 'counted'
+        },
+      }
+      await Room.removeParticipant(id, counted)
+      console.log(JSON.stringify({ store: store.name, causes, unserializable, reads }))
+      admin.disconnect()
+
+      expect({ causes, unserializable, reads }).toEqual({
+        causes: [{ type: 'removed', reason: 'at the call' }],
+        unserializable: 'refused',
+        reads: { ref: 1, reason: 1 },
+      })
+    }, 180_000)
+
+    it(`${store.name}: the hidden tab gone after the removal read it: refused as of that read, and the visible tab stays`, async () => {
+      const admin = await reached(store)
+      const result = await removedMeanwhile(admin, `tabs-gone-${i}`, ({ hidden }) =>
+        Room.removeParticipant(`tabs-gone-${i}`, { id: hidden }),
+      )
+      console.log(JSON.stringify({ store: store.name, ...result }))
+      admin.disconnect()
+
+      expect(result).toEqual({
+        ran: true,
+        refused: { name: 'ChannelOverflowError', outcome: 'none' },
+        kept: { visible: true, hidden: false },
+      })
+    }, 180_000)
+
+    it(`${store.name}: the room closed after the removal read the tabs: refused as of that read`, async () => {
+      const admin = await reached(store)
+      const result = await removedMeanwhile(admin, `tabs-closed-${i}`, () => Room.close(`tabs-closed-${i}`))
+      console.log(JSON.stringify({ store: store.name, ...result }))
+      admin.disconnect()
+
+      expect({ ran: result.ran, refused: result.refused }).toEqual({
+        ran: true,
+        refused: { name: 'ChannelOverflowError', outcome: 'none' },
+      })
+    }, 180_000)
+  }
+})

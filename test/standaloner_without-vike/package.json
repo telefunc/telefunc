@@ -1,7 +1,9 @@
 {
   "scripts": {
-    "build": "vite build",
-    "preview": "vite build && cd dist/server && cross-env NODE_ENV=production node index.js"
+    "dev": "cross-env TELEFUNC_URL=/api/_telefunc vite --port 3000 --strictPort",
+    "build": "cross-env TELEFUNC_URL=/api/_telefunc vite build",
+    "preview": "pnpm run build && cd dist/server && cross-env NODE_ENV=production node index.js",
+    "preview:manual": "pnpm run build && cd dist/server && cross-env NODE_ENV=production TELEFUNC_MANUAL_FILES=1 node index.js"
   },
   "dependencies": {
     "telefunc": "0.4.0"

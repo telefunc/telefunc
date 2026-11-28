@@ -1,6 +1,6 @@
 # `@telefunc/redis`
 
-Redis-backed broadcast fan-out for Telefunc — a `publish()` on any instance reaches subscribers on every other instance.
+Share Telefunc broadcasts and rooms across servers with Redis.
 
 ## Install
 
@@ -8,28 +8,36 @@ Redis-backed broadcast fan-out for Telefunc — a `publish()` on any instance re
 npm install @telefunc/redis ioredis
 ```
 
+Set `REDIS_URL` on every server. Point every Telefunc server at the same Redis 5 or later.
+
+Requires Redis 5 or later.
+
 ## Setup
 
 ```ts
 import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 
-const redis = new IORedis('redis://localhost:6379')
+const redis = new IORedis(process.env.REDIS_URL!)
 installRedis(redis)
 ```
 
-That swaps Telefunc's default in-memory broadcast transport for Redis Pub/Sub. All subscribers across the cluster observe the same publish order for a given key.
+Call `installRedis()` in your server entry before using Broadcast or Room. Pass an existing ioredis client to reuse its TLS and authentication settings. To use a dedicated key and channel prefix, pass `installRedis(redis, { prefix })` (default: `tf:`).
 
-`Channel` is per-instance — reconnects must land on the instance holding the channel's state. Pair this package with sticky sessions at the load balancer; see [Scaling](https://telefunc.com/stream/scale).
+> Use `maxmemory-policy noeviction` for Room state and [sticky sessions](https://telefunc.com/stream/scale) for browser connections.
 
-### Sharing an existing client
-
-Pass an [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster instance when you want to share a connection or set custom options (e.g. TLS or a retry strategy):
+### Redis Cluster
 
 ```ts
-import IORedis from 'ioredis'
+import { Cluster } from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 
-const redis = new IORedis(process.env.REDIS_URL, { tls: {} })
+const redis = new Cluster([
+  { host: '127.0.0.1', port: 7000 },
+  { host: '127.0.0.1', port: 7001 },
+  { host: '127.0.0.1', port: 7002 },
+])
 installRedis(redis)
 ```
+
+See [telefunc.com/redis](https://telefunc.com/redis) for the full documentation.
