@@ -31,7 +31,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private newestReceipt: Promise<ChannelPublishAck> | null = null
 
   constructor(options: ClientBroadcastOptions) {
-    super({ ...options, lossyBroadcast: options.lossy })
+    super(options)
     this.lossy = options.lossy === true
     // Nothing waits on a publish's credit, so the page grants the largest window from the start.
     this.receiveCredit.widenByteWindow()
@@ -124,10 +124,12 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   protected override dispatchDataFrame(frame: ChannelDataFrame): void {
     if (frame.tag === TAG.PUBLISH) {
+      if (this.lossy) this.receiveCredit.confirmSoon()
       this.onPeerPublish(frame.text, frame.info, frame.bytes)
       return
     }
     if (frame.tag === TAG.PUBLISH_BINARY) {
+      if (this.lossy) this.receiveCredit.confirmSoon()
       this.onPeerPublishBinary(frame.data as Uint8Array<ArrayBuffer>, frame.info, frame.bytes)
       return
     }
@@ -166,6 +168,5 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
       }
     }
     this.receiveCredit.onPublishConsumed(bytes)
-    if (this.lossy) this.receiveCredit.confirmSoon()
   }
 }

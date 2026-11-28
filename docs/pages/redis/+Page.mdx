@@ -57,7 +57,7 @@ const subscription = Broadcast.subscribe(key, listener)
 await subscription.opened
 ```
 
-While Redis is unreachable, `opened` waits while it remains subscribed, and rejects with the error once the subscription fails. A <Link href="/channel#new-broadcastchannel">`BroadcastChannel`</Link> whose subscription fails closes.
+`opened` resolves when Redis confirms the subscription or you unsubscribe. If the subscription fails first, `opened` rejects and any <Link href="/channel#new-broadcastchannel">`BroadcastChannel`</Link> using that subscription closes.
 
 ## Channels
 

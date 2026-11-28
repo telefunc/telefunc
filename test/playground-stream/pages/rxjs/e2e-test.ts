@@ -1,7 +1,7 @@
 export { testRxjs }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult, resetCleanupState, getCleanupState } from '../../e2e-utils'
+import { navigate, getResult, resetCleanupState, getCleanupState, sleep } from '../../e2e-utils'
 
 function testRxjs(inDocker = false) {
   // ── Observable: server → client ──────────────────────────────────────
@@ -256,6 +256,24 @@ function testRxjs(inDocker = false) {
       // C: Observable as arg — client emitted 1, 'bad' (invalid), 2.
       expect(result.observableArgReceived).deep.equal([1, 2])
     })
+  })
+
+  // `.testRun.ts` tolerates no `[telefunc:rxjs]` line about a page that left: one fails the run.
+  test('rxjs: subject arg — a Subject whose page leaves is errored on the server without a line in its log', async () => {
+    await navigate(`${getServerUrl()}/rxjs`)
+    await resetCleanupState()
+
+    await page.click('#test-subject-page-leaves')
+    await autoRetry(async () => {
+      expect((await getCleanupState()).pageLeavesReceived).toBe('hello')
+    })
+
+    await page.reload()
+    await autoRetry(async () => {
+      expect((await getCleanupState()).pageLeavesErrored).toBe('ChannelPageLeftError')
+    })
+    // rxjs reports an unhandled error on a timer: the log gets it within this test, if at all.
+    await sleep(500)
   })
 
   test('rxjs: subject — server subscribes without error handler, no crash on error', async () => {

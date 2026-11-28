@@ -1,7 +1,14 @@
-export { testChannel }
+export {
+  testAbortUnsendable,
+  testSseOpenAnsweredWithHtml,
+  testSseRefusals,
+  testSseRecoveryRefused,
+  testSseStalledChannel,
+  testChannel,
+}
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import type { Request, Response, WebSocket, WebSocketRoute } from 'playwright-chromium'
+import type { Page, Request, Response, WebSocket, WebSocketRoute } from 'playwright-chromium'
 import {
   navigate,
   withPacedLink,
@@ -12,6 +19,10 @@ import {
   startProxy,
   countConnections,
   defined,
+  cutWire,
+  closeAllConnections,
+  serverRuntime,
+  withRoute,
 } from '../../e2e-utils'
 import { newCDPSession, sendRefusedWarning, withNetworkConditions } from '../../../utils'
 import { parseChannelTransports } from '../../channelTransports'
@@ -141,7 +152,11 @@ function testChannel(isDev: boolean, inDocker = false) {
     return waitForTransportReconnectSignal()
   }
 
+  // Each navigates to a page of its own; the tests from the connect test on share the page that one connects.
   testChannelApi()
+  testAbortUnsendable()
+  if (channelTransports[0] === 'sse') testSseOpenAnsweredWithHtml()
+  if (channelTransports[0] === 'sse') testSseRefusals(isDev, inDocker)
 
   // ── Basic connection ─────────────────────────────────────────────────
 
@@ -1586,6 +1601,252 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
     expect(await bugs()).deep.equal(bugsBefore)
     expectLog('the server responded with a status of 400', { filter: (log) => log.logSource === 'Browser Error' })
+  })
+}
+
+/** A first SSE open answered with a page of HTML, as an app's SPA fallback answers it, or refused with a status. */
+function testSseOpenAnsweredWithHtml() {
+  test('channel: a first SSE open answered with a page of HTML, or refused with 500, ends the channel at once, naming what it got', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    for (const [status, ended] of [
+      [200, 'The server answered the SSE connection with 200 text/html, not an event stream'],
+      [500, 'Server rejected SSE connection with 500 text/html'],
+    ] as const) {
+      await withRoute(
+        isSseUrl,
+        async (route) => {
+          if (!isSseRequest(route.request(), 'opens')) return route.fallback()
+          await route.fulfill({ status, contentType: 'text/html', body: '<!doctype html><p>The app</p>' })
+        },
+        async () => {
+          expect(await page.evaluate(() => window.openAckChannel!())).toBe(ended)
+        },
+      )
+    }
+    expectLog('the server responded with a status of 500', { filter: (log) => log.logSource === 'Browser Error' })
+  })
+}
+
+/** A request of the page's SSE wire: `opens` for the POST that opens its event stream, `posts` for the others. */
+function isSseRequest(request: Request, which: 'opens' | 'posts'): boolean {
+  const url = new URL(request.url())
+  if (!url.pathname.endsWith('/_telefunc') || url.searchParams.get('_telefunc') !== 'sse') return false
+  return (request.headers().accept === 'text/event-stream') === (which === 'opens')
+}
+const isSseUrl = (url: URL) => url.pathname.endsWith('/_telefunc') && url.searchParams.get('_telefunc') === 'sse'
+
+/** Opens a channel whose server counts its messages, over `transports`, as `name`, on the connection of
+ *  `connectionKey`, else on one of its own. */
+async function openCounted(
+  transports: ('sse' | 'ws')[],
+  slot: { name?: string; connectionKey?: string } = {},
+): Promise<string> {
+  const opened = await page.evaluate(({ transports, slot }) => window.openCounted!(transports, slot), {
+    transports,
+    slot,
+  })
+  if (!('id' in opened)) throw new Error(`The channel ended before it opened: ${opened.ended}`)
+  return opened.id
+}
+const sendCounted = (msg: string, name?: string) =>
+  page.evaluate(({ msg, name }) => window.sendCounted!(msg, name), { msg, name })
+const countedEnd = (name?: string) => page.evaluate((name) => window.countedEnd!(name), name)
+/** What the server of `openCounted()`'s channel got, in order. */
+async function countedOf(id: string): Promise<string[]> {
+  return JSON.parse((await getCleanupState())[`counted_${id}`] ?? '[]')
+}
+/** What the server recorded as a bug or an unhandled rejection (+server.ts). */
+async function serverFaults(): Promise<string[]> {
+  return Object.keys(await getCleanupState()).filter((key) => /^(bug|unhandledRejection):/.test(key))
+}
+
+/** What the page does with refusals of its SSE requests, and with a server that closes its connections. */
+function testSseRefusals(isDev: boolean, inDocker = false) {
+  // Over HTTP/2 (Caddy TLS in Docker), SSE sends on its streaming upload POST rather than batch POSTs.
+  if (!inDocker)
+    test("channel: a 409 that isn't Telefunc's to a batch POST is a loss the channel goes on after, and Telefunc's own 409 ends it as a server that was updated", async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      const id = await openCounted(['sse'])
+      for (const answer of ['plain', 'marked'] as const) {
+        let refused = 0
+        const refuseOnce: Parameters<Page['route']>[1] = async (route) => {
+          if (refused > 0 || !isSseRequest(route.request(), 'posts')) return route.fallback()
+          refused++
+          await route.fulfill(
+            answer === 'plain'
+              ? { status: 409, contentType: 'text/plain', body: 'Conflict' }
+              : {
+                  status: 409,
+                  contentType:
+                    'text/vnd.telefunc.refusal; kind=reload; reason="The server runs another wire version: reload the page."',
+                  body: 'The server runs another wire version: reload the page.',
+                },
+          )
+        }
+        await withRoute(isSseUrl, refuseOnce, async () => {
+          if (answer === 'plain') {
+            expect(await sendCounted('past a plain 409')).toBe('ack:past a plain 409')
+            expect(refused).toBe(1)
+            expect(await countedOf(id)).deep.equal(['past a plain 409'])
+          } else {
+            void sendCounted('refused with a marked 409')
+            expect(await countedEnd()).toMatch(/server was updated since this page loaded/)
+            expect(refused).toBe(1)
+          }
+        })
+      }
+      expectLog('the server responded with a status of 409', { filter: (log) => log.logSource === 'Browser Error' })
+    })
+
+  test("channel: behind a proxy that drops `x-telefunc-request`, a page with ['sse', 'ws'] is refused `route` and moves to a WebSocket at once, and its messages arrive", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    const refusals: string[] = []
+    const webSocketOpened = page.waitForEvent('websocket', { predicate: (ws) => ws.url().includes('/_telefunc') })
+    // Sent from the test process, as `route.continue({ headers })`'s headers would stay on the page's later requests.
+    const stripHeader: Parameters<Page['route']>[1] = async (route) => {
+      const headers = { ...route.request().headers() }
+      delete headers['x-telefunc-request']
+      const response = await route.fetch({ headers })
+      refusals.push(`${response.status()} ${response.headers()['content-type']}`)
+      await route.fulfill({ response })
+    }
+    await withRoute(isSseUrl, stripHeader, async () => {
+      const id = await openCounted(['sse', 'ws'])
+      await webSocketOpened
+      expect(await sendCounted('over the WebSocket')).toBe('ack:over the WebSocket')
+      expect(await countedOf(id)).deep.equal(['over the WebSocket'])
+      // The open, and the streaming upload the page may send beside it.
+      expect(refusals.length).greaterThanOrEqual(1)
+      for (const refusal of refusals)
+        expect(refusal).toBe('400 text/vnd.telefunc.refusal; kind=route; reason="Malformed Telefunc Request"')
+    })
+    expectLog('the server responded with a status of 400', { filter: (log) => log.logSource === 'Browser Error' })
+    if (isDev) {
+      expectLog('The `x-telefunc-request` header of the HTTP request is missing', {
+        filter: (log) => log.logSource === 'stderr',
+      })
+    }
+  })
+
+  // Only the Node server's `closeAllConnections()` (+server.ts), which `pnpm dev` and Caddy-fronted Docker don't serve directly.
+  if (!isDev && !inDocker && serverRuntime() === 'node')
+    test('channel: a server that closes all its connections while a page is connected over SSE prints nothing and leaves nothing uncaught, and the page reconnects', async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      const id = await openCounted(['sse'])
+      expect(await sendCounted('before')).toBe('ack:before')
+      const faultsBefore = await serverFaults()
+      await closeAllConnections()
+      // Past the close, which comes 100 ms after its answer: the next message goes on the wire the page reconnects. What
+      // the server prints on stderr, the harness fails the test on.
+      await page.waitForTimeout(500)
+      expect(await sendCounted('after')).toBe('ack:after')
+      expect(await countedOf(id)).deep.equal(['before', 'after'])
+      expect(await serverFaults()).deep.equal(faultsBefore)
+    })
+}
+
+/** A recovery whose SSE reopens a proxy refuses. Needs a short `reconnectTimeout`. */
+function testSseRecoveryRefused() {
+  test("channel: during a recovery, the page retries an SSE reopen a proxy answers with 502, and ends the channel with the 502's words once it gives up", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await openCounted(['sse'])
+    expect(await sendCounted('before')).toBe('ack:before')
+    let refused = 0
+    const badGateway: Parameters<Page['route']>[1] = async (route) => {
+      if (!isSseRequest(route.request(), 'opens')) return route.fallback()
+      refused++
+      await route.fulfill({ status: 502, contentType: 'text/html', body: '<!doctype html><p>Bad Gateway</p>' })
+    }
+    await withRoute(isSseUrl, badGateway, async () => {
+      await cutWire()
+      expect(await countedEnd()).toBe('Server rejected SSE connection with 502 text/html')
+      expect(refused).greaterThanOrEqual(2)
+    })
+    expectLog('the server responded with a status of 502', { filter: (log) => log.logSource === 'Browser Error' })
+  })
+
+  test("channel: during a recovery, an SSE reopen a proxy answers with 502, then one a server on another wire version refuses, ends the channel as a server that was updated, not with the 502's words", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await openCounted(['sse'])
+    expect(await sendCounted('before')).toBe('ack:before')
+    const answers: number[] = []
+    const badGatewayThenUpdated: Parameters<Page['route']>[1] = async (route) => {
+      if (!isSseRequest(route.request(), 'opens')) return route.fallback()
+      if (answers.length === 0) {
+        answers.push(502)
+        return route.fulfill({ status: 502, contentType: 'text/html', body: '<!doctype html><p>Bad Gateway</p>' })
+      }
+      answers.push(409)
+      await route.fulfill({
+        status: 409,
+        contentType:
+          'text/vnd.telefunc.refusal; kind=reload; reason="The server runs another wire version: reload the page."',
+        body: 'The server runs another wire version: reload the page.',
+      })
+    }
+    await withRoute(isSseUrl, badGatewayThenUpdated, async () => {
+      await cutWire()
+      expect(await countedEnd()).toMatch(/server was updated since this page loaded/)
+      expect(answers.slice(0, 2)).deep.equal([502, 409])
+    })
+    expectLog('the server responded with a status of 502', { filter: (log) => log.logSource === 'Browser Error' })
+    expectLog('the server responded with a status of 409', { filter: (log) => log.logSource === 'Browser Error' })
+  })
+}
+
+/** A channel whose batch POSTs a proxy never lets through, beside one on the same connection whose POSTs it lets
+ *  through. Needs a short `reconnectTimeout`. */
+function testSseStalledChannel() {
+  test('channel: a channel whose batch POSTs never get through ends after reconnectTimeout, naming what the page saw, and the channel beside it on its connection goes on', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    const connectionKey = crypto.randomUUID()
+    await openCounted(['sse'], { name: 'stuck', connectionKey })
+    const besideId = await openCounted(['sse'], { name: 'beside', connectionKey })
+    let cut = 0
+    const cutStuck: Parameters<Page['route']>[1] = async (route) => {
+      const request = route.request()
+      if (!isSseRequest(request, 'posts') || !request.postDataBuffer()?.includes('never through'))
+        return route.fallback()
+      cut++
+      await route.abort()
+    }
+    await withRoute(isSseUrl, cutStuck, async () => {
+      const stuckEnd = countedEnd('stuck')
+      void sendCounted('never through', 'stuck')
+      // The first cut drops the wire; from the next, the stuck data goes in POSTs of its own and the wire stays.
+      await autoRetry(() => expect(cut).greaterThanOrEqual(2))
+      expect(await sendCounted('beside it', 'beside')).toBe('ack:beside it')
+      expect(await stuckEnd).toMatch(
+        /the server hasn't confirmed what the page sent on it for over 2 s of reconnects\. The last try: The request carrying it got no answer/,
+      )
+      expect(await sendCounted('after it ended', 'beside')).toBe('ack:after it ended')
+      expect(await countedOf(besideId)).deep.equal(['beside it', 'after it ended'])
+    })
+    expectLog('net::ERR_FAILED', { filter: (log) => log.logSource === 'Browser Error' })
+  })
+}
+
+/** The server's `abort()` of a reason it can't send. */
+function testAbortUnsendable() {
+  test("channel: a server abort(value) whose value can't be sent, as JSON can't hold it or it is past what a channel holds, also before the page opened the channel, throws, and the page ends with an Abort without it", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    for (const reason of ['circular', 'oversize'] as const) {
+      for (const beforeOpen of [false, true]) {
+        const ended = await page.evaluate(({ reason, beforeOpen }) => window.abortWithUnsendable!(reason, beforeOpen), {
+          reason,
+          beforeOpen,
+        })
+        expect({ reason, beforeOpen, isAbort: ended.isAbort, abortValue: ended.abortValue }).deep.equal({
+          reason,
+          beforeOpen,
+          isAbort: true,
+          abortValue: undefined,
+        })
+        const thrown = (await getCleanupState())[`abortUnsendable_${ended.id}`]
+        if (reason === 'oversize') expect(thrown).toBe('threw ChannelOverflowError')
+        else expect(thrown).toMatch(/^threw /)
+      }
+    }
   })
 }
 

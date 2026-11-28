@@ -25,6 +25,7 @@ import {
   onUploadProps,
   onUploadIgnored,
   onReturnChannelIgnoringFile,
+  onTransferFirstFile,
 } from './FileUpload.telefunc'
 
 /** The channel `#test-channel-unread-file` got: held, so that it isn't collected while the row reads it. */
@@ -315,6 +316,18 @@ function FileUpload() {
         }}
       >
         Channel returned, its File unread
+      </button>
+
+      <button
+        id="test-transfer-first-file"
+        onClick={async () => {
+          const size = 1024 * 1024
+          const first = new File([new Uint8Array(size).fill(1)], 'first.bin')
+          const second = new File([new Uint8Array(size).fill(2)], 'second.bin')
+          setResult(JSON.stringify(await onTransferFirstFile(first, second)))
+        }}
+      >
+        First file's chunks transferred
       </button>
 
       <pre id="upload-result">{result}</pre>

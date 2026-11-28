@@ -11,7 +11,11 @@ import {
   serverArrayBuffers,
   sleep,
   defined,
+  cutWire,
+  canCutWire,
+  getCleanupState,
 } from '../../e2e-utils'
+import { startBlackHoleProxy } from '../../black-hole-proxy'
 import { withNetworkConditions } from '../../../utils'
 import { parseChannelTransports } from '../../channelTransports'
 import { onSlowLink } from '../../slowLinkCard'
@@ -66,6 +70,10 @@ function testSlowLink(isDev: boolean) {
   // With two transports the page opens an SSE stream, then moves to a WebSocket: wire-e2e-test.ts covers the rest of a
   // slow link there.
   if (upgrades) return
+
+  // Over SSE the page's next open may go on a connection it already has, which `delayFirstByte` leaves on time.
+  if (canCutWire() && parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'ws')
+    testLateAnswers()
 
   if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse')
     test('channel: SSE wires the page gave up on hold nothing of the 32 MiB waiting for it, and all of it arrives', async () => {
@@ -228,6 +236,46 @@ function testSlowLink(isDev: boolean) {
         expect((slowUplink?.longestTickGapMs ?? Infinity) - longestStallMs).lessThan(PING_INTERVAL_MS)
       },
     )
+  })
+}
+
+// The page cuts an attempt the server hasn't answered by its allowance, 3 s at first, and allows the next more.
+function testLateAnswers() {
+  test('channel: after a WebSocket drop, a server that answers every new connection 4 s late gets the next message on a later attempt, once the page cut the first', async () => {
+    const proxy = await startBlackHoleProxy(getServerUrl())
+    try {
+      await navigate(`${proxy.url}/channel`)
+      await page.click('#wire-upload-open')
+      const tallyOf = async () => {
+        const { upload } = await getResult<{ upload: { channelId: string } | null }>('#wire-state')
+        return JSON.parse(
+          (await getCleanupState())[`wireUpload_${defined(upload, 'the upload card').channelId}`] ?? 'null',
+        )
+      }
+      await autoRetry(async () => expect(await tallyOf()).deep.equal({ text: 1, binary: 0, inOrder: true }))
+      proxy.delayFirstByte(4_000)
+      let attempts = 0
+      const onWebSocket = (ws: { url(): string }) => {
+        if (ws.url().includes('/_telefunc')) attempts++
+      }
+      page.on('websocket', onWebSocket)
+      const droppedAt = performance.now()
+      await cutWire()
+      await page.click('#wire-upload-send')
+      await autoRetry(async () => expect(await tallyOf()).deep.equal({ text: 2, binary: 0, inOrder: true }), {
+        timeout: 20_000,
+      })
+      page.off('websocket', onWebSocket)
+      // At most 0.5 s of backoff, the 3 s cut, at most 1.5 s more, and 4 s.
+      expect(performance.now() - droppedAt).lessThan(9_000)
+      expect(attempts).greaterThanOrEqual(2)
+    } finally {
+      try {
+        await page.goto('about:blank')
+      } finally {
+        await proxy.close()
+      }
+    }
   })
 }
 

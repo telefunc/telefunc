@@ -201,7 +201,8 @@ function getChannelMux(): ChannelMux {
  *  through `onWireOpen` and name it by identity from then on; a deployment with several instances relies on sticky
  *  sessions at its load balancer. */
 class ChannelMux implements UpgradeStagesOwner {
-  private readonly channels = new Map<string, ServerChannel>()
+  /** Only calls from the session that carried a channel can change what its page wants. */
+  private readonly channels = new Map<string, { channel: ServerChannel; session?: string }>()
   /** The channels a reconcile named before they registered, which `registerChannel` attaches. */
   private readonly registrationWaits = new RegistrationWaits()
   private readonly sessions = new SessionRegistry({
@@ -243,11 +244,11 @@ class ChannelMux implements UpgradeStagesOwner {
 
   /** Callers must not invoke `channel._registerChannel()` directly. `page`: the page the channel's connect window
    *  waits for, which shows it is on its way while it sends the call's body (`ATTACHABLE_NOW` where nothing is on its
-   *  way). */
-  registerChannel(channel: ServerChannel<any, any>, page: CallPage): void {
+   *  way). `session`: the session of the call that carried it. */
+  registerChannel(channel: ServerChannel<any, any>, page: CallPage, session?: string): void {
     // Registered before any waiter attaches it: its `onOpen` may end it, and it tells this mux when it does.
     channel._registerChannel(page, this)
-    this.channels.set(channel.id, channel)
+    this.channels.set(channel.id, { channel, session })
     // A channel that ended before a response carried it waits for its page, as any ended channel does.
     if (channel._phase === 'ended') this.ended.keep(channel, this.options.reconnectTimeout)
     for (const awaited of this.registrationWaits.take(channel.id)) {
@@ -263,9 +264,9 @@ class ChannelMux implements UpgradeStagesOwner {
     const session = getSessionToken(call)
     const pending: Promise<void>[] = []
     for (const want of wants) {
-      const channel = this.channels.get(want.channel)
-      if (session === undefined || !channel?._callRequest || getSessionToken(channel._callRequest) !== session) continue
-      const inEffect = channel._applyCallWant(want, call.signal, this.options.connectTtl)
+      const entry = this.channels.get(want.channel)
+      if (!entry || session === undefined || entry.session !== session) continue
+      const inEffect = entry.channel._applyCallWant(want, call.signal, this.options.connectTtl)
       if (inEffect) pending.push(inEffect)
     }
     return pending.length === 0 ? undefined : Promise.all(pending)
@@ -288,7 +289,7 @@ class ChannelMux implements UpgradeStagesOwner {
 
   /** Lets go of the ended channel `id`, kept for its page, where the memory ledger needs the room. */
   letGoEnded(id: string): void {
-    const channel = this.channels.get(id)
+    const channel = this.channels.get(id)?.channel
     assert(channel)
     this.ended.release(channel)
   }
@@ -366,6 +367,11 @@ class ChannelMux implements UpgradeStagesOwner {
     for (const { channel } of outcome.attached) channel._confirmWant()
     // Sends are sync, so the FIN can't pass anything on the new wire.
     if (outcome.retiredWire !== null) this.wires.get(outcome.retiredWire)?.sender.send(encode.fin())
+  }
+
+  /** The wire's socket sent what it held: what the ledger holds for the wire and the socket no longer holds goes. */
+  onWireDrain(wire: Wire): void {
+    this.wires.get(wire)?.sender.rebalanceMemory()
   }
 
   /** The wire's transport saw it close: the mux forgets it. Returns the session the wire held, if it held one. */
@@ -787,7 +793,7 @@ class ChannelMux implements UpgradeStagesOwner {
    *  server has ends now, and an initial one it hasn't registered yet ends as it registers, within `connectTtl`. */
   private refuseNamed(open: ReconcileOpenEntry[], entry: WireEntry, cause: SessionCause): void {
     for (const each of open) {
-      const channel = this.channels.get(each.id)
+      const channel = this.channels.get(each.id)?.channel
       if (channel) channel._onServerEnd(cause)
       // One refused wait per channel, however many reopens name it: the first refusal stands, its deadline too.
       else if (each.initial && !this.registrationWaits.refuses(each.id)) {
@@ -1047,7 +1053,7 @@ class ChannelMux implements UpgradeStagesOwner {
       awaited.open = open
       if (awaited.phase !== 'attached') return null
     }
-    const existing = this.channels.get(open.id)
+    const existing = this.channels.get(open.id)?.channel
     if (existing) {
       entry.state.attaching.add(existing)
       return this.attachChannel(existing, open, entry, replay)

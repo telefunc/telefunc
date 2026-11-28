@@ -376,8 +376,8 @@ importers:
         specifier: ^0.7.20
         version: 0.7.20
       crossws:
-        specifier: ^0.4.4
-        version: 0.4.6(srvx@0.11.16)
+        specifier: ^0.4.17
+        version: 0.4.17(srvx@0.11.16)
       es-module-lexer:
         specifier: ^1.7.0
         version: 1.7.0
@@ -4451,8 +4451,8 @@ packages:
     resolution: {integrity: sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA==}
     engines: {node: '>= 8'}
 
-  crossws@0.4.6:
-    resolution: {integrity: sha512-/Wxe9Z007EbJ496j88nToZEvyPZ8PY/wjZJ18Agh/GCA9cYHyLbxtrpdFlFzAw3TV20F0SUYGl0g6PzChbwUrg==}
+  crossws@0.4.17:
+    resolution: {integrity: sha512-YG2kyfafNXKmu7e6k64yrj6whrw7m5sBIsOSXOlJ/72X3TQWRQuw8DhvXFDcBk8HF77PnTSygnm7xpYCTnFpow==}
     peerDependencies:
       srvx: '>=0.11.5'
     peerDependenciesMeta:
@@ -10911,7 +10911,7 @@ snapshots:
       shebang-command: 2.0.0
       which: 2.0.2
 
-  crossws@0.4.6(srvx@0.11.16):
+  crossws@0.4.17(srvx@0.11.16):
     optionalDependencies:
       srvx: 0.11.16
 

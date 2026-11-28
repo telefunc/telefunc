@@ -126,8 +126,8 @@ type LossyBehind = { tag: typeof TAG.TEXT | typeof TAG.BINARY; data: EntryData; 
 /** A send that waits for room, with the lossy send behind it, and how its promise settles if the channel ends first. */
 type WaitingSend = { wait: RoomWait<LossyBehind>; reject: (err: Error) => void }
 
-/** The page that is to attach to a channel its call returned, as the channel's connect window waits for it: a browser
- *  attaches only once it has sent the call's whole body. */
+/** The page that is to attach to a channel its call returned, as the channel's `connectTtl` window waits for it: each
+ *  chunk of the call's upload still arriving restarts the window, so a slow upload isn't taken for a page that left. */
 type CallPage = {
   /** When the page last showed it is on its way (a `performance.now()` time): each byte of the call's upload is such a
    *  sign. The window counts from the later of it and the channel's registration. */
@@ -172,8 +172,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected peer: IndexedPeer | null = null
   /** The request that opened the wire its page is attached on, while it is. */
   protected wireRequest: Request | undefined = undefined
-  /** @internal The request of the call that carried it: only calls of its session change what its page wants. */
-  _callRequest: Request | undefined = undefined
   private readonly listeners = new Listeners<ChannelListener<ClientToServer>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
   protected offlineBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(this)
@@ -587,7 +585,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  `toJSON`, ended it already. */
   private abortWith(reason: AbortReason, message?: string): void {
     this.lifecycle.endWith(createAbortError(reason.value, message), () => {
-      // Owed, the abort is so before its close callbacks run, which may need a subscriber's memory (`ServerBroadcast.shed`).
+      // Owed before its close callbacks run: what it drops is gone by then, so they find its memory free.
       this.onAbortOwed()
       this.sendWaitingNow({ dropLossy: true })
       this.sendEnd((peer) => peer.sendSequenced(encode.abort, reason.serialized))
@@ -1232,7 +1230,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _finalize(err: Error | undefined): void {
     const pageGone = this.endsPageGone
     // What of it still waits for the wire of a page that is gone, its sends too, would reach no one.
-    if (pageGone && this.peer) this.peer.sender.queue.dropWaitingFrom(this.peer.index, 'start')
+    if (pageGone && this.peer) this.peer.sender.dropWaitingFrom(this.peer.index, 'start')
     this.lossySends?.dispose()
     const pageAttached = this.peer !== null
     this.peer = null

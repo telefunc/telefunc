@@ -12,6 +12,7 @@ export {
 
 import React from 'react'
 import { onChannelPublishesBehind, onChannelLossyTicker } from './Channel.telefunc'
+import { onBroadcastKeys } from './SmallPendingExtra.telefunc'
 import { openChannel } from './openChannel'
 
 type BroadcastBackpressureState = {
@@ -42,6 +43,7 @@ type BroadcastBackpressureState = {
     across: { publish: string; received: number; closeErr: string }
   } | null
   broadcastAwayShared: { received: number[][]; closed: string[] } | null
+  broadcastKeys: { publish: string; firstClosed: string; secondReceived: string[]; secondClosed: boolean } | null
 }
 
 const initialBroadcastBackpressureState: BroadcastBackpressureState = {
@@ -52,6 +54,7 @@ const initialBroadcastBackpressureState: BroadcastBackpressureState = {
   lossyTicker: null,
   broadcastBehindCloses: null,
   broadcastAwayShared: null,
+  broadcastKeys: null,
 }
 
 type Show = (state: Partial<BroadcastBackpressureState>) => void
@@ -135,13 +138,49 @@ function BroadcastOverflow({ show }: { show: Show }) {
   }
 
   return (
+    <>
+      <button
+        id="channel-test-broadcast-overflow"
+        type="button"
+        onClick={testBroadcastOverflow}
+        className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+      >
+        Broadcast Publishes More Than The Server Can Hold
+      </button>
+      <BroadcastKeys show={show} />
+    </>
+  )
+}
+
+function BroadcastKeys({ show }: { show: Show }) {
+  async function testBroadcastKeys() {
+    show({ broadcastKeys: null })
+    const { first, second, control } = await openChannel(onBroadcastKeys)
+    first.subscribeBinary(() => {})
+    const firstClosing = new Promise<string>((resolve) => first.onClose((err) => resolve(err?.name ?? 'none')))
+    const secondReceived: string[] = []
+    const secondReceiving = new Promise<void>((resolve) =>
+      second.subscribe((message) => {
+        secondReceived.push(message)
+        resolve()
+      }),
+    )
+    const publish = await control.send('publish', { ack: true })
+    const firstClosed = await firstClosing
+    await secondReceiving
+    show({ broadcastKeys: { publish, firstClosed, secondReceived, secondClosed: second.isClosed } })
+    second.close()
+    control.close()
+  }
+
+  return (
     <button
-      id="channel-test-broadcast-overflow"
+      id="channel-test-broadcast-keys"
       type="button"
-      onClick={testBroadcastOverflow}
+      onClick={testBroadcastKeys}
       className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
     >
-      Broadcast Publishes More Than The Server Can Hold
+      Broadcast Publish Past The Server's Memory Beside Another Key
     </button>
   )
 }

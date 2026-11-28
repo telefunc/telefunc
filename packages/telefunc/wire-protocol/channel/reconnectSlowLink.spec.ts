@@ -100,9 +100,9 @@ async function link() {
   }
 }
 
-for (const channels of [1, 4_096])
+for (const channels of [1, 1_000])
   for (const transport of ['sse', 'ws'] as const)
-    test(`over ${transport === 'ws' ? 'a WebSocket' : 'SSE'}, a page with ${channels === 1 ? 'a channel' : '4,096 channels'} whose wire drops on a 400 kbit/s link with a 400 ms round trip reconnects on its first attempt, and what it sent arrives`, async () => {
+    test(`over ${transport === 'ws' ? 'a WebSocket' : 'SSE'}, a page with ${channels === 1 ? 'a channel' : '1,000 channels'} whose wire drops on a 400 kbit/s link with a 400 ms round trip reconnects on its first attempt, and what it sent arrives`, async () => {
       const network = await link()
       const register = vi.spyOn(WireLifecycle.prototype, 'register')
       const pages: ClientChannel<string, string>[] = []

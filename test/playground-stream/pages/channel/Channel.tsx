@@ -22,6 +22,8 @@ import { Abort as TelefuncAbort, abort, ChannelOverflowError, close, withContext
 import {
   onChannelInit,
   onChannelAbortTest,
+  onChannelAbortUnsendable,
+  onChannelCounted,
   onChannelPerSendAck,
   onChannelHookInstrument,
   onChannelBinary,
@@ -89,6 +91,23 @@ declare global {
     sendAcrossFlip?: () => Promise<unknown>
     /** Lets the send-order row go on. */
     sendOrderGo?: (value: unknown) => void
+    /** Opens a channel the server keeps open (`onChannelPerSendAck`): 'opened', or the message it ended with. */
+    openAckChannel?: () => Promise<string>
+    /** Opens a channel the server aborts with a reason it can't send (`onChannelAbortUnsendable`), and how it ended. */
+    abortWithUnsendable?: (
+      reason: 'circular' | 'oversize',
+      beforeOpen: boolean,
+    ) => Promise<{ id: string; isAbort: boolean; abortValue: unknown }>
+    /** Opens a channel the server counts the messages of (`onChannelCounted`), over `transports` when given, as `name`,
+     *  on the connection of `connectionKey`, else on one of its own: its id once it opened, or the message it ended with. */
+    openCounted?: (
+      transports?: ('sse' | 'ws')[],
+      slot?: { name?: string; connectionKey?: string },
+    ) => Promise<{ id: string } | { ended: string }>
+    /** Sends `msg` on the channel `openCounted()` opened as `name`: its answer, or the message the send failed with. */
+    sendCounted?: (msg: string, name?: string) => Promise<string>
+    /** How the channel `openCounted()` opened as `name` ended: the message it ended with. */
+    countedEnd?: (name?: string) => Promise<string>
   }
 }
 
@@ -524,6 +543,43 @@ function ChannelDemo() {
     setConnected(false)
     addLog('system', 'abort(result) called')
   }, [addLog])
+
+  useEffect(() => {
+    window.openAckChannel = async () => {
+      const { channel } = await openChannel(onChannelPerSendAck)
+      return new Promise<string>((resolve) => {
+        channel.onOpen(() => resolve('opened'))
+        channel.onClose((err) => resolve(err instanceof Error ? err.message : String(err)))
+      })
+    }
+    const counted = new Map<
+      string,
+      { channel: { send(msg: string, options: { ack: true }): Promise<string> }; end: Promise<string> }
+    >()
+    window.openCounted = async (transports, { name = '', connectionKey = crypto.randomUUID() } = {}) => {
+      const context = { connectionKey, ...(transports ? { transports } : {}) }
+      const { id, channel } = await openChannel(withContext(onChannelCounted, { channel: context }))
+      const end = new Promise<string>((resolve) =>
+        channel.onClose((err) => resolve(err instanceof Error ? err.message : String(err))),
+      )
+      counted.set(name, { channel, end })
+      return Promise.race([
+        new Promise<{ id: string }>((resolve) => channel.onOpen(() => resolve({ id }))),
+        end.then((ended) => ({ ended })),
+      ])
+    }
+    window.sendCounted = (msg, name = '') =>
+      counted
+        .get(name)!
+        .channel.send(msg, { ack: true })
+        .catch((err: unknown) => (err instanceof Error ? err.message : String(err)))
+    window.countedEnd = (name = '') => counted.get(name)!.end
+    window.abortWithUnsendable = async (reason, beforeOpen) => {
+      const { id, channel } = await openChannel(() => onChannelAbortUnsendable(reason, beforeOpen))
+      const err = await new Promise<unknown>((resolve) => channel.onClose(resolve))
+      return { id, isAbort: err instanceof TelefuncAbort, abortValue: (err as { abortValue?: unknown }).abortValue }
+    }
+  }, [])
 
   const testServerAbort = useCallback(async () => {
     addLog('system', 'Starting server-abort test...')

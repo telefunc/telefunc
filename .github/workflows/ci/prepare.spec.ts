@@ -124,6 +124,14 @@ describe('prepare()', () => {
               },
               "testFilePath": "test/standaloner_without-vike/test-preview.test.ts",
             },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Vite",
+                },
+              },
+              "testFilePath": "test/standaloner_without-vike/test-dev.test.ts",
+            },
           ],
           "splitFiles": false,
         },
@@ -232,6 +240,14 @@ describe('prepare()', () => {
                 },
               },
               "testFilePath": "test/playground-stream/.test-preview.binary-inline.ws.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
+              "testFilePath": "test/playground-stream/.test-preview.channel-short-reconnect.sse.test.ts",
             },
             {
               "localConfig": {

@@ -45,8 +45,9 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | '
         // Bun's wording of the same error.
         log.logText.includes('TypeError: JSON.stringify cannot serialize cyclic structures') ||
         log.logText.includes('Unexpected generator error') ||
-        log.logText.includes('[telefunc:rxjs]') ||
-        log.logText.includes('Unhandled rxjs error') ||
+        // rxjs/e2e-test.ts's errors on purpose; never a page that left, which Telefunc doesn't log.
+        ((log.logText.includes('[telefunc:rxjs]') || log.logText.includes('Unhandled rxjs error')) &&
+          !log.logText.includes('its page left')) ||
         log.logText.includes('Shield Validation Error') ||
         // Transitions between tests close the previous page's channels; the server-side
         // Subject/Observable wire waits for a reconnect within the grace period and logs this
@@ -61,6 +62,10 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | '
         log.logText.includes('Failed to load resource: the server responded with a status of 403') ||
         // upgrade-e2e-test.ts's upgrade from another site's page.
         log.logText.includes('A WebSocket upgrade from https://another-site.example was refused') ||
+        // upgrade-e2e-test.ts's upgrades with forged or odd Origin headers.
+        log.logText.includes('A WebSocket upgrade from a page whose Origin header names no origin was refused') ||
+        /A WebSocket upgrade from https:\/\/forged-\d+\.example was refused/.test(log.logText) ||
+        log.logText.includes('WebSocket upgrades from more than 20 origins were refused') ||
         // A test's page change ends its SSE wire, and the server refuses a POST still in flight for it.
         log.logText.includes('Failed to load resource: the server responded with a status of 400') ||
         (log.logText.includes('WebSocket connection to') && log.logText.includes('failed')) ||
@@ -68,7 +73,12 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | '
         ((cmd === 'pnpm dev' || cmd === 'pnpm preview') &&
           log.logSource === 'stderr' &&
           log.logText.includes('[Bug] You stumbled upon a Vike bug') &&
-          log.logText.includes('at logHttpResponse'))
+          log.logText.includes('at logHttpResponse')) ||
+        // channel/e2e-test.ts's corrupted ACK_RES test triggers an intentional pageerror; Vite dev forwards it to stderr when HMR connects in time.
+        (cmd === 'pnpm dev' &&
+          log.logSource === 'stderr' &&
+          log.logText.includes('[vite][Unhandled error] SyntaxError:') &&
+          log.logText.includes('ClientChannel.onPeerAckRes'))
       )
     },
   })
@@ -89,7 +99,7 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm p
     await testCounter()
   })
 
-  testFileUpload()
+  testFileUpload(isDev)
 
   testFileDownload()
 

@@ -89,7 +89,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const crosswsAdapter = crossws({
     bindingName,
     instanceName: baseInstanceName,
-    ...getTelefuncChannelOptions({ copiesOnSend: true }),
+    ...getTelefuncChannelOptions({ bufferedAmount: () => undefined, copiesOnSend: true }),
   })
   // Factory runs only on first install. Bundler quirks can evaluate the user's entry twice in the same isolate;
   // we want every evaluation to share one transport instance.

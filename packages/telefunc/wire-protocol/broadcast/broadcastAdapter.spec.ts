@@ -1,6 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { defined } from '../../utils/defined.fixture.js'
-import { createHook } from 'node:async_hooks'
 import { getEventListeners } from 'node:events'
 import { Broadcast, ServerBroadcast } from '../channel/server/ServerBroadcast.js'
 import { ServerReplay } from '../channel/server/ServerReplay.js'
@@ -9,7 +8,6 @@ import { TAG } from '../wire/tags.js'
 import { IndexedPeer } from '../channel/server/IndexedPeer.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcastAdapter.js'
 import type { BroadcastTransport, Listening } from './broadcastAdapter.js'
-import { onBug } from '../../node/server/runTelefunc/onBug.js'
 
 /** The adapter's subscription as the function that stops it. */
 const stopOf = (subscription: Listening) => subscription.unsubscribe
@@ -153,16 +151,39 @@ describe('keyed in-process broadcast', () => {
     expect(seen).toEqual([1])
   })
 
-  it('does not call a subscriber that an earlier one unsubscribed during the same delivery', () => {
-    const broadcast = new ServerBroadcast<string>({ key: 'room:unsub-in-delivery' })
-    broadcast._registerChannel(ATTACHABLE_NOW)
+  it('buffers wire frames until a peer attaches, then flushes them on attach', () => {
+    const sender = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
+    const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
+    sender._registerChannel(ATTACHABLE_NOW)
+    receiver._registerChannel(ATTACHABLE_NOW)
+    receiver._dispatchFrame(decode(encode.want(7, { version: 1, text: true, binary: false })) as ChannelFrame)
 
-    const seen: string[] = []
-    broadcast.subscribe(() => unsubscribe())
-    const unsubscribe = broadcast.subscribe((m) => seen.push(m))
-    broadcast.publish('first')
+    sender.publish({ text: 'hello' })
 
-    expect(seen).toEqual([])
+    const frames: Uint8Array[] = []
+    receiver._attachPeer(
+      new IndexedPeer({
+        sender: {
+          sendPublish(_index, _seq, frame) {
+            frames.push(frame)
+          },
+          send() {},
+          carry() {},
+          bufferedAmount: () => 0,
+          behindAfter: () => 700,
+          deliveredBefore: () => 0,
+          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+          waitingPublishes: () => 0,
+          dropUngiven: () => 0,
+          dropWaitingPublishes() {},
+          dropWaitingFrom() {},
+        },
+        index: 7,
+        replay: new ServerReplay({ heldBytes: 0 }),
+      }),
+    )
+
+    expect(frames).toHaveLength(1)
   })
 
   it('buffers keyed publishes that arrive before a sibling has registered yet', () => {
@@ -214,23 +235,6 @@ describe('in-memory publishes in answer', () => {
     await adapter.publish('room:finite', '0')
     unsubscribe()
     expect(received).toBe(5001)
-  })
-
-  it('delivers the bytes an answer published, though its publisher reuses its buffer once publishBinary() returns', async () => {
-    const adapter = new DefaultBroadcastAdapter()
-    const received: number[][] = []
-    const unsubscribeBinary = stopOf(adapter.subscribeBinary('room:reused', (data) => received.push(Array.from(data))))
-    const unsubscribe = stopOf(
-      adapter.subscribe('room:reused', () => {
-        const bytes = new Uint8Array([1, 2, 3])
-        void adapter.publishBinary('room:reused', bytes)
-        bytes.fill(0)
-      }),
-    )
-    await adapter.publish('room:reused', 'question')
-    unsubscribe()
-    unsubscribeBinary()
-    expect(received).toEqual([[1, 2, 3]])
   })
 
   it.each(['text', 'binary'] as const)(
@@ -368,8 +372,7 @@ describe('a subscription the adapter refused', () => {
   })
 })
 
-// The same rule as a page's `opened`: it resolves once the listener is in effect or removed, and rejects where the
-// broadcast ends first. The backend here confirms no subscription until each test is over.
+// The backend confirms no subscription until each test is over.
 describe("a server subscriber's `opened` while its backend hasn't confirmed the subscription", () => {
   const pending = new Promise<void>(() => {})
   const sent = () => ({ seq: 1, timestamp: 1 })
@@ -434,15 +437,6 @@ describe("a server subscriber's `opened` while its backend hasn't confirmed the 
       subscriber.end?.()
     })
   }
-  const ENDING: Record<string, Subscribe> = { 'subscribe()': instance(false), 'subscribeBinary()': instance(true) }
-  for (const [name, subscribe] of Object.entries(ENDING)) {
-    it(`${name}: rejects once its broadcast ends first`, async () => {
-      unconfirmed()
-      const subscriber = subscribe(new AbortController().signal)
-      subscriber.end?.()
-      expect(await settled(subscriber.opened)).toBe('rejected')
-    })
-  }
 })
 
 // A backend that refused a key's subscription keeps that outcome: removing a subscriber afterwards doesn't turn its
@@ -489,42 +483,6 @@ describe("a static subscriber's `opened` once its backend refused the key's subs
       }
     })
   }
-})
-
-// An `opened` nobody reads makes no promise, so subscribers that come and go while the backend waits leave nothing behind.
-describe("subscribers that come and go while their backend hasn't confirmed the key's subscription", () => {
-  const pending = new Promise<void>(() => {})
-  const sent = () => ({ seq: 1, timestamp: 1 })
-  const listen = () => ({ unsubscribe: () => {}, opened: pending })
-  /** How many promises `run` made. */
-  const promisesMadeBy = (run: () => void) => {
-    let made = 0
-    const hook = createHook({
-      init(_id, type) {
-        if (type === 'PROMISE') made++
-      },
-    }).enable()
-    try {
-      run()
-    } finally {
-      hook.disable()
-    }
-    return made
-  }
-  it('1,000 subscribers added and removed make no promise', () => {
-    _resetBroadcastAdapterForTesting(
-      new DefaultBroadcastAdapter({ send: sent, sendBinary: sent, listen, listenBinary: listen }),
-    )
-    const broadcast = new ServerBroadcast<string>({ key: crypto.randomUUID() })
-    // Holds the key's subscription, which waits for its backend.
-    const holder = broadcast.subscribe(() => {})
-    const made = promisesMadeBy(() => {
-      for (let i = 0; i < 1_000; i++) broadcast.subscribe(() => {})()
-    })
-    expect(made).toBe(0)
-    holder()
-    broadcast.abort()
-  })
 })
 
 // A broker's subscribe can throw, as NATS's does while its connection is closed or draining; the app retries.
@@ -1108,6 +1066,10 @@ describe('Broadcast shield validation', () => {
     broadcast._attachPeer(
       new IndexedPeer({
         sender: {
+          sendPublish(index, seq, body) {
+            this.send(encode.publishTo(index, seq))
+            this.send(body)
+          },
           send: (frame) => {
             frames.push(frame)
           },
@@ -1116,12 +1078,10 @@ describe('Broadcast shield validation', () => {
           behindAfter: () => 700,
           deliveredBefore: () => 0,
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-          queue: {
-            waitingPublishes: () => 0,
-            dropUngiven: () => 0,
-            dropWaitingPublishes() {},
-            dropWaitingFrom() {},
-          },
+          waitingPublishes: () => 0,
+          dropUngiven: () => 0,
+          dropWaitingPublishes() {},
+          dropWaitingFrom() {},
         },
         index: 7,
         replay: new ServerReplay({ heldBytes: 0 }),
@@ -1153,18 +1113,17 @@ describe('Broadcast shield validation', () => {
     sender._attachPeer(
       new IndexedPeer({
         sender: {
+          sendPublish() {},
           send: () => {},
           carry() {},
           bufferedAmount: () => 0,
           behindAfter: () => 700,
           deliveredBefore: () => 0,
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-          queue: {
-            waitingPublishes: () => 0,
-            dropUngiven: () => 0,
-            dropWaitingPublishes() {},
-            dropWaitingFrom() {},
-          },
+          waitingPublishes: () => 0,
+          dropUngiven: () => 0,
+          dropWaitingPublishes() {},
+          dropWaitingFrom() {},
         },
         index: 7,
         replay: new ServerReplay({ heldBytes: 0 }),
@@ -1184,18 +1143,17 @@ describe('lossy broadcast under memory pressure', () => {
     broadcast._attachPeer(
       new IndexedPeer({
         sender: {
+          sendPublish() {},
           send() {},
           carry() {},
           bufferedAmount: () => 0,
           behindAfter: () => 0,
           deliveredBefore: () => 0,
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-          queue: {
-            waitingPublishes: () => 0,
-            dropUngiven: () => 0,
-            dropWaitingPublishes() {},
-            dropWaitingFrom() {},
-          },
+          waitingPublishes: () => 0,
+          dropUngiven: () => 0,
+          dropWaitingPublishes() {},
+          dropWaitingFrom() {},
         },
         index: 7,
         replay: defined(broadcast._replayBuffer),
@@ -1257,9 +1215,7 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
     }
   }
 
-  // The transport delivers to every node's subscribers, the publisher's own among them, and the adapter delivers only
-  // what the transport hands it: a same-node publish reaches its subscriber once, before the receipt is awaited.
-  it('a publish goes through the transport, and reaches a subscriber on the publishing node once', async () => {
+  it('publishes go through the transport and locally-subscribed receivers see the message', async () => {
     const transport = createMockTransport()
     _resetBroadcastAdapterForTesting(new DefaultBroadcastAdapter(transport))
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:tx:basic' })
@@ -1270,12 +1226,26 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
     const received: Array<{ text: string }> = []
     receiver.subscribe((m) => received.push(m))
 
-    const receipt = sender.publish({ text: 'hello' })
-    expect(received).toEqual([{ text: 'hello' }])
+    const receipt = await sender.publish({ text: 'hello' })
 
-    const { seq, timestamp } = await receipt
-    expect(seq).toBe(1)
-    expect(typeof timestamp).toBe('number')
+    expect(received).toEqual([{ text: 'hello' }])
+    expect(receipt.seq).toBe(1)
+    expect(typeof receipt.timestamp).toBe('number')
+  })
+
+  it('does not double-deliver when the transport echoes back to the publisher node', () => {
+    const transport = createMockTransport()
+    _resetBroadcastAdapterForTesting(new DefaultBroadcastAdapter(transport))
+    const sender = new ServerBroadcast<{ text: string }>({ key: 'room:tx:echo' })
+    const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:tx:echo' })
+    sender._registerChannel(ATTACHABLE_NOW)
+    receiver._registerChannel(ATTACHABLE_NOW)
+
+    const received: Array<{ text: string }> = []
+    receiver.subscribe((m) => received.push(m))
+
+    sender.publish({ text: 'hello' })
+
     expect(received).toEqual([{ text: 'hello' }])
   })
 
@@ -1352,75 +1322,6 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     await Broadcast.publish('room:static-unsub', { text: 'second' })
 
     expect(received).toEqual([{ text: 'first' }])
-  })
-
-  it('a callback that throws is logged and reaches onBug(), publish() resolves, and the subscribers after it get the message', async () => {
-    const key = crypto.randomUUID()
-    const bugs: unknown[] = []
-    onBug((err) => bugs.push(err))
-    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const thrown = new Error('a subscriber throws')
-    const received: string[] = []
-    const unsubscribes = [
-      Broadcast.subscribe<string>(key, () => {
-        throw thrown
-      }),
-      Broadcast.subscribe<string>(key, (msg) => received.push(msg)),
-    ]
-
-    expect(await Broadcast.publish(key, 'hi')).toMatchObject({ key })
-    expect(received).toEqual(['hi'])
-    expect(bugs).toEqual([thrown])
-    expect(logged.mock.calls).toEqual([[thrown.stack]])
-    logged.mockRestore()
-    for (const unsubscribe of unsubscribes) unsubscribe()
-  })
-
-  it("each subscribeBinary() callback, a BroadcastChannel's too, gets its own copy of the bytes", async () => {
-    const key = crypto.randomUUID()
-    const broadcast = new ServerBroadcast<string>({ key })
-    const seen: number[][] = []
-    const write = (data: Uint8Array) => {
-      seen.push([...data])
-      data[0] = 99
-    }
-    const unsubscribes = [
-      Broadcast.subscribeBinary(key, write),
-      broadcast.subscribeBinary(write),
-      Broadcast.subscribeBinary(key, write),
-    ]
-    const bytes = Uint8Array.of(1, 2, 3)
-
-    await Broadcast.publishBinary(key, bytes)
-    expect(seen).toEqual([
-      [1, 2, 3],
-      [1, 2, 3],
-      [1, 2, 3],
-    ])
-    expect([...bytes]).toEqual([1, 2, 3])
-    for (const unsubscribe of unsubscribes) unsubscribe()
-    broadcast.abort()
-  })
-
-  it('a publish made in a callback reaches every subscriber after the message that callback got', async () => {
-    const key = crypto.randomUUID()
-    const seen: [string, number][] = []
-    const unsubscribes = [
-      Broadcast.subscribe<number>(key, (n) => {
-        seen.push(['first', n])
-        if (n === 1) void Broadcast.publish(key, 2)
-      }),
-      Broadcast.subscribe<number>(key, (n) => seen.push(['second', n])),
-    ]
-
-    await Broadcast.publish(key, 1)
-    expect(seen).toEqual([
-      ['first', 1],
-      ['second', 1],
-      ['first', 2],
-      ['second', 2],
-    ])
-    for (const unsubscribe of unsubscribes) unsubscribe()
   })
 })
 

@@ -29,6 +29,11 @@ export {
   onReturnFinishedAndEndlessStreams,
   onReturnFailingStream,
   onGeneratorFinallyThrows,
+  onYieldLargeString,
+  onReturnPromiseOfLargeString,
+  onReturnStreamWithEmptyChunk,
+  onStreamThenCircular,
+  onReadUpload,
 }
 
 import { Abort, Channel, getContext } from 'telefunc'
@@ -428,15 +433,26 @@ const onReturnManyTinyChunks = async (chunks: number) => {
   })
 }
 
-/** The page has neither until the file's bytes have arrived, so it can't read the stream to make way for them. */
 const onReturnFileBesideLargeStream = async () => {
-  return {
-    stream: byteStream(32),
-    file: new File(
-      Array.from({ length: 32 }, () => new Uint8Array(64 * 1024)),
-      'large.bin',
-    ),
-  }
+  let pulled = 0
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (pulled === 512) return controller.close()
+      pulled++
+      controller.enqueue(new Uint8Array(64 * 1024))
+    },
+  })
+  const file = new File([new Uint8Array([7])], 'slow.bin')
+  file.stream = () =>
+    new ReadableStream({
+      async pull(controller) {
+        await sleep(700)
+        cleanupState.fileBesideStreamPulls = String(pulled)
+        controller.enqueue(new Uint8Array([7]))
+        controller.close()
+      },
+    })
+  return { stream, file }
 }
 
 function filledStream(byte: number) {
@@ -498,5 +514,48 @@ async function* onGeneratorFinallyThrows(): AsyncGenerator<string> {
   } finally {
     cleanupState.generatorFinallyThrowsRan = 'true'
     throw Abort({ reason: 'generator-finally-failure' })
+  }
+}
+
+/** Each value is larger than the 1 MiB parts a channel sends it in. */
+async function* onYieldLargeString(): AsyncGenerator<string> {
+  yield 'x'.repeat(3_000_000)
+  yield 'done'
+}
+
+const onReturnPromiseOfLargeString = async () => {
+  return { promise: Promise.resolve('y'.repeat(3_000_000)) }
+}
+
+const onReturnStreamWithEmptyChunk = async () => {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of [[1], [], [2]]) controller.enqueue(new Uint8Array(chunk))
+      controller.close()
+    },
+  })
+}
+
+/** cleanupState: streamThenCircularCancelled = 'true' once the stream returned beside a value that can't be serialized is cancelled. */
+const onStreamThenCircular = async () => {
+  const bad: Record<string, unknown> = {}
+  bad.self = bad
+  return {
+    stream: new ReadableStream<Uint8Array>({
+      cancel() {
+        cleanupState.streamThenCircularCancelled = 'true'
+      },
+    }),
+    bad,
+  }
+}
+
+/** Returns the message reading the page's upload throws with. */
+const onReadUpload = async (stream: ReadableStream<Uint8Array>) => {
+  try {
+    for await (const _ of stream);
+    return 'read whole'
+  } catch (err) {
+    return (err as Error).message
   }
 }

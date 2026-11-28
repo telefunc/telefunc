@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 
-// Workarounds of a Durable Object's WebSocket under crossws 0.4.6's Cloudflare adapter:
+// Workarounds of a Durable Object's WebSocket under crossws's Cloudflare adapter:
 // - workerd leaves a client's close to a Durable Object's `ctx.acceptWebSocket()` socket unanswered until the Durable
 //   Object closes the socket too, at compatibility date 2026-04-07 and with `web_socket_auto_reply_to_close`
 //   (https://developers.cloudflare.com/workers/configuration/compatibility-flags/#websocket-auto-reply-to-close) as well

@@ -13,6 +13,7 @@ export {
   onSubjectArgNoErrorHandler,
   onSharedSubjectOneErrors,
   onSubjectNoHandler,
+  onSubjectPageLeaves,
   onShieldSubjectArg,
   onShieldSubjectReturn,
   onShieldObservableArg,
@@ -245,4 +246,13 @@ async function onSubjectNoHandler() {
     cleanupState.noHandlerClosed = 'true'
   })
   return subject
+}
+
+// Accepts a Subject argument and subscribes to it with NO error handler: once its page leaves, the channel errors the
+// subject, which rxjs reports as unhandled. A page leaving is no bug, so nothing reaches the server's log.
+async function onSubjectPageLeaves(input$: Subject<string>) {
+  input$.subscribe((v) => {
+    cleanupState.pageLeavesReceived = v
+  })
+  input$.subscribe({ error: (err: Error) => (cleanupState.pageLeavesErrored = err.name) })
 }

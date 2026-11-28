@@ -9,14 +9,12 @@ import type { SendWait } from '../../flowControl/SendWaits.js'
 import type { Urgency } from '../../flowControl/credit.js'
 import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
 
-interface PeerSender {
-  /** What the wire holds back for its page. */
-  readonly queue: WireQueue
+interface PeerSender extends WireQueue {
   /** How long a lossy page on the wire may leave a publish unconfirmed before it counts as behind, where a confirmation
    *  takes at least `roundTrip` ms: `Infinity` before one was measured. */
   behindAfter(roundTrip: number): number
   send(frame: Uint8Array): void
-  sendPublish?(index: number, seq: number, body: Uint8Array<ArrayBuffer>): void
+  sendPublish(index: number, seq: number, body: Uint8Array<ArrayBuffer>): void
   /** Sends `frame` in the next message the wire sends, where it can carry one (see `PieceSender.carry`). */
   carry(frame: Uint8Array): void
   /** Bytes the wire holds for the peer, not yet written out; `undefined` where the runtime can't tell. */
@@ -117,13 +115,13 @@ class IndexedPeer {
   /** How many of its publishes no wire has taken: their heads still wait in its wire's queue, and they are the replay's
    *  newest. */
   unhanded(): number {
-    return this.sender.queue.waitingPublishes(this.index)
+    return this.sender.waitingPublishes(this.index)
   }
 
   /** For an aborted channel: takes its messages of which the socket has no byte back from the wire's queue and the
    *  replay, whose newest they are: its lossy ones (`WireQueue.dropUngiven`). */
   dropUngivenLossy(): void {
-    this.replay.dropNewestPublishes(this.sender.queue.dropUngiven(this.index))
+    this.replay.dropNewestPublishes(this.sender.dropUngiven(this.index))
   }
 
   /** What those of them hold that a newer send of the channel's own takes the place of: the ones sent after the
@@ -143,7 +141,7 @@ class IndexedPeer {
   dropUnhandedButNewest(): void {
     const waiting = this.unhanded()
     this.replay.dropBeforeNewestPublish(waiting)
-    this.sender.queue.dropWaitingPublishes(this.index, 0, waiting - 1)
+    this.sender.dropWaitingPublishes(this.index, 0, waiting - 1)
   }
 
   /** As `dropUnhanded`, of those only the ones sent after the channel's last frame. */
@@ -154,7 +152,7 @@ class IndexedPeer {
 
   private drop(waiting: number, count: number): { units: number; bytes: number } {
     const dropped = this.replay.dropNewestPublishes(count)
-    if (dropped.units > 0) this.sender.queue.dropWaitingPublishes(this.index, waiting - dropped.units)
+    if (dropped.units > 0) this.sender.dropWaitingPublishes(this.index, waiting - dropped.units)
     return dropped
   }
 
@@ -165,9 +163,7 @@ class IndexedPeer {
 
   private sendBehindHead(seq: number, body: PublishBody): void {
     this.replay.pushPublish(seq, this.index, body)
-    if (this.sender.sendPublish) return this.sender.sendPublish(this.index, seq, body.frame)
-    this.sender.send(encode.publishTo(this.index, seq))
-    this.sender.send(body.frame)
+    this.sender.sendPublish(this.index, seq, body.frame)
   }
 
   /** Sends `frame` of `seq`, kept to replay, so a frame a dead wire lost goes again. */

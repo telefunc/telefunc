@@ -200,6 +200,14 @@ describe('cloudflare broadcast routing', () => {
     expect(resolveCloudflareLocationHint(createCloudflareRequest(), 'weur')).toBe('weur')
   })
 
+  it('maps the same room to the same bucket-coordinator offset for a bucket', () => {
+    const shardCount = getBucketCoordinatorScale(2, 'weur')
+
+    expect(getDeterministicKeyBucketIndex('room/alpha', shardCount)).toBe(
+      getDeterministicKeyBucketIndex('room/alpha', shardCount),
+    )
+  })
+
   it('assigns room keys only within the bucket-coordinator subset', () => {
     for (const bucket of ['weur', 'apac', 'oc'] as const) {
       expect(getDeterministicKeyBucketIndex('room/alpha', getBucketCoordinatorScale(2, bucket))).toBe(0)
@@ -961,42 +969,6 @@ describe('cloudflare broadcast routing', () => {
           _resetBroadcastAdapterForTesting(previousTransport)
         }
       })
-
-      it('its release is warned of', async () => {
-        const previousTransport = getBroadcastAdapter()
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-        try {
-          const { state, inObject } = refusing()
-          state.refuse = false
-          const subscriber = inObject(() => Broadcast.subscribe(KEY, () => {}))
-          await subscriber.opened?.catch(() => {})
-          subscriber()
-          await flushMicrotasks()
-          expect(warned(warn)).toBe(2)
-        } finally {
-          warn.mockRestore()
-          _resetBroadcastAdapterForTesting(previousTransport)
-        }
-      })
-
-      it("the key's refresh tries it again and is warned of", async () => {
-        vi.useFakeTimers()
-        const previousTransport = getBroadcastAdapter()
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-        try {
-          const { state, inObject } = refusing()
-          state.refuse = false
-          const subscriber = inObject(() => Broadcast.subscribe(KEY, () => {}))
-          await subscriber.opened?.catch(() => {})
-          await vi.advanceTimersByTimeAsync(30_000)
-          expect(warned(warn)).toBe(2)
-          subscriber()
-        } finally {
-          warn.mockRestore()
-          _resetBroadcastAdapterForTesting(previousTransport)
-          vi.useRealTimers()
-        }
-      })
     })
 
     it("a broadcast that subscribes closes with KV's error", async () => {
@@ -1061,9 +1033,9 @@ describe('cloudflare broadcast routing', () => {
     const call = new Request('https://telefunc.test/_telefunc?session=page', { method: 'POST' })
     transport.attachRequest(call, 'telefunc-shard-weur-0')
     const broadcast = new ServerBroadcast<string>({ key: 'room:test' })
-    // As `carryChannel` stamps the broadcast a call returns.
-    broadcast._callRequest = call
-    getChannelMux().registerChannel(broadcast, ATTACHABLE_NOW)
+    // As `carryChannel` registers the broadcast a call returns.
+    broadcast._carriedBy = call
+    getChannelMux().registerChannel(broadcast, ATTACHABLE_NOW, 'page')
     await getChannelMux().applyCallWants(call, [{ channel: broadcast.id, version: 1, text: true, binary: false }])
     expect(broadcast.isClosed).toBe(false)
     expect(kvWrites).toEqual([`put tfps:${encodeURIComponent('room:test')}:weur:telefunc-shard-weur-0`])

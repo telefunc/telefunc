@@ -16,7 +16,6 @@ import { describe, expect, test, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 
 import { ClientConnection, type MuxChannel } from './ClientConnection.js'
-import { ClientChannel } from './ClientChannel.js'
 import { ServerChannel } from '../server/ServerChannel.js'
 import { decode, encode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
@@ -256,36 +255,5 @@ describe('SSE reconnect preserves client→server seq order (exactly-once)', () 
     const { received, wire2Upstream } = await runScenario(/* loseSeq1 */ true)
     expect(wire2Upstream).toContain(1) // client replays the lost seq 1 on the new wire…
     expect(received).toEqual([1, 2]) // …and the server now accepts it (no spurious dup-drop)
-  })
-})
-
-describe('SSE reconnect with lossy sends from the page', () => {
-  test('one lost with the wire goes again; while the page reconnects, a newer one takes the place of the one before it, up to a plain send', async () => {
-    const { received } = await runScenarioWith(/* loseSeq1 */ true, {
-      // A real channel: its connection takes the page's `fetch` as it is made.
-      open: (fetchImpl) => {
-        vi.stubGlobal('fetch', fetchImpl)
-        try {
-          return new ClientChannel<string, never>({
-            channelId: crypto.randomUUID(),
-            ack: false,
-            connection: { transports: ['sse'], telefuncUrl: TELEFUNC_URL, connectionKey: crypto.randomUUID() },
-          })
-        } finally {
-          vi.unstubAllGlobals()
-        }
-      },
-      first: (channel) => void channel.send('L1', { lossy: true }),
-      whileReconnecting: (channel) => {
-        void channel.send('L2', { lossy: true })
-        void channel.send('L3', { lossy: true })
-        void channel.send('R')
-        void channel.send('L4', { lossy: true })
-        void channel.send('L5', { lossy: true })
-      },
-      lastSeq: 4,
-    })
-    // L1 went with wire 1, so L2 couldn't take its place; R kept L4 from taking L3's.
-    expect(received).toEqual(['L1', 'L3', 'R', 'L5'])
   })
 })

@@ -12,14 +12,14 @@ import type { ServerTransport } from './ChannelMux.js'
 import { upgradeRefusal } from './upgradeOrigin.js'
 import { guardCrosswsHook, getCrosswsNamespace } from '../../../workarounds/crosswsHooks.js'
 
-/** crossws's options for Telefunc's channels. `bufferedAmount` reads the socket's: `undefined` on workerd, whose
- *  WebSocket has none. `wireRequest` is the request the upgrade hook got, which crossws's peer carries as `peer.request`
- *  on every runtime but Node. */
+/** crossws's options for Telefunc's channels. `bufferedAmount` reads the socket's, which crossws reads as 0 where the
+ *  socket has none: workerd's, whose adapter passes `() => undefined`. For `wireRequest`, crossws carries the upgrade
+ *  request's URL and headers as `peer.request` on every runtime but Node. */
 function getTelefuncChannelOptions({
   upgrade,
   send = (peer, frame) => peer.send(frame),
   terminate = (peer) => peer.terminate(),
-  bufferedAmount = (peer) => peer.websocket.bufferedAmount,
+  bufferedAmount = (peer) => peer.bufferedAmount,
   wireRequest = (peer) => peer.request,
   copiesOnSend,
 }: {
@@ -49,30 +49,24 @@ function getTelefuncChannelOptions({
       else peer.close(WS_CLOSE_REFUSED, wireEnd(refusal))
     },
   }
-  /** Whether each handshake the upgrade hook let through names this server's wire version, by its request. */
-  const sameVersion = new WeakMap<Request, boolean>()
-
   // A hook's throw `ends` its peer where it isn't ending already: the mux's peer goes as a loss, through the mux's one
   // close, so that it can't cut an end already going. The upgrade hook has no guard: neither `readableHost()` nor
   // `upgradeRefusal()` throws, and the adapters' own `upgrade` builds the peer's context.
-  const hooks = defineHooks({
-    // The one place that reads a handshake: `open` acts on what it decided.
+  const hooks = defineHooks<Omit<Hooks, 'ping' | 'pong'>>({
     upgrade: (request) => {
       const host = readableHost(request)
       if (host === null) return new Response(null, { status: 400 })
       const refusal = upgradeRefusal(request, host)
       if (refusal) return refusal
-      sameVersion.set(request, namesWireVersion(request))
       return upgrade?.(request)
     },
     // A throw in `open` comes before the mux has the peer, where nothing else would close it.
     open: guardCrosswsHook((peer) => {
       const request = wireRequest(peer)
-      const named = request && sameVersion.get(request)
-      assert(request && named !== undefined)
+      assert(request)
       // A page on another version reloads: none of its frames could be read. Told after the 101, as a close code: a page
       // learns nothing from a refused handshake.
-      if (!named) return peer.close(WS_CLOSE_WIRE_VERSION, 'reload the page')
+      if (!namesWireVersion(request)) return peer.close(WS_CLOSE_WIRE_VERSION, 'reload the page')
       mux.onWireOpen(peer, transport, upgradesTakenHere, request)
     }, terminate),
     message: guardCrosswsHook(
@@ -86,10 +80,13 @@ function getTelefuncChannelOptions({
       null,
     ),
     error: guardCrosswsHook((peer) => mux.onWireClosed(peer, 'transient'), null),
+    drain: guardCrosswsHook((peer) => mux.onWireDrain(peer), null),
   })
   return {
     hooks,
     getNamespace: getCrosswsNamespace,
+    // crossws pings no wire: Telefunc's PING, every `config.channel.pingInterval`, tells a wire is alive on all of them.
+    idleTimeout: 0,
   }
 }
 

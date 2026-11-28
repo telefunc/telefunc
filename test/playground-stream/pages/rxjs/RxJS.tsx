@@ -16,6 +16,7 @@ import {
   onSubjectArgNoErrorHandler,
   onSharedSubjectOneErrors,
   onSubjectNoHandler,
+  onSubjectPageLeaves,
   onShieldSubjectArg,
   onShieldSubjectReturn,
   onShieldObservableArg,
@@ -418,6 +419,20 @@ function RxJSDemo() {
         }}
       >
         Subject no-handler (server survives)
+      </button>
+
+      {/* Subject arg whose page leaves: the server's subscription without an error handler logs nothing */}
+      <button
+        id="test-subject-page-leaves"
+        onClick={async () => {
+          setResult('')
+          const subject = new RxSubject<string>()
+          await onSubjectPageLeaves(subject)
+          // Sent until the page leaves: the page's subject sends nothing before the server's subscription reached it.
+          setInterval(() => subject.next('hello'), 100)
+        }}
+      >
+        Subject whose page leaves
       </button>
 
       {/* Shield: all three data-flow paths (Subject arg, Subject return, Observable arg) */}

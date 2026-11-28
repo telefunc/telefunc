@@ -6,6 +6,8 @@ export {
   serverArrayBuffers,
   cutWire,
   dropNextWebSocket,
+  holdNextWebSocket,
+  closeAllConnections,
   runServerAction,
   holdNextSsePost,
   holdNextSseWire,
@@ -29,10 +31,11 @@ export {
   canCutWire,
   REDIS_TOOK_REFUSED_KEY,
   defined,
+  withRoute,
 }
 
 import { page, getServerUrl, expectLog } from '@brillout/test-e2e'
-import type { Request, Response, WebSocket } from 'playwright-chromium'
+import type { Page, Request, Response, WebSocket } from 'playwright-chromium'
 import { execSync } from 'node:child_process'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -150,7 +153,18 @@ async function cutWire() {
 
 /** The server drops the page's next WebSocket before it opens, as a brief network drop would. */
 async function dropNextWebSocket() {
-  await fetch(`${getServerUrl()}/api/wire/next-websocket`, { method: 'POST' })
+  await fetch(`${getServerUrl()}/api/wire/next-websocket?action=drop`, { method: 'POST' })
+}
+
+/** The page's next WebSocket upgrade gets no answer, as behind a proxy that black-holes WebSockets. */
+async function holdNextWebSocket() {
+  await fetch(`${getServerUrl()}/api/wire/next-websocket?action=hold`, { method: 'POST' })
+}
+
+/** The server closes all its connections, as a shutdown does. */
+async function closeAllConnections() {
+  const resp = await fetch(`${getServerUrl()}/api/server/close-all-connections`, { method: 'POST' })
+  if (!resp.ok) throw new Error(`closeAllConnections() failed: ${await resp.text()}`)
 }
 
 /** The server hands the page's next SSE batch POST to Telefunc only at `releaseHeldSsePosts()`, and answers it then. */
@@ -291,6 +305,22 @@ function isTransientNetworkError(err: unknown): boolean {
 function defined<T>(value: T | null | undefined, what: string): T {
   if (value === null || value === undefined) throw new Error(`Expected ${what}`)
   return value
+}
+
+/** Answers the page's requests matching `match` with `handler` while `run` runs. Routes on the underlying Playwright
+ *  page rather than `@brillout/test-e2e`'s `page` Proxy, whose `unroute()` leaves the route installed. */
+async function withRoute(
+  match: Parameters<Page['route']>[0],
+  handler: Parameters<Page['route']>[1],
+  run: () => Promise<void>,
+): Promise<void> {
+  const routed = page.mainFrame().page()
+  await routed.route(match, handler)
+  try {
+    await run()
+  } finally {
+    await routed.unroute(match, handler)
+  }
 }
 
 async function getResult<T = any>(selector: string): Promise<T> {
