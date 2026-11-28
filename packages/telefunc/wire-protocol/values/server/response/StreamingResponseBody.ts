@@ -154,6 +154,13 @@ function buildInlineResponseBody(runContext: {
     }
   }
 
+  function throwIfResponseAborted() {
+    if (!producersStopped) return
+    const next = settled.shift()
+    assert(next && 'err' in next)
+    throw next.err
+  }
+
   async function mergeProducers() {
     // The client drains eager values before it can hand the lazy ones to the caller.
     const eager = producers.filter((entry) => entry.eager)
@@ -167,17 +174,14 @@ function buildInlineResponseBody(runContext: {
     await merge(first.length)
     if (cancelled) return
     if (first.length < producers.length) {
-      if (producersStopped) {
-        const next = settled.shift()
-        assert(next && 'err' in next)
-        throw next.err
-      }
+      throwIfResponseAborted()
       for (const entry of producers) {
         if (!entry.eager) void pullNext(entry)
       }
       await merge(producers.length - first.length)
     }
     if (cancelled) return
+    throwIfResponseAborted()
     await emit(encodeFrame(encodeU32(0)))
   }
 
