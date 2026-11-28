@@ -145,6 +145,39 @@ async function warmStreams(call: (args: unknown[]) => Promise<unknown>) {
   await call([])
 }
 
+test('a response body that errors with zero fails both returned streams', async () => {
+  const { call } = await page()
+  gates.streams.resolve()
+  const ret = [0, 1].map((index) => tag('!TelefuncStream:', { __index: index }))
+  const metadata = textEncoder.encode(JSON.stringify({ ret }))
+  const reading = createDeferred<ReadableStreamDefaultController<Uint8Array>>()
+  const body = new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        const frames = [0, 1, 1].map((index) => encodeIndexedFrame(index, textEncoder.encode('42')))
+        controller.enqueue(concat(encodeU32(metadata.length), metadata, ...frames))
+      },
+      pull(controller) {
+        reading.resolve(controller)
+      },
+    },
+    { highWaterMark: 0 },
+  )
+  respond = () => new Response(body, { headers: { 'content-type': 'application/octet-stream' } })
+  const [first, second] = (await call([])) as [ReadableStream<Uint8Array>, ReadableStream<Uint8Array>]
+  const a = first.getReader()
+  const b = second.getReader()
+  await a.read()
+  await b.read()
+  const rejected = expect(a.read()).rejects.toBe(0)
+  const controller = await reading.promise
+  controller.error(0)
+  await rejected
+  expect((await b.read()).value).toEqual(textEncoder.encode('42'))
+  await expect(b.read()).rejects.toBe(0)
+  expect(body.locked).toBe(false)
+})
+
 test('a failed chunk load two calls share rejects each with ConnectionError, or Abort for the one aborted as it fails', async () => {
   const { call, withContext, ConnectionError } = await page()
   const { onAbort } = await import('../../../client/remoteTelefunctionCall/onAbort.js')

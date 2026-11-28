@@ -12,6 +12,7 @@ import { ownIndexedPayload } from '../../../wire/envelope.js'
 /** How long code may wait behind another stream's full buffer before the page warns. Handling a chunk takes far less, and
  *  the wait only counts while nothing is being read, so a slow network doesn't count. */
 const STALL_WARNING_MS = 5_000
+const NO_STREAM_ERROR = Symbol()
 
 /** Demultiplexes indexed frames from a single HTTP stream to multiple consumers.
  *
@@ -43,7 +44,7 @@ class FrameDemuxer {
   /** The index whose unread buffer stopped reading; reading only restarts once that consumer drains or cancels. */
   private pausedByIndex: number | null = null
   private ended = false
-  private streamError: unknown = null
+  private streamError: unknown = NO_STREAM_ERROR
   private cancelledIndices = new Set<number>()
   private doneIndices = new Set<number>()
   private totalConsumers = 0
@@ -93,7 +94,7 @@ class FrameDemuxer {
 
   private async readNextChunkForIndex(index: number): Promise<Uint8Array<ArrayBuffer> | null> {
     if (this.cancelledIndices.has(index)) return null
-    if (this.streamError) throw this.streamError
+    if (this.streamError !== NO_STREAM_ERROR) throw this.streamError
 
     const buffered = this.pendingFrames.get(index)?.shift()
     if (buffered) {
@@ -207,7 +208,7 @@ class FrameDemuxer {
 
   private failWaiters(err: unknown): void {
     this.clearStallTimer()
-    this.streamError ??= err
+    if (this.streamError === NO_STREAM_ERROR) this.streamError = err
     for (const [, w] of this.indexWaiters) w.reject(err)
     this.indexWaiters.clear()
   }
