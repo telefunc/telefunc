@@ -175,6 +175,8 @@ type ServerReviverContext = {
 
 /** Context for all server-side response replacers (streaming + placeholder). */
 type ServerReplacerContext = {
+  /** The largest wire frame the adapter accepts, where it sets a smaller limit. */
+  maxFrameBytes?: number
   createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts?: {
     ack?: boolean
   }): ServerChannel<ClientToServer, ServerToClient>

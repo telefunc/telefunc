@@ -1,15 +1,8 @@
 import { describe, expect, test, vi } from 'vitest'
 
 import { ServerReplay } from '../../wire-protocol/channel/server/ServerReplay.js'
-import {
-  ACK_STATUS,
-  ERROR_REASON,
-  decode,
-  encode,
-  type AckResultStatus,
-  type ChannelFrame,
-} from '../../wire-protocol/wire/frame.js'
-import { TAG } from '../../wire-protocol/wire/tags.js'
+import { ACK_STATUS, decode, encode, type AckResultStatus, type ChannelFrame } from '../../wire-protocol/wire/frame.js'
+import { WIRE_ERROR_CODE, TAG } from '../../wire-protocol/wire/tags.js'
 import { ProtocolViolationError } from '../../wire-protocol/wire/protocolViolation.js'
 import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
 import { ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
@@ -90,10 +83,10 @@ function fromPage(channel: Pick<ServerChannel, '_dispatchFrame' | '_replayBuffer
       dispatch(encode.closeDone(7, lastRead(), ++seq))
     },
     closeTimedOut() {
-      dispatch(encode.error(7, ERROR_REASON.CLOSE_TIMED_OUT, ++seq))
+      dispatch(encode.error(7, WIRE_ERROR_CODE.CLOSE_TIMED_OUT, ++seq))
     },
     replayLost() {
-      dispatch(encode.error(7, ERROR_REASON.LOST, ++seq))
+      dispatch(encode.error(7, WIRE_ERROR_CODE.LOST, ++seq))
     },
     abort(abortValue: string) {
       dispatch(encode.abort(7, JSON.stringify(abortValue), ++seq))
@@ -680,7 +673,7 @@ describe('cross-close', () => {
     await expect(closePromise).resolves.toBeInstanceOf(Error)
     await expect(channel.closed).resolves.toHaveProperty('message', expect.stringContaining('Channel close timed out'))
     const end = frames.map((frame) => decode(frame))[1]
-    expect(end?.tag === TAG.ERROR && end.reason).toBe(ERROR_REASON.CLOSE_TIMED_OUT)
+    expect(end?.tag === TAG.ERROR && end.reason).toBe(WIRE_ERROR_CODE.CLOSE_TIMED_OUT)
   })
 
   test("the server's cleanup starts at the page's CLOSE_ACK, while the page's runs, and a cleanup past the timeout ends both with it", async () => {

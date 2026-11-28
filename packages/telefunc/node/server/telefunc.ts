@@ -7,7 +7,9 @@ import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
 import { nodeReadableToWebRequest, normalizeHeaders } from '../../utils/nodeReadableToWebRequest.js'
 import type { Readable, Writable } from 'node:stream'
-import { readRequestUrl } from '../../utils/getUrlPathname.js'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import { getTelefuncUrl } from './serverConfig.js'
+import { getRequestPathname, readRequestUrl } from '../../utils/getUrlPathname.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER } from '../../wire-protocol/wire/requestKind.js'
 
 type HttpRequestResolved = {
@@ -60,7 +62,11 @@ type HttpRequest =
 async function serve(httpRequest: HttpRequest): Promise<HttpResponse> {
   assertHttpRequest(httpRequest, arguments.length)
   assertRequestSignalFlag()
-  const httpRequestResolved = await resolveHttpRequest(httpRequest)
+  return runRequest(httpRequest)
+}
+
+async function runRequest(httpRequest: HttpRequest, response?: Writable): Promise<HttpResponse> {
+  const httpRequestResolved = await resolveHttpRequest(httpRequest, response)
   try {
     return await runTelefunc(httpRequestResolved)
   } finally {
@@ -79,15 +85,26 @@ function assertRequestSignalFlag(): void {
   )
 }
 
-/** `serve()` for adapters holding the Node.js `res`, so that a client disconnect aborts `request.signal`. */
+/** Handles matching requests for the Node adapter and Vite's middleware. */
 async function serveNode(
-  httpRequest: Extract<HttpRequest, { readable: Readable }>,
-  response: Writable,
-): Promise<HttpResponse> {
+  req: IncomingMessage & { originalUrl?: string },
+  res: ServerResponse,
+  context?: Telefunc.Context,
+): Promise<boolean> {
+  if (res.headersSent) return false
+  const url = req.originalUrl || req.url
+  if (!url || getRequestPathname(url) !== getTelefuncUrl()) return false
+
+  const input = { url, method: req.method || 'GET', readable: req, headers: req.headers }
+  const httpRequest = context ? { ...input, context } : input
   assertHttpRequest(httpRequest, 1)
-  const httpRequestResolved = await resolveHttpRequest(httpRequest, response)
-  const httpResponse = await runTelefunc(httpRequestResolved)
-  return httpResponse
+  const httpResponse = await runRequest(httpRequest, res)
+  httpResponse.headers.forEach(([name, value]) => res.setHeader(name, value))
+  res.statusCode = httpResponse.statusCode
+  res.socket?.setNoDelay(true)
+  res.flushHeaders()
+  await httpResponse.pipe(res)
+  return true
 }
 
 /** @deprecated `telefunc()` is deprecated, use `new Telefunc()` instead, see https://telefunc.com/Telefunc */

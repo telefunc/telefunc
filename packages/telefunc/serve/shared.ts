@@ -8,9 +8,11 @@ function isTelefuncRequest(request: Request): boolean {
   return getRequestPathname(request.url) === getTelefuncUrl()
 }
 
-function toResponse(httpResponse: HttpResponse): Response {
+function toResponse(httpResponse: HttpResponse, extraHeaders?: readonly [string, string][]): Response {
+  const headers = new Headers(httpResponse.headers)
+  if (extraHeaders) for (const [name, value] of extraHeaders) headers.set(name, value)
   return new Response(httpResponse.getReadableWebStream(), {
     status: httpResponse.statusCode,
-    headers: new Headers(httpResponse.headers as HeadersInit),
+    headers,
   })
 }

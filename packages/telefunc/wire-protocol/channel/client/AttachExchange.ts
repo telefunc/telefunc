@@ -8,9 +8,9 @@ import type { ProbeSession } from './Upgrade.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import { MAX_U32, type ReconcileOpenEntry, type ReconcilePayload, type ReconciledPayload } from '../../wire/payloads.js'
 import { CHANNEL_TRANSPORT, RECONCILE_FLOOR_BYTES_PER_MS, RECONCILE_TIMEOUT_MS } from '../../constants.js'
-import { ERROR_REASON, encode } from '../../wire/frame.js'
+import { encode } from '../../wire/frame.js'
 import { readU16 } from '../../wire/header.js'
-import { isSequencedTag } from '../../wire/tags.js'
+import { WIRE_ERROR_CODE, isSequencedTag } from '../../wire/tags.js'
 import { END_CAUSE } from '../endCause.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'
@@ -257,7 +257,9 @@ class AttachExchange {
       .map(({ frame }) => frame)
 
     if (hasNewChannels && !holdsReconcile) {
-      appendReconcileBatch(frames, this.stageReconcileBatch())
+      const { reconcileFrame, movedBufferedFrames } = this.stageReconcileBatch()
+      frames.push(reconcileFrame)
+      for (const frame of movedBufferedFrames) frames.push(frame)
     } else {
       this.exitReconciling()
       // The barrier leaves out what the follow-up would name.
@@ -562,7 +564,7 @@ class AttachExchange {
   /** Ends the channel on both ends, dropping its queue; the ERROR isn't replayed, as the next reconcile sends one. */
   private loseChannel({ ix, replay, channel }: ChannelRecord): OutboundFrame {
     this.sendQueue.dropQueue(ix)
-    const frame = encode.error(ix, ERROR_REASON.LOST, replay.nextSeq())
+    const frame = encode.error(ix, WIRE_ERROR_CODE.LOST, replay.nextSeq())
     channel._onEnded(END_CAUSE.lost.error())
     return { kind: 'control', frame }
   }
@@ -570,8 +572,3 @@ class AttachExchange {
 
 /** A frame a replay sends again, with when the page first handed it among all its channels' frames. */
 type Replayed = { frame: OutboundFrame; handed: number }
-
-function appendReconcileBatch(target: OutboundFrame[], reconcileBatch: ReconcileBatch): void {
-  target.push(reconcileBatch.reconcileFrame)
-  for (const frame of reconcileBatch.movedBufferedFrames) target.push(frame)
-}

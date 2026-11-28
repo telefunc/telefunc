@@ -1,6 +1,7 @@
 export { ClientChannel, reportChannelError }
 export type { ClientChannelOptions, ConnectionOptions }
 
+import type { ReceivedFrame } from './pairPublishes.js'
 import type {
   ChannelAck,
   ClientChannel as ClientChannelType,
@@ -376,13 +377,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal — Entry point for every per-channel wire frame. The connection routes
    *  here for any frame carrying an index; this method then splits ctrl vs data. */
-  _dispatchFrame(frame: ChannelFrame): void {
+  _dispatchFrame(frame: ReceivedFrame<ChannelFrame>): void {
     if (isSequencedTag(frame.tag)) this.receiveCredit.onSequencedArrival()
     if (isChannelCtrlTag(frame.tag)) {
       this.dispatchCtrl(frame as ChannelCtrlFrame)
       return
     }
-    const data = frame as ChannelDataFrame
+    const data = frame as ReceivedFrame<ChannelDataFrame>
     if (!countsCredit(data.tag)) this.receiveCredit.onReceivedUncounted(data.bytes)
     this.dispatchDataFrame(data)
   }
@@ -390,7 +391,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal — Tag-keyed data-frame switch. `ClientBroadcast` overrides to add the
    *  PUBLISH variants and falls back to `super` for the common cases. Receive-time
    *  BDP accounting happens inside `onPeerMessage` and `onPeerBinaryMessage`. */
-  protected dispatchDataFrame(frame: ChannelDataFrame): void {
+  protected dispatchDataFrame(frame: ReceivedFrame<ChannelDataFrame>): void {
     switch (frame.tag) {
       case TAG.TEXT:
         if (frame.lossy) this.receiveCredit.confirmSoon()

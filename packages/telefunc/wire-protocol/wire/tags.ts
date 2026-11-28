@@ -1,5 +1,6 @@
 export {
   TAG,
+  WIRE_ERROR_CODE,
   isWireCtrlTag,
   isChannelCtrlTag,
   isClosingTag,
@@ -9,7 +10,7 @@ export {
   replayKindOf,
   countsCredit,
 }
-export type { ReplayKind }
+export type { ReplayKind, WireErrorCode }
 
 import { assert } from '../../utils/assert.js'
 
@@ -87,7 +88,7 @@ const TAG = {
   CLOSE_ACK: 0x31 as const,
   /** Channel closed with an abort value (analogous to `throw Abort()`). Sequenced, as CLOSE is. */
   ABORT: 0x32 as const,
-  /** Channel closed with an error, either way; a page's is `LOST`. Payload: u8 `ERROR_REASON`. Sequenced, as CLOSE. */
+  /** Channel closed with an error, either way; a page's is `LOST`. Payload: u8 `WIRE_ERROR_CODE`. Sequenced, as CLOSE. */
   ERROR: 0x33 as const,
   /** Receiver → sender: bytes consumed plus window (mod 2^32), and the last seq it has, which the replay lets go. */
   WINDOW: 0x34 as const,
@@ -113,6 +114,23 @@ const TAG = {
   /** Server → client: say at once, in a PIECES_ACK, what you took. No ix: wire-level, past its full range. */
   PIECES_ACK_REQ: 0x3c as const,
 }
+
+/** Why a channel ended, as its ERROR frame or a refusal carries it. */
+const WIRE_ERROR_CODE = {
+  OVERFLOW: 0x01,
+  LOST: 0x02,
+  NOT_IN_EFFECT: 0x03,
+  CLOSE_TIMED_OUT: 0x04,
+  FRAME_OVER_LIMIT: 0x05,
+  FRAME_REFUSED: 0x06,
+  UNCONFIRMED: 0x07,
+  UNREADABLE: 0x08,
+  RECEIVE_BUDGET: 0x09,
+  SEND_BUDGET: 0x0b,
+  END_NOT_KEPT: 0x0a,
+} as const
+
+type WireErrorCode = (typeof WIRE_ERROR_CODE)[keyof typeof WIRE_ERROR_CODE]
 
 function isWireCtrlTag(tag: number): boolean {
   return (tag > 0 && tag < DATA_TAG_MIN) || tag === TAG.PIECES_ACK_REQ

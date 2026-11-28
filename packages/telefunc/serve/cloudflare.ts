@@ -13,6 +13,7 @@ import {
   setAdapterMaxMemory,
 } from '../node/server/serverConfig.js'
 import { serve } from '../node/server/telefunc.js'
+import { toResponse } from './shared.js'
 import { installBroadcastAdapter } from '../wire-protocol/broadcast/broadcastAdapter.js'
 import {
   CloudflareBroadcastAuthorityState,
@@ -147,10 +148,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         }
         const context = getContext ? await getContext(request, this.env) : undefined
         const httpResponse = await serve(context ? { request, context } : { request })
-        const headers = new Headers(httpResponse.headers)
         // The page names it from then on, so it reaches this Durable Object from any region.
-        if (target) headers.set(SESSION_HOME_HEADER, target.locationBucket)
-        return new Response(httpResponse.getReadableWebStream(), { status: httpResponse.statusCode, headers })
+        return toResponse(httpResponse, target ? [[SESSION_HOME_HEADER, target.locationBucket]] : undefined)
       })
     }
 

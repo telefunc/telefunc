@@ -1,6 +1,7 @@
 export { WireLifecycle }
 export type { TransportOwner, TransportEnd, WireLifecycleOwner }
 
+import type { ReceivedFrame } from './pairPublishes.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
@@ -25,7 +26,7 @@ import { ReplayBuffer } from './ReplayBuffer.js'
 import { isSequencedFrame, tellsLastRead } from '../../wire/frame.js'
 import { SEQ_OFFSET, readU16, readU32 } from '../../wire/header.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
-import type { ChannelFrame, DecodedFrame, PongEntry } from '../../wire/frame.js'
+import type { ChannelFrame, PongEntry } from '../../wire/frame.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 
 import { ChannelTable, type ChannelRecord } from './ChannelTable.js'
@@ -75,7 +76,7 @@ interface TransportOwner {
   /** A request carrying `frames` was refused with `answer`. Whether the connection is to be established again, so that
    *  its RECONCILED says what the server has: false only where every channel whose data it refused ended. */
   onTransportRefused(frames: Uint8Array<ArrayBuffer>[], answer: string): boolean
-  onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void
+  onTransportFrame(frame: ReceivedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void
   onTransportPong(ended: PongEntry[]): void
   /** A piece of a RECONCILED came on a WebSocket, the RECONCILED not yet whole. */
   onTransportReconciledPiece(transport: ClientChannelTransport): void
@@ -433,7 +434,7 @@ class WireLifecycle implements TransportOwner, SendQueueOwner, LivenessOwner, Up
     for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._attach.onBatched()
   }
 
-  onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void {
+  onTransportFrame(frame: ReceivedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void {
     // An abandoned wire still delivers, but what answers its RECONCILE answers one the next wire's has replaced.
     this.readAt = performance.now()
     if (abandoned && ANSWERS_RECONCILE.has(frame.tag)) return
@@ -452,7 +453,7 @@ class WireLifecycle implements TransportOwner, SendQueueOwner, LivenessOwner, Up
 
   /** What handling `frame` throws, a bug or a malformed frame of the server's, is thrown on its own: the page reports it
    *  as uncaught, and the frames after it still go, on either transport and after a join as well. */
-  private dispatchFrame(frame: DecodedFrame): void {
+  private dispatchFrame(frame: ReceivedFrame): void {
     try {
       this.handleFrame(frame)
     } catch (err) {
@@ -462,7 +463,7 @@ class WireLifecycle implements TransportOwner, SendQueueOwner, LivenessOwner, Up
     }
   }
 
-  private handleFrame(frame: DecodedFrame): void {
+  private handleFrame(frame: ReceivedFrame): void {
     // Track seq for ALL sequenced frames, ACK_RES and the closing ones too; otherwise reconciles under-report lastSeq.
     if (isSequencedFrame(frame)) {
       const seq = this.channels.receivedSeq(frame)
@@ -503,7 +504,7 @@ class WireLifecycle implements TransportOwner, SendQueueOwner, LivenessOwner, Up
     // PING/PONG/PIECE/PIECES_ACK/ANNOUNCE/RECONCILE/STREAM_REQUEST_OPEN_ACK never reach `dispatchFrame` —
     // transports peel them off in their own receive paths. Everything that lands
     // here is per-channel and carries `index`.
-    const channelFrame = frame as ChannelFrame
+    const channelFrame = frame as ReceivedFrame<ChannelFrame>
     const record = this.channels.get(channelFrame.index)
     // A closed channel stays listed only for what it still has to tell the server.
     if (record && record.state.tag !== 'closed') record.channel._dispatchFrame(channelFrame)
@@ -793,7 +794,7 @@ class WireLifecycle implements TransportOwner, SendQueueOwner, LivenessOwner, Up
 
   /** A completion frame of the join, applied once the connection flipped: FIN from the old wire, RECONCILED from the
    *  new. */
-  private applyCompletionFrame(frame: DecodedFrame): void {
+  private applyCompletionFrame(frame: ReceivedFrame): void {
     if (frame.tag === TAG.FIN) this.releaseJoin(this.upgrade.handleFin())
     else if (frame.tag === TAG.RECONCILED) this.handleReconciled(frame.payload)
   }

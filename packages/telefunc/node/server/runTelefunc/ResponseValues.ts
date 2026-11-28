@@ -59,7 +59,10 @@ class ResponseValues {
   /** The response holds a channel an earlier response carried. */
   private carriesAnEarlierChannel = false
 
-  constructor(run: ResponseValuesRun) {
+  constructor(
+    run: ResponseValuesRun,
+    private readonly maxFrameBytes: number | undefined,
+  ) {
     this.run = run
   }
 
@@ -70,6 +73,7 @@ class ResponseValues {
       registerChannel: this.registerChannel,
       sendStream: this.sendStream,
       validators: this.validatorsOf(value),
+      maxFrameBytes: this.maxFrameBytes,
     }
   }
 

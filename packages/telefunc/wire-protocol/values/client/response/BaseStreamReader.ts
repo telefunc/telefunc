@@ -3,7 +3,7 @@ export { BaseStreamReader }
 import { parse } from '@brillout/json-serializer/parse'
 import { assert } from '../../../../utils/assert.js'
 import { isObject } from '../../../../utils/isObject.js'
-import { decodeU32, decodeIndexedFrame } from '../../../wire/envelope.js'
+import { textDecoder, decodeU32, decodeIndexedFrame } from '../../../wire/envelope.js'
 import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../../constants.js'
 import { throwAbortError, throwBugError } from '../../../../client/remoteTelefunctionCall/errors.js'
 
@@ -46,7 +46,7 @@ abstract class BaseStreamReader {
       // Error frame: [ERROR_MARKER][u32 payload_len][payload_bytes]
       const errorLen = await this.readU32()
       const errorBytes = await this.readExact(errorLen)
-      const errorPayload: unknown = parse(new TextDecoder().decode(errorBytes))
+      const errorPayload: unknown = parse(textDecoder.decode(errorBytes))
       assert(isObject(errorPayload) && 'type' in errorPayload)
       if (errorPayload.type === STREAMING_ERROR_TYPE.ABORT) {
         assert('abortValue' in errorPayload)

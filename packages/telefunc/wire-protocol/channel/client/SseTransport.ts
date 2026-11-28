@@ -28,7 +28,7 @@ import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire/requestKind.js'
 import { getWireUrl } from './getSessionUrl.js'
-import { decode, isOneFrame, messageFrames, stampWindowHold, type DecodedFrame } from '../../wire/frame.js'
+import { decode, isOneFrame, messageFrames, stampWindowHold } from '../../wire/frame.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
 import { HEADER, readTag, readU16, readU32 } from '../../wire/header.js'
 import { pairPublishes } from './pairPublishes.js'
@@ -557,7 +557,7 @@ class SseTransport implements UpgradeSource {
   /** Dispatches the frames of one downstream event; where one ends the wire, what its END says ended it. */
   private dispatchEvent(
     raw: Uint8Array<ArrayBuffer>,
-    pair: (frame: DecodedFrame) => DecodedFrame | null,
+    pair: ReturnType<typeof pairPublishes>,
     abortController: AbortController,
     onOpenAck: () => void,
   ): { end: TransportEnd | undefined } | null {
@@ -976,7 +976,7 @@ class SseTransport implements UpgradeSource {
     this.flushScheduler.schedule(earliest)
   }
 
-  private getFrameDeadline(kind: OutboundFrameKind, now = performance.now()): number {
+  private getFrameDeadline(kind: OutboundFrameKind, now: number): number {
     switch (kind) {
       case 'reconcile':
         return now + SSE_RECONCILE_DEADLINE_MS

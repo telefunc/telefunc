@@ -6,7 +6,7 @@ import { assert, assertUsage } from '../../../utils/assert.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
 import { createStreamingReplacer } from '../../../wire-protocol/values/server/response/registry.js'
-import { getServerExtensionTypes } from '../serverConfig.js'
+import { getAdapterMaxFrameBytes, getServerExtensionTypes } from '../serverConfig.js'
 import { ResponseValues, type ResponseValuesRun, type SerializeResult, type TelefuncId } from './ResponseValues.js'
 
 function serializeTelefunctionResult(
@@ -15,7 +15,7 @@ function serializeTelefunctionResult(
   const bodyValue = runContext.telefunctionAborted
     ? { ret: runContext.telefunctionReturn, abort: true }
     : { ret: runContext.telefunctionReturn }
-  const values = new ResponseValues(runContext)
+  const values = new ResponseValues(runContext, getAdapterMaxFrameBytes())
   const replacer = createStreamingReplacer(
     (value) => values.contextFor(value),
     (replaced) => values.onReplaced(replaced),

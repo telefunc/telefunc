@@ -1,6 +1,7 @@
 export { getTelefuncChannelOptions }
 
 import { defineHooks, type Hooks, type Message, type Peer } from 'crossws'
+import { handleError } from '../../../node/server/runTelefunc/handleError.js'
 import { enableWebSocket } from '../../../node/server/serverConfig.js'
 import { readRequestUrl } from '../../../utils/getUrlPathname.js'
 import { CHANNEL_TRANSPORT, WS_CLOSE_PAGE_LEFT, WS_CLOSE_REFUSED, WS_CLOSE_WIRE_VERSION } from '../../constants.js'
@@ -58,25 +59,31 @@ function getTelefuncChannelOptions({
       return upgrade?.(request)
     },
     // A throw in `open` comes before the mux has the peer, where nothing else would close it.
-    open: guardCrosswsHook((peer) => {
-      const request = peer.request
-      // A page on another version reloads: none of its frames could be read. Told after the 101, as a close code: a page
-      // learns nothing from a refused handshake.
-      if (!namesWireVersion(request)) return peer.close(WS_CLOSE_WIRE_VERSION, 'reload the page')
-      mux.onWireOpen(peer, transport, request)
-    }, terminate),
+    open: guardCrosswsHook(
+      (peer) => {
+        const request = peer.request
+        // A page on another version reloads: none of its frames could be read. Told after the 101, as a close code: a page
+        // learns nothing from a refused handshake.
+        if (!namesWireVersion(request)) return peer.close(WS_CLOSE_WIRE_VERSION, 'reload the page')
+        mux.onWireOpen(peer, transport, request)
+      },
+      terminate,
+      handleError,
+    ),
     message: guardCrosswsHook(
       (peer, message: Message) => mux.onWireMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
       (peer) => mux.endFault(peer, { scope: 'loss' }),
+      handleError,
     ),
     // Where the server decided the close, the mux forgot the peer as it decided it, and finds nothing here.
     close: guardCrosswsHook(
       (peer, details: Parameters<Hooks['close']>[1]) =>
         mux.onWireClosed(peer, details?.code === WS_CLOSE_PAGE_LEFT ? 'pageLeft' : 'transient'),
       null,
+      handleError,
     ),
-    error: guardCrosswsHook((peer) => mux.onWireClosed(peer, 'transient'), null),
-    drain: guardCrosswsHook((peer) => mux.onWireDrain(peer), null),
+    error: guardCrosswsHook((peer) => mux.onWireClosed(peer, 'transient'), null, handleError),
+    drain: guardCrosswsHook((peer) => mux.onWireDrain(peer), null, handleError),
   })
   return {
     hooks,

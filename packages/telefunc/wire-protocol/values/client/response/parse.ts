@@ -24,7 +24,7 @@ import { ChannelStreamSource } from '../../ChannelStreamSource.js'
 import { createReadableChunkStream } from '../../createReadableChunkStream.js'
 import { readChunksToBytes } from '../../readChunksToBytes.js'
 import { STREAMING_ERROR_TYPE } from '../../../constants.js'
-import { ownIndexedPayload } from '../../../wire/envelope.js'
+import { textDecoder, ownIndexedPayload } from '../../../wire/envelope.js'
 
 // ===== Types =====
 
@@ -66,7 +66,7 @@ async function parseResponse(
       : new StreamReader(reader, callContext)
     const metaLen = await streamReader.readU32()
     const metaBytes = await streamReader.readExact(metaLen)
-    const metaText = new TextDecoder().decode(metaBytes)
+    const metaText = textDecoder.decode(metaBytes)
     return reviveResponse(metaText, callContext, connection, streamReader)
   }
 

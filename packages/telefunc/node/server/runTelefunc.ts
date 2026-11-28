@@ -17,7 +17,7 @@ import { handleTelefunctionBug } from './runTelefunc/validateTelefunctionError.j
 import { handleError } from './runTelefunc/handleError.js'
 import { applyShield } from './runTelefunc/applyShield.js'
 import { findTelefunction } from './runTelefunc/findTelefunction.js'
-import { readResponseText } from './runTelefunc/readResponseText.js'
+import { textEncoder } from '../../wire-protocol/wire/envelope.js'
 import { resolveReturnShields } from './shield.js'
 import { getServerConfig } from './serverConfig.js'
 import { isShieldValidationError } from '../../shared/ShieldValidationError.js'
@@ -143,7 +143,25 @@ function createHttpResponse(
     async getBody() {
       const body = sent()
       if (typeof body === 'string') return body
-      return readResponseText(body)
+      const decoder = new TextDecoder()
+      let text = ''
+      if (!(body instanceof ReadableStream)) {
+        for await (const chunk of body) text += decoder.decode(chunk, { stream: true })
+        return text + decoder.decode()
+      }
+      const reader = body.getReader()
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) return text + decoder.decode()
+          text += decoder.decode(value, { stream: true })
+        }
+      } catch (err) {
+        await reader.cancel(err).catch(() => {})
+        throw err
+      } finally {
+        reader.releaseLock()
+      }
     },
     err,
   }
@@ -162,7 +180,7 @@ async function pipeToStreamWritableWeb(responseBody: ResponseBody, writable: Str
   try {
     if (typeof responseBody === 'string') {
       const writer = writable.getWriter()
-      await writer.write(encodeForWebStream(responseBody))
+      await writer.write(textEncoder.encode(responseBody))
       await writer.close()
       return
     }
@@ -204,7 +222,7 @@ function getStreamReadableWeb(responseBody: ResponseBody): StreamReadableWeb {
   if (typeof responseBody === 'string') {
     return new ReadableStream({
       start(controller) {
-        controller.enqueue(encodeForWebStream(responseBody))
+        controller.enqueue(textEncoder.encode(responseBody))
         controller.close()
       },
     })
@@ -221,17 +239,6 @@ function getStreamReadableNode(responseBody: ResponseBody): StreamReadableNode {
     return Readable.fromWeb(responseBody as import('stream/web').ReadableStream)
   }
   return responseBody
-}
-
-let encoder: TextEncoder
-function encodeForWebStream(thing: unknown) {
-  if (!encoder) {
-    encoder = new TextEncoder()
-  }
-  if (typeof thing === 'string') {
-    return encoder.encode(thing)
-  }
-  return thing
 }
 
 const shieldValidationError = {

@@ -46,8 +46,8 @@ function writeU32(bytes: Uint8Array, at: number, n: number): void {
   bytes[at + 3] = n
 }
 
-function decodeU32(buf: Uint8Array<ArrayBuffer>, offset = 0): number {
-  return new DataView(buf.buffer, buf.byteOffset + offset, U32_SIZE).getUint32(0, false)
+function decodeU32(bytes: Uint8Array): number {
+  return ((bytes[0]! << 24) | (bytes[1]! << 16) | (bytes[2]! << 8) | bytes[3]!) >>> 0
 }
 
 function concat(...parts: Uint8Array<ArrayBuffer>[]): Uint8Array<ArrayBuffer> {

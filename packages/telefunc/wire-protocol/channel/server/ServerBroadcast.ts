@@ -39,9 +39,9 @@ import { Listeners, type Registration } from '../../../utils/Listeners.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
-import { ACK_STATUS, ERROR_REASON, encode, type AckResultStatus } from '../../wire/frame.js'
-import { TAG } from '../../wire/tags.js'
-import type { ChannelDataFrame, ErrorReason } from '../../wire/frame.js'
+import { ACK_STATUS, encode, type AckResultStatus } from '../../wire/frame.js'
+import { TAG, WIRE_ERROR_CODE, type WireErrorCode } from '../../wire/tags.js'
+import type { ChannelDataFrame } from '../../wire/frame.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { PublishBody } from './PublishBody.js'
 import { LossyDelivery } from './LossyDelivery.js'
@@ -456,12 +456,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private endOverflowed(): void {
     if (this.overflowed === null) return
     if (this._phase !== 'ended') {
-      this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(`Broadcast closed: ${this.overflowed}`))
+      this.endWithError(WIRE_ERROR_CODE.OVERFLOW, new ChannelOverflowError(`Broadcast closed: ${this.overflowed}`))
       return
     }
     if (!this.owesAbort) return
     this.owesAbort = false
-    this.replaceEnd(ERROR_REASON.OVERFLOW, this.endedOn)
+    this.replaceEnd(WIRE_ERROR_CODE.OVERFLOW, this.endedOn)
     this.endedOn = null
   }
 
@@ -510,7 +510,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private async inEffectOrEnded(callAborted: AbortSignal, waitAtMost: number): Promise<void> {
     const inEffect = createDeferred()
     this.callWaits.add(inEffect.resolve)
-    const end = (message: string) => this.endWithError(ERROR_REASON.NOT_IN_EFFECT, new ChannelClosedError(message))
+    const end = (message: string) => this.endWithError(WIRE_ERROR_CODE.NOT_IN_EFFECT, new ChannelClosedError(message))
     const endAborted = () => end(NOT_IN_EFFECT)
     if (callAborted.aborted) endAborted()
     else callAborted.addEventListener('abort', endAborted, { once: true })
@@ -567,7 +567,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   /** What it held for its first attach goes with the rest it buffered: an error ends it without them. */
-  protected override endWithError(reason: ErrorReason, err: Error): void {
+  protected override endWithError(reason: WireErrorCode, err: Error): void {
     if (this._phase !== 'ended') this.dropBeforeAttach()
     super.endWithError(reason, err)
   }
@@ -695,7 +695,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     } catch (err) {
       if (!this.isListening(listening)) return
       handleCallbackBug(err)
-      return this.endWithError(ERROR_REASON.NOT_IN_EFFECT, err instanceof Error ? err : new Error(String(err)))
+      return this.endWithError(WIRE_ERROR_CODE.NOT_IN_EFFECT, err instanceof Error ? err : new Error(String(err)))
     }
     if (!this.isListening(listening)) return
     listening.opened = undefined

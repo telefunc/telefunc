@@ -1,6 +1,5 @@
 export {
   ACK_STATUS,
-  ERROR_REASON,
   encode,
   withTook,
   stampWindowHold,
@@ -13,14 +12,12 @@ export {
   decode,
   decodeClientFrame,
   isSequencedFrame,
-  peekTag,
   isCloseOutcomeFrame,
   tellsLastRead,
   channelOf,
 }
 export type {
   AckResultStatus,
-  ErrorReason,
   DecodedFrame,
   ChannelFrame,
   ChannelCtrlFrame,
@@ -45,7 +42,7 @@ import {
   readU32,
   readU64,
 } from './header.js'
-import { TAG, isSequencedTag, isWireCtrlTag } from './tags.js'
+import { TAG, WIRE_ERROR_CODE, isSequencedTag, isWireCtrlTag, type WireErrorCode } from './tags.js'
 import {
   parseBarrierPayload,
   parseJsonPayload,
@@ -69,7 +66,6 @@ import {
 import { ProtocolViolationError, assertProtocol } from './protocolViolation.js'
 import { textDecoder, textEncoder } from './envelope.js'
 import { assert } from '../../utils/assert.js'
-import { END_CAUSE } from '../channel/endCause.js'
 
 const PING_ENTRY_BYTES = 6
 const PONG_ENTRY_BYTES = 7
@@ -101,30 +97,12 @@ const ACK_STATUS = {
 
 type AckResultStatus = (typeof ACK_STATUS)[keyof typeof ACK_STATUS]
 
-/** Why a channel ended, as `ERROR` carries it: each cause's code (`END_CAUSE`, which says what each means). */
-const ERROR_REASON = {
-  OVERFLOW: END_CAUSE.overflow.code,
-  LOST: END_CAUSE.lost.code,
-  NOT_IN_EFFECT: END_CAUSE.notInEffect.code,
-  CLOSE_TIMED_OUT: END_CAUSE.closeTimedOut.code,
-  FRAME_OVER_LIMIT: END_CAUSE.frameOverLimit.code,
-  FRAME_REFUSED: END_CAUSE.frameRefused.code,
-  UNCONFIRMED: END_CAUSE.unconfirmed.code,
-  UNREADABLE: END_CAUSE.unreadable.code,
-  RECEIVE_BUDGET: END_CAUSE.receiveBudget.code,
-  SEND_BUDGET: END_CAUSE.sendBudget.code,
-  END_NOT_KEPT: END_CAUSE.endNotKept.code,
-}
-
-type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]
-
 // ===== Decoded frame =====
 
-/** `bytes`: the whole frame, what flow control counts, so an empty message counts too. `lossy`: it came behind a
- *  `PUBLISH_TO`, as a send a newer one may have replaced. */
+/** `bytes`: the whole frame, what flow control counts, so an empty message counts too. */
 type ChannelDataFrame = { index: number; seq: number; bytes: number } & (
-  | { tag: typeof TAG.TEXT; text: string; lossy?: true }
-  | { tag: typeof TAG.BINARY; data: Uint8Array; lossy?: true }
+  | { tag: typeof TAG.TEXT; text: string }
+  | { tag: typeof TAG.BINARY; data: Uint8Array }
   | { tag: typeof TAG.TEXT_ACK_REQ; text: string }
   | { tag: typeof TAG.BINARY_ACK_REQ; data: Uint8Array }
   | { tag: typeof TAG.ACK_RES; ackedSeq: number; status: AckResultStatus; text: string }
@@ -375,7 +353,7 @@ const encode = {
   /** Wire: [header][u32 lastSeq], as CLOSE_ACK. */
   closeDone: (index: number, lastSeq: number, seq: number) => encodeReadThrough(TAG.CLOSE_DONE, index, lastSeq, seq),
   abort: (index: number, abortValue: string, seq: number) => encodeTextFrame(TAG.ABORT, index, abortValue, seq),
-  error(index: number, reason: ErrorReason, seq: number): Uint8Array<ArrayBuffer> {
+  error(index: number, reason: WireErrorCode, seq: number): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + 1)
     writeHeader(frame, TAG.ERROR, index, seq)
     frame[HEADER] = reason
@@ -470,24 +448,24 @@ function fixedBytes(tag: number): number {
 }
 
 const FIXED_BYTES: Partial<Record<number, number>> = {
-  [TAG.FIN]: encode.fin().byteLength,
-  [TAG.PUBLISH_TO]: encode.publishTo(0, 0).byteLength,
-  [TAG.STREAM_REQUEST_OPEN_ACK]: encode.streamRequestOpenAck().byteLength,
-  [TAG.RECONCILE_TAKEN]: encode.reconcileTaken().byteLength,
-  [TAG.PIECES_ACK_REQ]: encode.piecesAckReq().byteLength,
-  [TAG.PIECES_ACK]: encode.piecesAck(0, 0, 0).byteLength,
-  [TAG.ANNOUNCE]: encode.announce(0, 0).byteLength,
-  [TAG.CLOSE]: encode.close(0, 0, 0).byteLength,
-  [TAG.CLOSE_ACK]: encode.closeAck(0, 0, 0).byteLength,
-  [TAG.CLOSE_DONE]: encode.closeDone(0, 0, 0).byteLength,
-  [TAG.ERROR]: encode.error(0, ERROR_REASON.LOST, 0).byteLength,
-  [TAG.WINDOW]: encode.window(0, 0, 0).byteLength,
-  [TAG.WANT]: encode.want(0, { version: 0, text: false, binary: false }).byteLength,
-  [TAG.WANTED]: encode.wanted(0, 0).byteLength,
-  [TAG.BDP_PING]: encode.bdpPing(0, 0).byteLength,
-  [TAG.BDP_PING_ACK]: encode.bdpPingAck(0, 0, 0, 0).byteLength,
-  [TAG.MSG_WINDOW]: encode.msgWindow(0, 0).byteLength,
-  [TAG.ATTACH_RESULT]: encode.attachResult(0, null).byteLength,
+  [TAG.FIN]: HEADER,
+  [TAG.PUBLISH_TO]: HEADER,
+  [TAG.STREAM_REQUEST_OPEN_ACK]: HEADER,
+  [TAG.RECONCILE_TAKEN]: HEADER,
+  [TAG.PIECES_ACK_REQ]: HEADER,
+  [TAG.PIECES_ACK]: HEADER + 12,
+  [TAG.ANNOUNCE]: HEADER + 4,
+  [TAG.CLOSE]: HEADER + 4,
+  [TAG.CLOSE_ACK]: HEADER + 4,
+  [TAG.CLOSE_DONE]: HEADER + 4,
+  [TAG.ERROR]: HEADER + 1,
+  [TAG.WINDOW]: HEADER + 10,
+  [TAG.WANT]: HEADER + 5,
+  [TAG.WANTED]: HEADER + 4,
+  [TAG.BDP_PING]: HEADER + 4,
+  [TAG.BDP_PING_ACK]: HEADER + 12,
+  [TAG.MSG_WINDOW]: HEADER + 4,
+  [TAG.ATTACH_RESULT]: HEADER + 5,
 }
 
 /** The bytes of the LENGTH a frame of `tag` needs ahead of it when another follows it in its message: 0 where its
@@ -522,16 +500,11 @@ function* messageFrames(message: Uint8Array<ArrayBuffer>): Generator<Uint8Array<
   }
 }
 
-/** The tag is the first header byte — readable before the frame is known to be well-formed. */
-function peekTag(raw: Uint8Array): number | undefined {
-  return raw[0]
-}
-
 /** A frame that answers a close or ends it: CLOSE_ACK, CLOSE_DONE, or the ERROR of a close that timed out. The CLOSE that
  *  begins it is not one. */
 function isCloseOutcomeFrame(frame: Uint8Array): boolean {
-  const tag = frame[0]
-  if (tag === TAG.ERROR) return frame[HEADER] === ERROR_REASON.CLOSE_TIMED_OUT
+  const tag = readTag(frame)
+  if (tag === TAG.ERROR) return frame[HEADER] === WIRE_ERROR_CODE.CLOSE_TIMED_OUT
   return tag === TAG.CLOSE_ACK || tag === TAG.CLOSE_DONE
 }
 
@@ -545,8 +518,8 @@ function tellsLastRead<F extends DecodedFrame>(
 /** The channel a frame is on, from its header alone: none for a frame of the connection's own, or for one too short to
  *  have a header. */
 function channelOf(raw: Uint8Array): number | undefined {
-  const tag = raw[0]
-  return tag !== undefined && !isWireCtrlTag(tag) && raw.byteLength >= HEADER ? readU16(raw, 1) : undefined
+  const tag = readTag(raw)
+  return tag !== 0 && !isWireCtrlTag(tag) && raw.byteLength >= HEADER ? readU16(raw, 1) : undefined
 }
 
 function decode(frame: Uint8Array): DecodedFrame {
@@ -748,7 +721,7 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
  *  size cap. The cap is checked on the raw bytes because its job is to bound what an unauthenticated
  *  peer can make us parse — after `decode` it would be bounding nothing. */
 function decodeClientFrame(raw: Uint8Array<ArrayBuffer>, maxUpgradeFrameBytes: number): DecodedFrame {
-  const tag = peekTag(raw)
+  const tag = readTag(raw)
   const isUpgradeFrame = tag === TAG.PREPARE || tag === TAG.BARRIER
   assertProtocol(!isUpgradeFrame || raw.byteLength <= maxUpgradeFrameBytes, 'upgrade frame over byte cap')
   const frame = decode(raw)

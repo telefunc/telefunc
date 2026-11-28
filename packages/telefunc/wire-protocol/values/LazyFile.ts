@@ -4,7 +4,7 @@ export { isLazyBlob }
 export { isLazyFile }
 
 import { assertUsage } from '../../utils/assert.js'
-import { concatAll } from '../wire/envelope.js'
+import { textDecoder, concatAll } from '../wire/envelope.js'
 
 const LAZY_BLOB_BRAND = Symbol.for('telefunc.LazyBlob')
 const LAZY_FILE_BRAND = Symbol.for('telefunc.LazyFile')
@@ -48,7 +48,7 @@ abstract class BaseStreamBlob implements Blob {
   }
 
   async text(): Promise<string> {
-    return new TextDecoder().decode(await this.bytes())
+    return textDecoder.decode(await this.bytes())
   }
 
   slice(start?: number, end?: number, contentType?: string): Blob {

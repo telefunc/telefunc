@@ -82,27 +82,7 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
     const { req, res, context } = input
     const server = (req.socket as NodeRequest['socket'] & { server?: HttpServer }).server
     if (server) installWebSocket(server)
-
-    if (res.headersSent) return false
-
-    const url = req.originalUrl || req.url
-    if (!url) return false
-    if (getRequestPathname(url) !== getTelefuncUrl()) return false
-
-    const serveInput = {
-      url,
-      method: req.method || 'GET',
-      readable: req,
-      headers: req.headers,
-    }
-    const httpResponse = await serveNode(context ? { ...serveInput, context } : serveInput, res)
-
-    httpResponse.headers.forEach(([name, value]) => res.setHeader(name, value))
-    res.statusCode = httpResponse.statusCode
-    res.socket?.setNoDelay(true)
-    res.flushHeaders()
-    await httpResponse.pipe(res)
-    return true
+    return serveNode(req, res, context)
   }
 
   return { installWebSocket, serve }

@@ -77,15 +77,8 @@ import { getChannelConfig, reconnectWindow } from '../../../node/server/serverCo
 import type { EndingFrame } from '../ChannelEnding.js'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
-import {
-  ACK_STATUS,
-  ERROR_REASON,
-  encode,
-  isCloseOutcomeFrame,
-  isSequencedFrame,
-  tellsLastRead,
-} from '../../wire/frame.js'
-import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
+import { ACK_STATUS, encode, isCloseOutcomeFrame, isSequencedFrame, tellsLastRead } from '../../wire/frame.js'
+import { TAG, WIRE_ERROR_CODE, countsCredit, isChannelCtrlTag, type WireErrorCode } from '../../wire/tags.js'
 import { isChannelId } from '../../wire/payloads.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
 import { ProtocolViolationError, assertProtocol } from '../../wire/protocolViolation.js'
@@ -94,7 +87,6 @@ import type {
   ChannelCtrlFrame,
   ChannelDataFrame,
   ChannelFrame,
-  ErrorReason,
   SequencedEncoder,
 } from '../../wire/frame.js'
 import type { AttachState, Want } from '../../wire/payloads.js'
@@ -596,7 +588,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       case 'closeDone':
         return this.sendEnd((peer) => peer.sendCloseDone(this._lastClientSeq))
       case 'timedOut':
-        return this.sendEnd((peer) => peer.sendSequenced(encode.error, ERROR_REASON.CLOSE_TIMED_OUT))
+        return this.sendEnd((peer) => peer.sendSequenced(encode.error, WIRE_ERROR_CODE.CLOSE_TIMED_OUT))
     }
   }
 
@@ -658,7 +650,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this.endLost) {
       // Lost to the page, which both ends say.
       this.endLost = false
-      this.replaceEnd(ERROR_REASON.END_NOT_KEPT, peer)
+      this.replaceEnd(WIRE_ERROR_CODE.END_NOT_KEPT, peer)
       this.shutdown(END_CAUSE.endNotKept.error())
     }
     this.sendPendingEnd(peer)
@@ -736,10 +728,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.ERROR:
         assertProtocol(
-          frame.reason === ERROR_REASON.LOST || frame.reason === ERROR_REASON.CLOSE_TIMED_OUT,
+          frame.reason === WIRE_ERROR_CODE.LOST || frame.reason === WIRE_ERROR_CODE.CLOSE_TIMED_OUT,
           `ERROR reason ${frame.reason} from a page`,
         )
-        const cause = frame.reason === ERROR_REASON.LOST ? END_CAUSE.lost : END_CAUSE.closeTimedOut
+        const cause = frame.reason === WIRE_ERROR_CODE.LOST ? END_CAUSE.lost : END_CAUSE.closeTimedOut
         this.shutdown(cause.error(), { pageGone: true })
         return
       case TAG.WINDOW:
@@ -942,7 +934,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const stall = replay?.stall
     if (!replay || !stall || !replay.unconfirmed || performance.now() - stall.since <= reconnectTimeout) return false
     replay.dispose()
-    this.endWithError(ERROR_REASON.UNCONFIRMED, END_CAUSE.unconfirmed.error(reconnectTimeout))
+    this.endWithError(WIRE_ERROR_CODE.UNCONFIRMED, END_CAUSE.unconfirmed.error(reconnectTimeout))
     return true
   }
 
@@ -1093,13 +1085,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** Once it ended, an ERROR of `reason` takes the place of the end it held for its page: on `peer`, the wire its page
    *  reads, else on its next attach. */
-  protected replaceEnd(reason: ErrorReason, peer: IndexedPeer | null): void {
+  protected replaceEnd(reason: WireErrorCode, peer: IndexedPeer | null): void {
     this.pendingEnd = [(last) => last.sendSequenced(encode.error, reason)]
     if (peer) this.sendPendingEnd(peer)
   }
 
   /** Ends the channel on both sides with an ERROR of `reason`; a page not attached receives it on its next attach. */
-  protected endWithError(reason: ErrorReason, err: Error): void {
+  protected endWithError(reason: WireErrorCode, err: Error): void {
     if (this._phase === 'ended') return
     this.offlineBuffer.clear(err)
     this.sendEnd((peer) => peer.sendSequenced(encode.error, reason))
@@ -1109,7 +1101,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** Ends the channel for lack of memory, as a shed subscriber does. */
   private endForLackOfMemory(text: string): void {
     this.dropUnhanded()
-    this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(text))
+    this.endWithError(WIRE_ERROR_CODE.OVERFLOW, new ChannelOverflowError(text))
   }
 
   /** Send an ack response, buffering it if the peer is currently disconnected. It takes its request's place. One that

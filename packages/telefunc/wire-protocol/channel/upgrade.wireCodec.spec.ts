@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 
-import { ERROR_REASON, decode, decodeClientFrame, encode } from '../wire/frame.js'
-import { TAG } from '../wire/tags.js'
+import { decode, decodeClientFrame, encode } from '../wire/frame.js'
+import { WIRE_ERROR_CODE, TAG } from '../wire/tags.js'
 import {
   WIRE_MAX_CTRL_FRAME_BYTES,
   type BarrierPayload,
@@ -189,7 +189,7 @@ describe('decodeClientFrame — direction', () => {
     ['CLOSE', encode.close(0, 1_000, 1)],
     ['CLOSE_ACK', encode.closeAck(0, 1, 1)],
     ['ABORT', encode.abort(0, JSON.stringify('nope'), 1)],
-    ['ERROR', encode.error(0, ERROR_REASON.LOST, 1)],
+    ['ERROR', encode.error(0, WIRE_ERROR_CODE.LOST, 1)],
     ['WINDOW', encode.window(0, 1_024, 7)],
     ['MSG_WINDOW', encode.msgWindow(0, 8)],
     ['BDP_PING', encode.bdpPing(0, 1)],

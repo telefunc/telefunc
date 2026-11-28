@@ -8,14 +8,16 @@ export type {
   OutboundFrameKind,
 }
 
+import type { ReceivedFrame } from './pairPublishes.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { type ChannelTransport, type ChannelTransports } from '../../constants.js'
 import type { Urgency } from '../../flowControl/credit.js'
-import { ACK_STATUS, ERROR_REASON, encode } from '../../wire/frame.js'
+import { ACK_STATUS, encode } from '../../wire/frame.js'
 import type { AckResultStatus, BdpPingAck, ChannelFrame, SequencedEncoder } from '../../wire/frame.js'
 import type { CallWant, ReconciledPayload, Want } from '../../wire/payloads.js'
 import type { Heartbeat } from './Heartbeat.js'
 import type { AbortReasonLimit } from '../channel.js'
+import { WIRE_ERROR_CODE } from '../../wire/tags.js'
 import { HEADER } from '../../wire/header.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import type { FrameAt, SendQueue } from './SendQueue.js'
@@ -46,7 +48,7 @@ interface MuxChannel {
    *  channel splits ctrl vs data internally. Wire-level frames (PING/PONG/
    *  FIN/RECONCILED), channel-termination ctrls (ABORT/ERROR) and ATTACH_RESULT stay with the
    *  connection — they involve connection-side cleanup. */
-  _dispatchFrame(frame: ChannelFrame): void
+  _dispatchFrame(frame: ReceivedFrame<ChannelFrame>): void
   _onEnded(err?: Error): void
   /** Its connection is gone for good. */
   _onConnectionLost(err: Error): void
@@ -290,7 +292,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
 
   sendCloseTimedOut(channel: MuxChannel): void {
     this.sendQueue.sendSequenced(channel, 'control', ({ ix }, seq) =>
-      encode.error(ix, ERROR_REASON.CLOSE_TIMED_OUT, seq),
+      encode.error(ix, WIRE_ERROR_CODE.CLOSE_TIMED_OUT, seq),
     )
   }
 

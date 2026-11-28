@@ -6,7 +6,6 @@ import type { IndexedPeer } from './IndexedPeer.js'
 import type { WireEntry } from './ChannelMux.js'
 import type { SessionCause } from '../endCause.js'
 import { DeadlineTimer } from '../DeadlineTimer.js'
-import { catchUpDroppedTimer } from '../../../workarounds/workerdDroppedTimers.js'
 
 /** A channel as one session holds it: its index there and the peer it sends through, none once its wire went. */
 type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer | null }
@@ -61,7 +60,8 @@ class SessionRegistry {
   /** Keeps `end` under `sessionId` until `leavesAt`, where no record is kept under it; one kept already stands. */
   keepEnd(sessionId: string, end: KeptEnd['end'], high: number, leavesAt: number): void {
     if (this.keptOf(sessionId) !== undefined) return
-    catchUpDroppedTimer(this.sweepAt, this.drain)
+    // Workerd can drop timers when the request that armed them ends.
+    if (this.sweepAt !== null && this.sweepAt <= performance.now()) this.drain()
     // One past its instant that the sweep hasn't freed yet goes, so that the map stays in the order of the instants.
     this.kept.delete(sessionId)
     this.kept.set(sessionId, { end, high, leavesAt })

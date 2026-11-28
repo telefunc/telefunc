@@ -1,4 +1,4 @@
-export { ChannelClosedError, ChannelOverflowError, ChannelCloseUnknownError, ChannelPageLeftError, framesRefusedError }
+export { ChannelClosedError, ChannelOverflowError, ChannelCloseUnknownError, ChannelPageLeftError }
 
 import { NetworkError } from '../../shared/NetworkError.js'
 import { markErrorClass } from '../../shared/markErrorClass.js'
@@ -50,9 +50,3 @@ markErrorClass(ChannelClosedError, 'ChannelClosedError')
 markErrorClass(ChannelOverflowError, 'ChannelOverflowError')
 markErrorClass(ChannelCloseUnknownError, 'ChannelCloseUnknownError')
 markErrorClass(ChannelPageLeftError, 'ChannelPageLeftError')
-
-/** How a channel ends, on both ends, when the server can't take a frame the page sent: `reason` is the refusal's
- *  sentence (`END_CAUSE`'s frame causes). Sending the same frame again fails again, so it is no `NetworkError`. */
-function framesRefusedError(reason: string): ChannelClosedError {
-  return new ChannelClosedError(`Channel closed: the server refused what the page sent on it: ${reason}`)
-}

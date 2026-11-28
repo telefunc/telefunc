@@ -17,16 +17,8 @@ import {
   type ChannelTransport,
   type ChannelTransports,
 } from '../../constants.js'
-import {
-  channelOf,
-  decodeClientFrame,
-  encode,
-  isOneFrame,
-  messageFrames,
-  peekTag,
-  tookOf,
-  withTook,
-} from '../../wire/frame.js'
+import { channelOf, decodeClientFrame, encode, isOneFrame, messageFrames, tookOf, withTook } from '../../wire/frame.js'
+import { readTag } from '../../wire/header.js'
 import { TAG, isWireCtrlTag } from '../../wire/tags.js'
 import { keptEndWindowOf, pingDeadline } from '../../wire/pingDeadline.js'
 import { getSessionToken } from '../../wire/requestKind.js'
@@ -468,7 +460,7 @@ class ChannelMux implements UpgradeStagesOwner {
       )
       return Promise.resolve(null)
     }
-    const tag = peekTag(rawFrame)
+    const tag = readTag(rawFrame)
     if (tag === TAG.PIECE) return this.receivePiece(entry, rawFrame)
     if (tag === TAG.ANNOUNCE) return this.receiveAnnounce(entry, rawFrame)
     const now = performance.now()
@@ -555,11 +547,8 @@ class ChannelMux implements UpgradeStagesOwner {
   /** What `rawFrame` is over, if anything: its cap (only data frames and pieces get the raw frame cap), or the backlog
    *  of what the wire received and hasn't handled, which adds a full window per channel of the session. */
   private overBudget(entry: WireEntry, rawFrame: Uint8Array<ArrayBuffer>): 'frame' | 'backlog' | null {
-    const tag = peekTag(rawFrame)
-    const maxFrameBytes =
-      tag !== undefined && isWireCtrlTag(tag) && tag !== TAG.PIECE
-        ? WIRE_MAX_CTRL_FRAME_BYTES
-        : WIRE_MAX_RAW_FRAME_BYTES
+    const tag = readTag(rawFrame)
+    const maxFrameBytes = isWireCtrlTag(tag) && tag !== TAG.PIECE ? WIRE_MAX_CTRL_FRAME_BYTES : WIRE_MAX_RAW_FRAME_BYTES
     const byteLength = rawFrame.byteLength
     if (byteLength > maxFrameBytes) return 'frame'
     const { state } = entry
@@ -595,7 +584,7 @@ class ChannelMux implements UpgradeStagesOwner {
       // waits for the RECONCILED that won't come: then it ends as a lost one, and the page resumes on the next.
       if (!(err instanceof ProtocolViolationError)) {
         handleTelefunctionBug(err)
-        if (peekTag(rawFrame) === TAG.RECONCILE) this.endFault(entry.wire, { scope: 'loss' })
+        if (readTag(rawFrame) === TAG.RECONCILE) this.endFault(entry.wire, { scope: 'loss' })
       } else {
         const fault: Fault = { scope: 'channel', ix: channelOf(rawFrame), cause: 'frameRefused', wire: 'loss' }
         this.endFault(err.target ?? entry.wire, fault)
@@ -758,7 +747,7 @@ class ChannelMux implements UpgradeStagesOwner {
   /** The channels a RECONCILE on `entry` names, where it is a RECONCILE, end with `cause`: its wire ended its session
    *  before its turn. */
   private refuseReconciled(entry: WireEntry, rawFrame: Uint8Array<ArrayBuffer>, cause: SessionCause): void {
-    if (peekTag(rawFrame) !== TAG.RECONCILE) return
+    if (readTag(rawFrame) !== TAG.RECONCILE) return
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.RECONCILE) this.refuseNamed(frame.payload.open, entry, cause)
   }

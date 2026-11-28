@@ -8,6 +8,7 @@ import { getRequestPathname } from '../../../utils/getUrlPathname.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/values/server/request/registry.js'
+import { textDecoder } from '../../../wire-protocol/wire/envelope.js'
 import { BodyReader, OversizeFrameError, StreamTruncatedError } from '../../../wire-protocol/wire/BodyReader.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire-protocol/wire/requestKind.js'
 import type { RequestContext } from '../context/requestContext.js'
@@ -236,7 +237,7 @@ async function readBody(
     }
     return {
       isMalformedRequest: false,
-      text: new TextDecoder().decode(envelope),
+      text: textDecoder.decode(envelope),
       registerFile: (i, s) => reader.registerFile(i, s),
     }
   }
