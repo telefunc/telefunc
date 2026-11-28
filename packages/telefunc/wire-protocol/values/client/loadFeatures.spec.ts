@@ -66,6 +66,7 @@ afterEach(async () => {
   await Promise.allSettled(loads)
   for (const feature of FEATURES) vi.doUnmock(`./${feature}.js`)
   vi.doUnmock('./loadFeatures.js')
+  vi.doUnmock('../../channel/client/ClientChannel.js')
   vi.unstubAllGlobals()
 })
 
@@ -320,6 +321,17 @@ test.each(['a streamed response', 'a text response', 'a claimed upload'] as cons
   'a call aborted once its chunk loaded, before it resumes, rejects without using it (%s)',
   async (kind) => {
     abortOnceLoaded()
+    let channelsOpened = 0
+    vi.doMock('../../channel/client/ClientChannel.js', async (importOriginal: () => Promise<ClientChannelModule>) => {
+      const original = await importOriginal()
+      class CountedChannel<A = unknown, B = unknown> extends original.ClientChannel<A, B> {
+        constructor(options: ConstructorParameters<typeof original.ClientChannel>[0]) {
+          super(options)
+          channelsOpened++
+        }
+      }
+      return { ...original, ClientChannel: CountedChannel }
+    })
     const { call, withContext } = await page()
     let ownCancels = 0
     const response = liveResponse(false, () => ownCancels++)
@@ -334,6 +346,7 @@ test.each(['a streamed response', 'a text response', 'a claimed upload'] as cons
     const pending = withContext(call, { signal: controller.signal })(kind === 'a claimed upload' ? [upload] : [])
     expect(isAbort(await settledWithin(pending, 5000))).toBe(true)
     expect(posts).toHaveLength(kind === 'a claimed upload' ? 0 : 1)
+    expect(channelsOpened).toBe(0)
     if (kind !== 'a text response') expect(ownCancels).toBe(1)
     assert(response.body)
     expect(response.body.locked).toBe(false)
