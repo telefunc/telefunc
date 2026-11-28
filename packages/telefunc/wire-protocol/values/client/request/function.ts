@@ -1,22 +1,30 @@
-export { functionReplacer }
+export { functionType }
 
-import type { ClientReplacerContext, ReplacerType, FunctionContract } from '../../types.js'
+import type { FunctionContract } from '../../types.js'
+import type { ChannelCarriedType } from './registry.js'
 import { SERIALIZER_PREFIX_FUNCTION } from '../../../constants.js'
+import { randomUuid } from '../../../../utils/randomUuid.js'
 
-const functionReplacer: ReplacerType<FunctionContract, ClientReplacerContext> = {
+const functionType: ChannelCarriedType<FunctionContract> = {
   prefix: SERIALIZER_PREFIX_FUNCTION,
   detect: (value): value is FunctionContract['value'] => typeof value === 'function',
-  replace: (fn, context) => {
-    const channel = context.createChannel<unknown, readonly unknown[]>({ ack: true })
-    channel.listen((args) => fn(...args))
+  claim(fn) {
+    const channelId = randomUuid()
     return {
-      metadata: { channelId: channel.id },
-      async close() {
-        await channel.close()
+      metadata: { channelId },
+      open({ ClientChannel }, connection) {
+        const channel = new ClientChannel<unknown, readonly unknown[]>({ channelId, ack: true, connection })
+        channel.listen((args) => fn(...args))
+        return {
+          async close() {
+            await channel.close()
+          },
+          abort() {
+            channel.abort()
+          },
+        }
       },
-      abort() {
-        channel.abort()
-      },
+      release() {},
     }
   },
 }

@@ -1,12 +1,15 @@
-import { describe, expect, test } from 'vitest'
+import { assert, describe, expect, test } from 'vitest'
 
 import { stringify } from '@brillout/json-serializer/stringify'
-import { parse } from '@brillout/json-serializer/parse'
 import { createStreamingReplacer } from './server/response/registry.js'
-import { createStreamingReviver } from './client/response/registry.js'
+import { ResponseValues } from './client/response/registry.js'
+import * as streams from './client/streams.js'
+import * as channels from './client/channels.js'
+import * as broadcasts from './client/broadcasts.js'
 import { ServerChannel } from '../channel/server/ServerChannel.js'
 import { ServerBroadcast } from '../channel/server/ServerBroadcast.js'
 import { wrapProxy } from '../../utils/wrapProxy.js'
+import { isObjectOrFunction } from '../../utils/isObjectOrFunction.js'
 import { serializeTelefunctionResult } from '../../node/server/runTelefunc/serializeTelefunctionResult.js'
 import { parseHttpRequest } from '../../node/server/runTelefunc/parseHttpRequest.js'
 import { noUpgrades } from '../../node/server/runTelefunc/takesUpgrades.js'
@@ -24,6 +27,8 @@ import type {
   StreamingProducer,
   TypeContract,
 } from './types.js'
+
+const allFeatures = { streams, channels, broadcasts }
 
 // ───────────────────────────────────────────────────────────────────────────
 // Reference-identity-preserving serialization — bug classes targeted: duplicate
@@ -89,16 +94,17 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
       throw new Error('registry-level harness does not stream')
     },
   }
-  const reviver = createStreamingReviver(
-    context,
-    (revived) => {
-      lifecycles.push(revived)
-      // Mirror reviveResponse: the value handed out (and cached) is the GC wrapper.
-      return wrapProxy(revived.value as object)
-    },
-    extensionTypes,
-  )
-  const parseBody = (body: string) => parse(body, { reviver })
+  const parseBody = (body: string) =>
+    new ResponseValues(body, extensionTypes, false).revive(
+      context,
+      (revived) => {
+        lifecycles.push(revived)
+        // Mirror reviveResponse: the value handed out (and cached) is the GC wrapper.
+        assert(isObjectOrFunction(revived.value))
+        return wrapProxy(revived.value)
+      },
+      allFeatures,
+    )
   return { parseBody, mintedChannels, mintedBroadcasts, lifecycles }
 }
 

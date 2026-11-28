@@ -64,6 +64,8 @@ const ACK_REFUSED_TEXT = 'Send refused: the server holds the most for this chann
 /** The connection a channel rides (see `ClientConnection.getOrCreate`). */
 type ConnectionOptions = {
   transports: ChannelTransports
+  /** A new connection's fetch: the call's, as its invocation resolved it, else the page's `config.fetch`. */
+  fetch?: typeof globalThis.fetch
   connectionKey?: string
   headers?: Record<string, string>
   telefuncUrl: string
@@ -141,10 +143,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.sendCredit = new SendCredit({ owner, selfTime: this.selfTime, yieldBytes: FC_PAGE_YIELD_BYTES })
     this.receiveCredit = new ReceiveCredit({ owner, selfTime: this.selfTime })
     this._attach = new ChannelAttach({ channel: this, sendCredit: this.sendCredit, receiveCredit: this.receiveCredit })
-    const config = resolveClientConfig()
     this.connection = ClientConnection.getOrCreate(connection.telefuncUrl, this, {
       transports: connection.transports,
-      fetchImpl: (config.fetch ?? globalThis.fetch).bind(globalThis),
+      fetchImpl: (connection.fetch ?? resolveClientConfig().fetch).bind(globalThis),
       connectionKey: connection.connectionKey,
       headers: connection.headers,
       idleTimeout: connection.idleTimeout,

@@ -4,6 +4,7 @@ import { makeHttpRequest } from './remoteTelefunctionCall/makeHttpRequest.js'
 import { serializeTelefunctionArguments } from './remoteTelefunctionCall/serializeTelefunctionArguments.js'
 import { resolveClientConfig } from './clientConfig.js'
 import { assertUsage } from '../utils/assert.js'
+import { throwIfAborted } from './remoteTelefunctionCall/errors.js'
 import { isBrowser } from '../utils/isBrowser.js'
 import { objectAssign } from '../utils/objectAssign.js'
 import { setAbortController } from './abort.js'
@@ -58,7 +59,7 @@ function remoteTelefunctionCall(
 
   if (callClientContext?.channel?.transports) {
     objectAssign(callContext, {
-      channel: { transports: callClientContext.channel.transports },
+      channel: { transports: [...callClientContext.channel.transports] },
     })
   }
 
@@ -71,15 +72,27 @@ function remoteTelefunctionCall(
   const abortController = createAbortController(callClientContext?.signal)
   objectAssign(callContext, { abortController })
 
-  const { httpRequestBody, requestCloseHandlers } = serializeTelefunctionArguments(callContext)
-  objectAssign(callContext, { httpRequestBody, requestCloseHandlers })
-
-  const telefunctionReturnPromise = makeHttpRequest(callContext)
+  // The arguments are serialized at the call's invocation, where a serialization error throws.
+  const request = serializeTelefunctionArguments(callContext)
+  objectAssign(callContext, request)
+  const telefunctionReturnPromise = request.prepareChannels
+    ? sendOnceChannelsPrepared(request.prepareChannels, callContext)
+    : makeHttpRequest(callContext)
 
   setAbortController(telefunctionReturnPromise, abortController)
   addAsyncGeneratorInterface(telefunctionReturnPromise, abortController)
 
   return telefunctionReturnPromise
+}
+
+/** A cold call sends what its invocation serialized once its claimed values' channels are prepared. */
+async function sendOnceChannelsPrepared(
+  prepareChannels: () => Promise<void>,
+  callContext: Parameters<typeof makeHttpRequest>[0],
+) {
+  await prepareChannels()
+  throwIfAborted(callContext)
+  return makeHttpRequest(callContext)
 }
 
 /** Create an AbortController optionally wired to an external signal. */

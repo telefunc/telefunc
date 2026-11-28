@@ -88,7 +88,7 @@ type StreamingReplacerType<C extends TypeContract = TypeContract, Context = unkn
  *  on the Replacer side.
  *
  *  Duplicated references (equal wire strings) run `revive` once and resolve to the object the
- *  first occurrence revived — server-side `===` holds on the client (see createStreamingReviver). */
+ *  first occurrence revived — server-side `===` holds on the client (see ResponseValues). */
 type ReviverType<C extends TypeContract = TypeContract, Context = unknown> = {
   prefix: string
   revive(
@@ -207,7 +207,7 @@ type ServerReplacerContext = {
   validators: ShieldValidators
 }
 
-/** Context for all client-side request replacers (File/Blob + Function + ReadableStream). */
+/** Context for client-side request replacers: File, Blob and extensions' types. */
 type ClientReplacerContext = {
   registerFile(body: Blob): number
   createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts?: {

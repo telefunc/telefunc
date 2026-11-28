@@ -7,6 +7,8 @@ import { decodeU32, decodeIndexedFrame } from '../../../wire/envelope.js'
 import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../../constants.js'
 import { throwAbortError, throwBugError } from '../../../../client/remoteTelefunctionCall/errors.js'
 
+const EMPTY = new Uint8Array(0)
+
 type CallContext = {
   telefunctionName: string
   telefuncFilePath: string
@@ -18,34 +20,62 @@ type CallContext = {
  *  `readU32` and `readNextFrame` are pure wire-protocol logic — they only call
  *  `readExact`. Each transport implements only `readExact` (the byte source). */
 abstract class BaseStreamReader {
-  cancelled = false
-  protected callContext: CallContext
+  /** Cancelled or released: nothing reads the body anymore. */
+  protected released = false
 
-  constructor(callContext: CallContext) {
-    this.callContext = callContext
+  constructor(
+    protected readonly reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
+    protected readonly callContext: CallContext,
+  ) {
+    // Cancel before an aborted fetch can produce an unhandled reader rejection in the browser.
+    callContext.abortController.signal.addEventListener('abort', this.onAbort, { once: true })
   }
 
-  /** Cancel reading — sets cancelled flag and cleans up the transport resource. */
-  abstract cancel(): void
+  private readonly onAbort = () => this.cancel()
+
+  cancel(): void {
+    if (this.released) return
+    this.reader.cancel().catch(() => {})
+    this.release()
+  }
+
+  /** Lets go of the body once its values read all they carried: the rest of it stays unread. */
+  release(): void {
+    if (this.released) return
+    this.released = true
+    this.callContext.abortController.signal.removeEventListener('abort', this.onAbort)
+    this.reader.releaseLock()
+  }
 
   /** Implemented by each transport — pull exactly n bytes from the wire source. */
   abstract readExact(n: number): Promise<Uint8Array<ArrayBuffer>>
 
+  /** Where a read gets no more bytes, as its body failed with `readError` or ended: an abort ends the call, a body let
+   *  go reads as empty, and else the read fails. */
+  protected endOfRead(readError: unknown, lostMessage: string): Uint8Array<ArrayBuffer> {
+    if (this.callContext.abortController.signal.aborted) {
+      throwAbortError(this.callContext.telefunctionName, this.callContext.telefuncFilePath, undefined)
+    }
+    if (this.released) return EMPTY
+    throw readError ?? new Error(lostMessage)
+  }
+
   async readU32(): Promise<number> {
     const buf = await this.readExact(4) // sizeof uint32
-    return this.cancelled ? 0 : decodeU32(buf)
+    return this.released ? 0 : decodeU32(buf)
   }
 
   /** Read the next indexed frame from the wire.
    *  Returns { index, payload } or null on terminator. Throws on error frames. */
   async readNextFrame(): Promise<{ index: number; payload: Uint8Array<ArrayBuffer> } | null> {
     const len = await this.readU32()
-    if (this.cancelled) return null
+    if (this.released) return null
     if (len === 0) return null
     if (len === STREAMING_ERROR_FRAME_MARKER) {
       // Error frame: [ERROR_MARKER][u32 payload_len][payload_bytes]
       const errorLen = await this.readU32()
       const errorBytes = await this.readExact(errorLen)
+      if (this.released) return null
       const errorPayload: unknown = parse(new TextDecoder().decode(errorBytes))
       assert(isObject(errorPayload) && 'type' in errorPayload)
       if (errorPayload.type === STREAMING_ERROR_TYPE.ABORT) {
@@ -55,7 +85,7 @@ abstract class BaseStreamReader {
       throwBugError()
     }
     const frameData = await this.readExact(len)
-    if (this.cancelled) return null
+    if (this.released) return null
     return decodeIndexedFrame(frameData)
   }
 }

@@ -1,0 +1,1281 @@
+import { afterEach, assert, beforeEach, expect, onTestFinished, test, vi } from 'vitest'
+import { runInNewContext } from 'node:vm'
+import { stringify } from '@brillout/json-serializer/stringify'
+import { concat, encodeIndexedFrame, encodeU32, textEncoder } from '../../wire/envelope.js'
+import { uint8ArrayToBase64url } from '../../wire/base64url.js'
+import { MAX_CHANNELS_PER_CONNECTION } from '../../constants.js'
+import type { ClientReplacerContext } from '../types.js'
+import { createDeferred, type Deferred } from '../../../utils/createDeferred.js'
+
+type ClientChannelModule = typeof import('../../channel/client/ClientChannel.js')
+type LoadFeaturesModule = typeof import('./loadFeatures.js')
+
+// A page's first call that carries a value loads that value's code: each chunk's load is held here till a test lets it
+// finish, or fails, as the chunk's request would.
+const FEATURES = ['streams', 'channels', 'broadcasts'] as const
+type Feature = (typeof FEATURES)[number]
+const chunkLoadError = new Error('The client chunk failed to load')
+
+let gates: Record<Feature, Deferred<void>>
+let failing: Set<Feature>
+let imported: Feature[]
+/** The chunk loads a test started, each settled before the next test's fresh modules. */
+let loads: Promise<unknown>[]
+let posts: string[]
+let respond: (signal: AbortSignal | undefined) => Response
+let cancelled: number
+
+beforeEach(() => {
+  Reflect.deleteProperty(globalThis, '_telefunc')
+  vi.resetModules()
+  failing = new Set()
+  imported = []
+  loads = []
+  posts = []
+  cancelled = 0
+  gates = {
+    streams: createDeferred(),
+    channels: createDeferred(),
+    broadcasts: createDeferred(),
+  }
+  // The client runs in a browser only.
+  vi.stubGlobal('window', {
+    scrollY: 0,
+    location: { href: 'http://localhost/' },
+    // The page's global object.
+    get fetch() {
+      return globalThis.fetch
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  })
+  for (const feature of FEATURES) {
+    vi.doMock(`./${feature}.js`, (importOriginal: () => Promise<unknown>) => {
+      imported.push(feature)
+      const load = (async () => {
+        await gates[feature].promise
+        if (failing.delete(feature)) throw chunkLoadError
+        return importOriginal()
+      })()
+      loads.push(load)
+      return load
+    })
+  }
+})
+afterEach(async () => {
+  // A load a test left held finishes before the next test's fresh modules.
+  for (const feature of FEATURES) gates[feature].resolve()
+  await Promise.allSettled(loads)
+  for (const feature of FEATURES) vi.doUnmock(`./${feature}.js`)
+  vi.doUnmock('./loadFeatures.js')
+  vi.doUnmock('../../channel/client/ClientChannel.js')
+  vi.unstubAllGlobals()
+})
+
+async function page() {
+  const { config } = await import('../../../client/clientConfig.js')
+  config.fetch = async (_url, init) => {
+    const body = init?.body
+    if (typeof body === 'string' && body.includes('"file"')) {
+      posts.push(body)
+      return respond(init?.signal ?? undefined)
+    }
+    // A channel's own requests: there is no server.
+    return new Promise<Response>(() => {})
+  }
+  const { remoteTelefunctionCall } = await import('../../../client/remoteTelefunctionCall.js')
+  const { withContext } = await import('../../../client/withContext.js')
+  const { ConnectionError } = await import('../../../client/ConnectionError.js')
+  const call = (args: unknown[]) => remoteTelefunctionCall('/p.telefunc.ts', 'onP', args)
+  return { config, call, withContext, ConnectionError }
+}
+
+const isAbort = (err: unknown) => typeof err === 'object' && err !== null && 'isAbort' in err && err.isAbort === true
+const settledWithin = (promise: Promise<unknown>, ms: number) =>
+  Promise.race([
+    promise.then(
+      (value) => value,
+      (err: unknown) => err,
+    ),
+    new Promise((resolve) => setTimeout(() => resolve('pending'), ms)),
+  ])
+
+const tag = (prefix: string, metadata: object) => prefix + JSON.stringify(metadata)
+const CHANNEL = tag('!TelefuncChannel:', { channelId: 'c1' })
+const GENERATOR = tag('!TelefuncGenerator:', { __index: 0 })
+
+/** A text response, its values as the server writes them. */
+const text = (ret: unknown) => () => new Response(JSON.stringify({ ret }))
+
+/** A streamed response whose stream 0 sends `42` and stays open; a fetch that is aborted errors it, as browsers do. */
+function streamed(
+  ret: Record<string, string>,
+  { sse = false, frames = [encodeIndexedFrame(0, textEncoder.encode('42'))], onCancel = () => {} } = {},
+) {
+  return (signal: AbortSignal | undefined) => {
+    const metadata = textEncoder.encode(JSON.stringify({ ret }))
+    let sent = false
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        signal?.addEventListener('abort', () => controller.error(new DOMException('aborted', 'AbortError')))
+      },
+      pull(controller) {
+        if (sent) return
+        sent = true
+        const bytes = concat(encodeU32(metadata.length), metadata, ...frames)
+        controller.enqueue(sse ? textEncoder.encode(`data: ${uint8ArrayToBase64url(bytes)}\n\n`) : bytes)
+      },
+      cancel() {
+        cancelled++
+        onCancel()
+      },
+    })
+    return new Response(body, { headers: { 'content-type': sse ? 'text/event-stream' : 'application/octet-stream' } })
+  }
+}
+
+/** A streamed response of an app's `config.fetch` whose body outlives the call's signal and sends nothing yet. */
+function liveResponse(sse: boolean, onCancel: () => void) {
+  const body = new ReadableStream({ cancel: onCancel })
+  return new Response(body, { headers: { 'content-type': sse ? 'text/event-stream' : 'application/octet-stream' } })
+}
+
+/** A call that loads the streams chunk. */
+async function warmStreams(call: (args: unknown[]) => Promise<unknown>) {
+  gates.streams.resolve()
+  respond = streamed({ gen: GENERATOR })
+  await call([])
+}
+
+test('a response body that errors with zero fails both returned streams', async () => {
+  const { call } = await page()
+  gates.streams.resolve()
+  const ret = [0, 1].map((index) => tag('!TelefuncStream:', { __index: index }))
+  const metadata = textEncoder.encode(JSON.stringify({ ret }))
+  const reading = createDeferred<ReadableStreamDefaultController<Uint8Array>>()
+  const body = new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        const frames = [0, 1, 1].map((index) => encodeIndexedFrame(index, textEncoder.encode('42')))
+        controller.enqueue(concat(encodeU32(metadata.length), metadata, ...frames))
+      },
+      pull(controller) {
+        reading.resolve(controller)
+      },
+    },
+    { highWaterMark: 0 },
+  )
+  respond = () => new Response(body, { headers: { 'content-type': 'application/octet-stream' } })
+  const [first, second] = (await call([])) as [ReadableStream<Uint8Array>, ReadableStream<Uint8Array>]
+  const a = first.getReader()
+  const b = second.getReader()
+  await a.read()
+  await b.read()
+  const rejected = expect(a.read()).rejects.toBe(0)
+  const controller = await reading.promise
+  controller.error(0)
+  await rejected
+  expect((await b.read()).value).toEqual(textEncoder.encode('42'))
+  await expect(b.read()).rejects.toBe(0)
+  expect(body.locked).toBe(false)
+})
+
+test('a failed chunk load two calls share rejects each with ConnectionError, or Abort for the one aborted as it fails', async () => {
+  const { call, withContext, ConnectionError } = await page()
+  const { onAbort } = await import('../../../client/remoteTelefunctionCall/onAbort.js')
+  let told = 0
+  onAbort(() => told++)
+  respond = streamed({ gen: GENERATOR })
+  const aborted: boolean[] = []
+  // Each microtask from the chunk's failure to the second call's rejection.
+  for (let ticks = 0; ticks <= 16; ticks++) {
+    told = 0
+    gates.streams = createDeferred()
+    failing.add('streams')
+    const controller = new AbortController()
+    const first = settledWithin(call([]), 1000)
+    const second = settledWithin(withContext(call, { signal: controller.signal })([]), 1000)
+    // Both calls wait for the same chunk load.
+    await vi.waitFor(() => expect(posts).toHaveLength(2 * (ticks + 1)))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    gates.streams.resolve()
+    void abortAfterTicks(controller, ticks)
+    expect(await first).toBeInstanceOf(ConnectionError)
+    const settled = await second
+    const message = `aborted after ${ticks} microtasks: ${String(settled)}`
+    expect(isAbort(settled) || settled instanceof ConnectionError, message).toBe(true)
+    expect(told, message).toBe(isAbort(settled) ? 1 : 0)
+    aborted.push(isAbort(settled))
+  }
+  // The abort lands both before the failure and after it.
+  expect(aborted.at(0)).toBe(true)
+  expect(aborted.at(-1)).toBe(false)
+})
+
+test.each([
+  ['the channel', false],
+  ['the generator', false],
+  ['the channel', true],
+  ['the generator', true],
+] as const)(
+  'a load that fails after the streamed body is read cancels the body once and releases its reader (%s first, SSE: %s)',
+  async (first, sse) => {
+    const { call, ConnectionError } = await page()
+    gates.streams.resolve()
+    const ret = first === 'the channel' ? { channel: CHANNEL, gen: GENERATOR } : { gen: GENERATOR, channel: CHANNEL }
+    let ownCancels = 0
+    const response = streamed(ret, { sse, onCancel: () => ownCancels++ })(undefined)
+    respond = () => response
+    failing.add('channels')
+    gates.channels.resolve()
+
+    await expect(call([])).rejects.toBeInstanceOf(ConnectionError)
+    expect(ownCancels).toBe(1)
+    assert(response.body)
+    expect(response.body.locked).toBe(false)
+    const reader = response.body.getReader()
+    try {
+      expect(await reader.read()).toEqual({ done: true, value: undefined })
+    } finally {
+      reader.releaseLock()
+    }
+  },
+)
+
+test.each([false, true])(
+  'a streamed response releases its reader once its values read all they carried (SSE: %s)',
+  async (sse) => {
+    const { call } = await page()
+    const { close } = await import('../../../client/close.js')
+    gates.streams.resolve()
+    const frames = [
+      encodeIndexedFrame(0, textEncoder.encode('41')),
+      encodeIndexedFrame(0, textEncoder.encode('42')),
+      encodeIndexedFrame(0, new Uint8Array()),
+      encodeU32(0),
+    ]
+    // Counted for this response alone: an earlier test's body may be cancelled as its values are collected.
+    let ownCancels = 0
+    const response = streamed({ gen: GENERATOR }, { sse, frames, onCancel: () => ownCancels++ })(undefined)
+    respond = () => response
+    const ret = await call([])
+    assertHas(ret, 'gen')
+    assert(isAsyncIterable(ret.gen))
+    expect(await Array.fromAsync(ret.gen)).toEqual([41, 42])
+    assert(response.body)
+    expect(response.body.locked).toBe(false)
+    await close(ret)
+    expect(response.body.locked).toBe(false)
+    expect(ownCancels).toBe(0)
+  },
+)
+
+test("a call aborted while its chunk loads rejects at once, cancels an app fetch's body, and leaves the load's later failure handled", async () => {
+  const { call, withContext } = await page()
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown) => unhandled.push(reason)
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    let ownCancels = 0
+    // An app's `config.fetch` whose body outlives the call's signal: only the call's own cancel stops it.
+    respond = () => streamed({ gen: GENERATOR }, { onCancel: () => ownCancels++ })(undefined)
+    const controller = new AbortController()
+    const pending = withContext(call, { signal: controller.signal })([])
+    await vi.waitFor(() => expect(imported).toEqual(['streams']))
+    controller.abort()
+    expect(isAbort(await settledWithin(pending, 200))).toBe(true)
+    expect(ownCancels).toBe(1)
+    failing.add('streams')
+    gates.streams.resolve()
+    await Promise.allSettled(loads)
+    // Node reports a rejection left unhandled once the microtasks after it ran.
+    await new Promise((resolve) => setImmediate(resolve))
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+  }
+  expect(unhandled).toEqual([])
+})
+
+test.each([false, true])(
+  "a call aborted as its app's fetch hands over a live body, streams' code loaded, cancels it once and lets it go (SSE: %s)",
+  async (sse) => {
+    const { call, withContext } = await page()
+    await warmStreams(call)
+    // Each microtask from the fetch's return to the reader's first read.
+    for (let ticks = 0; ticks <= 16; ticks++) {
+      let ownCancels = 0
+      const response = liveResponse(sse, () => ownCancels++)
+      const controller = new AbortController()
+      respond = () => {
+        void abortAfterTicks(controller, ticks)
+        return response
+      }
+      const settled = await settledWithin(withContext(call, { signal: controller.signal })([]), 200)
+      expect(isAbort(settled), `aborted after ${ticks} microtasks`).toBe(true)
+      expect(ownCancels).toBe(1)
+      assert(response.body)
+      expect(response.body.locked).toBe(false)
+    }
+  },
+)
+
+test.each([false, true])(
+  "a call aborted as its app's fetch reads out the response's first bytes, streams' code loaded, rejects with Abort (SSE: %s)",
+  async (sse) => {
+    const { call, withContext } = await page()
+    await warmStreams(call)
+    const controller = new AbortController()
+    let ownCancels = 0
+    const metadata = textEncoder.encode(JSON.stringify({ ret: { gen: GENERATOR } }))
+    const bytes = concat(encodeU32(metadata.length), metadata, encodeIndexedFrame(0, textEncoder.encode('42')))
+    // Pulled at the reader's first read.
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(sink) {
+          sink.enqueue(sse ? textEncoder.encode(`data: ${uint8ArrayToBase64url(bytes)}\n\n`) : bytes)
+          controller.abort()
+        },
+        cancel() {
+          ownCancels++
+        },
+      },
+      { highWaterMark: 0 },
+    )
+    const response = new Response(body, {
+      headers: { 'content-type': sse ? 'text/event-stream' : 'application/octet-stream' },
+    })
+    respond = () => response
+    const settled = await settledWithin(withContext(call, { signal: controller.signal })([]), 200)
+    expect(isAbort(settled), String(settled)).toBe(true)
+    expect(ownCancels).toBe(1)
+    expect(response.body?.locked).toBe(false)
+  },
+)
+
+test.each(['a streamed response', 'a text response', 'a claimed upload'] as const)(
+  'a call aborted once its chunk loaded, before it resumes, rejects without using it (%s)',
+  async (kind) => {
+    abortOnceLoaded()
+    let channelsOpened = 0
+    vi.doMock('../../channel/client/ClientChannel.js', async (importOriginal: () => Promise<ClientChannelModule>) => {
+      const original = await importOriginal()
+      class CountedChannel<A = unknown, B = unknown> extends original.ClientChannel<A, B> {
+        constructor(options: ConstructorParameters<typeof original.ClientChannel>[0]) {
+          super(options)
+          channelsOpened++
+        }
+      }
+      return { ...original, ClientChannel: CountedChannel }
+    })
+    const { call, withContext } = await page()
+    let ownCancels = 0
+    const response = liveResponse(false, () => ownCancels++)
+    respond = kind === 'a streamed response' ? () => response : text(CHANNEL)
+    const upload = new ReadableStream({
+      cancel() {
+        ownCancels++
+      },
+    })
+    const controller = new AbortController()
+    for (const feature of FEATURES) gates[feature].resolve()
+    const pending = withContext(call, { signal: controller.signal })(kind === 'a claimed upload' ? [upload] : [])
+    expect(isAbort(await settledWithin(pending, 5000))).toBe(true)
+    expect(posts).toHaveLength(kind === 'a claimed upload' ? 0 : 1)
+    expect(channelsOpened).toBe(0)
+    if (kind !== 'a text response') expect(ownCancels).toBe(1)
+    assert(response.body)
+    expect(response.body.locked).toBe(false)
+  },
+)
+
+test('a call aborted while its text response waits for its chunk rejects at once, telling onAbort() once', async () => {
+  const { call, withContext } = await page()
+  const { onAbort } = await import('../../../client/remoteTelefunctionCall/onAbort.js')
+  let told = 0
+  onAbort(() => told++)
+  respond = text(CHANNEL)
+  const controller = new AbortController()
+  const pending = withContext(call, { signal: controller.signal })([])
+  await vi.waitFor(() => expect(imported).toEqual(['channels']))
+  controller.abort()
+  expect(isAbort(await settledWithin(pending, 200))).toBe(true)
+  expect(told).toBe(1)
+})
+
+test("a call aborted while its text response's body stalls, channels' code loaded, cancels it once and opens no channel", async () => {
+  const { config, call, withContext } = await page()
+  gates.channels.resolve()
+  respond = text(CHANNEL)
+  await call([])
+  const used: string[] = []
+  config.fetch = recordingFetch('page', used)
+  let pulled = false
+  let ownCancels = 0
+  // The body of an app's `config.fetch` that the call's signal doesn't end.
+  const body = new ReadableStream<Uint8Array>(
+    {
+      pull() {
+        pulled = true
+        return new Promise(() => {})
+      },
+      cancel() {
+        ownCancels++
+      },
+    },
+    { highWaterMark: 0 },
+  )
+  const response = new Response(body, { headers: { 'content-type': 'text/plain' } })
+  respond = () => response
+  const controller = new AbortController()
+  const connectionKey = crypto.randomUUID()
+  const pending = withContext(call, { signal: controller.signal, channel: { connectionKey } })([])
+  await vi.waitFor(() => expect(pulled).toBe(true))
+  controller.abort()
+  expect(isAbort(await settledWithin(pending, 200))).toBe(true)
+  expect(ownCancels).toBe(1)
+  expect(response.body?.locked).toBe(false)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  expect(used).toEqual(['page:call'])
+})
+
+test.each(["the call's cancel ends it", 'the abort errors it, as a fetch does'] as const)(
+  "a call aborted while its text response's body stalls tells onAbort() once, the error it rejects with (%s)",
+  async (ending) => {
+    const { call, withContext } = await page()
+    const { onAbort } = await import('../../../client/remoteTelefunctionCall/onAbort.js')
+    const told: unknown[] = []
+    onAbort((err) => told.push(err))
+    let pulled = false
+    respond = (signal) => {
+      const body = new ReadableStream<Uint8Array>(
+        {
+          start(controller) {
+            if (ending === 'the abort errors it, as a fetch does') {
+              signal?.addEventListener('abort', () => controller.error(new DOMException('aborted', 'AbortError')))
+            }
+          },
+          pull() {
+            pulled = true
+            return new Promise(() => {})
+          },
+        },
+        { highWaterMark: 0 },
+      )
+      return new Response(body, { headers: { 'content-type': 'text/plain' } })
+    }
+    const controller = new AbortController()
+    const pending = withContext(call, { signal: controller.signal })([])
+    await vi.waitFor(() => expect(pulled).toBe(true))
+    controller.abort()
+    const rejected = await settledWithin(pending, 200)
+    expect(isAbort(rejected)).toBe(true)
+    expect(told).toHaveLength(1)
+    expect(told[0]).toBe(rejected)
+  },
+)
+
+test('a cold upload aborted as its channel opens sends nothing and cancels the upload once', async () => {
+  const controller = new AbortController()
+  vi.doMock('../../channel/client/ClientChannel.js', async (importOriginal: () => Promise<ClientChannelModule>) => {
+    const original = await importOriginal()
+    class AbortingChannel<A = unknown, B = unknown> extends original.ClientChannel<A, B> {
+      constructor(options: ConstructorParameters<typeof original.ClientChannel>[0]) {
+        super(options)
+        controller.abort()
+      }
+    }
+    return { ...original, ClientChannel: AbortingChannel }
+  })
+  try {
+    const { call, withContext } = await page()
+    respond = text(1)
+    let sourceCancelled = 0
+    const upload = new ReadableStream({
+      cancel() {
+        sourceCancelled++
+      },
+    })
+    const pending = withContext(call, { signal: controller.signal })([upload])
+    gates.channels.resolve()
+    expect(isAbort(await settledWithin(pending, 200))).toBe(true)
+    expect(posts).toEqual([])
+    expect(sourceCancelled).toBe(1)
+    expect(upload.locked).toBe(false)
+  } finally {
+    vi.doUnmock('../../channel/client/ClientChannel.js')
+  }
+})
+
+test('a call with an upload aborted while channels load sends nothing and cancels the upload, as a sent one does', async () => {
+  const { call, withContext } = await page()
+  let sourceCancelled = 0
+  const upload = new ReadableStream({
+    cancel() {
+      sourceCancelled++
+    },
+  })
+  const controller = new AbortController()
+  const pending = withContext(call, { signal: controller.signal })([upload])
+  await vi.waitFor(() => expect(imported).toEqual(['channels']))
+  controller.abort()
+  expect(isAbort(await settledWithin(pending, 200))).toBe(true)
+  expect(posts).toEqual([])
+  expect(sourceCancelled).toBe(1)
+})
+
+test('an already-aborted upload cancels its source without starting a chunk load', async () => {
+  const { call, withContext } = await page()
+  const cancel = vi.fn()
+  const upload = new ReadableStream({ cancel })
+  const controller = new AbortController()
+  controller.abort()
+  failing.add('channels')
+  gates.channels.resolve()
+
+  expect(isAbort(await settledWithin(withContext(call, { signal: controller.signal })([upload]), 200))).toBe(true)
+  expect(cancel).toHaveBeenCalledOnce()
+  expect(posts).toEqual([])
+  expect(imported).toEqual([])
+})
+
+test('a callback call sends the values its invocation read', async () => {
+  const { call } = await page()
+  respond = text(1)
+  let n = 10
+  const pending = call([
+    {
+      get read() {
+        return n
+      },
+      callback() {},
+    },
+  ])
+  n = 20
+  gates.channels.resolve()
+  await pending
+  expect(posts).toHaveLength(1)
+  expect(JSON.parse(posts[0] ?? '').args[0].read).toBe(10)
+})
+
+test.each(['headers', 'httpHeaders'] as const)(
+  "a cold callback call and the wire its channel opens send the config.%s of the call's invocation",
+  async (option) => {
+    const { config, call } = await page()
+    const sent: string[] = []
+    config.fetch = async (_url, init) => {
+      sent.push(new Headers(init?.headers).get('x-workspace') ?? 'none')
+      const body = init?.body
+      if (typeof body === 'string' && body.includes('"file"')) return text(1)()
+      return new Promise<Response>(() => {})
+    }
+    respond = text(1)
+    const headers = { 'x-workspace': 'before' }
+    config[option] = headers
+    const pending = call([{ callback() {} }])
+    headers['x-workspace'] = 'after'
+    gates.channels.resolve()
+    await pending
+    await vi.waitFor(() => expect(sent.length).toBeGreaterThanOrEqual(2))
+    expect(new Set(sent)).toEqual(new Set(['before']))
+  },
+)
+
+test("a cold upload's call and the wire its channel opens use the fetch of the call's invocation", async () => {
+  const { config, call } = await page()
+  const used: string[] = []
+  respond = text(1)
+  config.fetch = recordingFetch('before', used)
+  const pending = call([new ReadableStream()])
+  config.fetch = recordingFetch('after', used)
+  gates.channels.resolve()
+  await pending
+  await vi.waitFor(() => expect(used).toContain('before:wire'))
+  expect(used.filter((use) => use.startsWith('after'))).toEqual([])
+  expect(used).toContain('before:call')
+})
+
+test("without config.fetch, a cold upload's call and the wire its channel opens use the page's fetch of the call's invocation", async () => {
+  const used: string[] = []
+  respond = text(1)
+  vi.stubGlobal('fetch', recordingFetch('before', used))
+  const { remoteTelefunctionCall } = await import('../../../client/remoteTelefunctionCall.js')
+  const pending = remoteTelefunctionCall('/p.telefunc.ts', 'onP', [new ReadableStream()])
+  vi.stubGlobal('fetch', recordingFetch('after', used))
+  gates.channels.resolve()
+  await pending
+  await vi.waitFor(() => expect(used).toContain('before:wire'))
+  expect(used.filter((use) => use.startsWith('after'))).toEqual([])
+  expect(used).toContain('before:call')
+})
+
+test.each(['config.channel.transports', 'withContext()'] as const)(
+  "a cold upload's channel opens on the transports its invocation read from %s, though the app then changes that list in place",
+  async (source) => {
+    const { config, call, withContext } = await page()
+    const used: string[] = []
+    config.fetch = recordingFetch('page', used)
+    let sockets = 0
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        constructor() {
+          sockets++
+          throw new Error('No server')
+        }
+      },
+    )
+    respond = text(1)
+    const transports: ('sse' | 'ws')[] = ['sse']
+    let pending: Promise<unknown>
+    if (source === 'config.channel.transports') {
+      config.channel = { transports }
+      pending = call([new ReadableStream()])
+    } else {
+      pending = withContext(call, { channel: { transports } })([new ReadableStream()])
+    }
+    transports.splice(0, 1, 'ws')
+    gates.channels.resolve()
+    await pending
+    await vi.waitFor(() => expect(used).toContain('page:wire'))
+    expect(sockets).toBe(0)
+  },
+)
+
+test("a second client module instance's channels open with its own fetch", async () => {
+  const first = await page()
+  respond = text(1)
+  gates.channels.resolve()
+  await first.call([{ callback() {} }])
+  vi.resetModules()
+  const second = await page()
+  const used: string[] = []
+  second.config.fetch = recordingFetch('second', used)
+  const connectionKey = crypto.randomUUID()
+  await second.withContext(second.call, { channel: { connectionKey } })([{ callback() {} }])
+  await vi.waitFor(() => expect(used).toContain('second:wire'))
+  expect(used).toContain('second:call')
+})
+
+test("a cold callback's channel is the call's once: the call's abort aborts it once", async () => {
+  let aborts = 0
+  vi.doMock('../../channel/client/ClientChannel.js', async (importOriginal: () => Promise<ClientChannelModule>) => {
+    const original = await importOriginal()
+    class CountedChannel<A = unknown, B = unknown> extends original.ClientChannel<A, B> {
+      override abort(abortValue?: unknown, message?: string) {
+        aborts++
+        super.abort(abortValue, message)
+      }
+    }
+    return { ...original, ClientChannel: CountedChannel }
+  })
+  try {
+    const { call, withContext } = await page()
+    respond = text(1)
+    const controller = new AbortController()
+    const pending = withContext(call, { signal: controller.signal })([() => {}])
+    gates.channels.resolve()
+    await pending
+    controller.abort()
+    expect(aborts).toBe(1)
+  } finally {
+    vi.doUnmock('../../channel/client/ClientChannel.js')
+  }
+})
+
+/** An extension whose replacer creates a channel, or sends a stream, for its `{ kind: 'ask' }` values. */
+function askExtension(method: 'createChannel' | 'sendStream') {
+  return {
+    name: 'ask',
+    requestTypes: [
+      {
+        prefix: '!Ask:',
+        detect: (value: unknown): value is { kind: 'ask' } =>
+          typeof value === 'object' && value !== null && 'kind' in value && value.kind === 'ask',
+        replace(_value: unknown, context: ClientReplacerContext) {
+          if (method === 'sendStream') return context.sendStream(() => ({ chunks: oneChunk(31), cancel() {} }))
+          const channel = context.createChannel({ ack: true })
+          return {
+            metadata: { channelId: channel.id },
+            async close() {
+              await channel.close()
+            },
+            abort: () => channel.abort(),
+          }
+        },
+      },
+    ],
+  }
+}
+
+test.each(['createChannel', 'sendStream'] as const)(
+  'an extension that imports telefunc/__internal/channels replaces its value with %s() at invocation, in one POST',
+  async (method) => {
+    const { call, config } = await page()
+    gates.channels.resolve()
+    // The extension's client code: its values create channels.
+    await import('../../../client/__internal/channels.js')
+    imported = []
+    config.extensions.push(askExtension(method))
+    respond = text(1)
+    const pending = call([{ kind: 'ask' }])
+    expect(posts).toHaveLength(1)
+    expect(JSON.parse(posts[0] ?? '').args[0]).toMatch(/^!Ask:\{"channelId":"[^"]+"\}$/)
+    expect(await pending).toBe(1)
+    expect(imported).toEqual([])
+  },
+)
+
+test.each(['createChannel', 'sendStream'] as const)(
+  'an extension whose replacer calls %s() without importing telefunc/__internal/channels gets a usage error naming it',
+  async (method) => {
+    const { call, config } = await page()
+    config.extensions.push(askExtension(method))
+    expect(() => call([{ kind: 'ask' }])).toThrow(
+      "the extension's client code should `import 'telefunc/__internal/channels'`",
+    )
+    expect(posts).toEqual([])
+    expect(imported).toEqual([])
+  },
+)
+
+test('an extension value of metadata only is replaced once, at invocation, and its call sent at once', async () => {
+  const { call, config } = await page()
+  let detected = 0
+  config.extensions.push({
+    name: 'quantity',
+    requestTypes: [
+      {
+        prefix: '!Quantity:',
+        detect: (value: unknown): value is { kind: 'order'; quantity: number } => {
+          const is = typeof value === 'object' && value !== null && 'kind' in value && value.kind === 'order'
+          if (is) detected++
+          return is
+        },
+        replace: (value: { quantity: number }) => ({ metadata: { quantity: value.quantity }, close() {}, abort() {} }),
+      },
+    ],
+  })
+  respond = text(1)
+  const order = { kind: 'order', quantity: 1 }
+  const pending = call([order])
+  order.quantity = 2
+  expect(posts).toHaveLength(1)
+  expect(await pending).toBe(1)
+  expect(JSON.parse(posts[0] ?? '').args[0]).toBe('!Quantity:{"quantity":1}')
+  expect(detected).toBe(1)
+  expect(imported).toEqual([])
+})
+
+test("a cold upload is the call's from its invocation: locked at return, then sent", async () => {
+  const { call } = await page()
+  respond = text(1)
+  const upload = new ReadableStream({
+    pull(controller) {
+      controller.close()
+    },
+  })
+  const pending = call([upload])
+  expect(upload.locked).toBe(true)
+  expect(() => upload.getReader()).toThrow()
+  gates.channels.resolve()
+  expect(await pending).toBe(1)
+  expect(posts).toHaveLength(1)
+})
+
+test('serialization failure at invocation cancels the upload an earlier argument claimed', async () => {
+  const { call, withContext } = await page()
+  const cancel = vi.fn()
+  const upload = new ReadableStream({ cancel })
+  const second = new ReadableStream()
+  const secondReader = second.getReader()
+  const controller = new AbortController()
+
+  try {
+    expect(() => withContext(call, { signal: controller.signal })([upload, second])).toThrow(/locked/)
+    expect(cancel).toHaveBeenCalledOnce()
+    expect(upload.locked).toBe(false)
+    controller.abort()
+    expect(cancel).toHaveBeenCalledOnce()
+    expect(posts).toEqual([])
+    expect(imported).toEqual([])
+  } finally {
+    secondReader.releaseLock()
+  }
+})
+
+test.each([
+  ['cold', [1, 1, 1]],
+  ['warm', [1, 1, 0]],
+] as const)(
+  "a %s call whose connection refuses an upload's channel sends nothing and cancels each upload it claimed",
+  async (mode, cancelCounts) => {
+    const { call, withContext } = await page()
+    // There is no server: the wires the page's connections would start once their channels registered stay unstarted.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
+    respond = text(1)
+    gates.channels.resolve()
+    if (mode === 'warm') await call([() => {}])
+    posts = []
+    const cancels = [vi.fn(), vi.fn(), vi.fn()]
+    const uploads = cancels.map((cancel) => new ReadableStream({ cancel }))
+    // The first upload and the callbacks take every channel the connection has: the second upload's open is refused.
+    const callbacks = Array.from({ length: MAX_CHANNELS_PER_CONNECTION - 1 }, () => () => {})
+    const send = () =>
+      withContext(call, { channel: { connectionKey: 'full' } })([uploads[0], ...callbacks, uploads[1], uploads[2]])
+    const refused = /too many channels on one connection/i
+
+    if (mode === 'warm') expect(send).toThrow(refused)
+    else await expect(send()).rejects.toThrow(refused)
+    expect(posts).toEqual([])
+    expect(cancels.map((cancel) => cancel.mock.calls.length)).toEqual(cancelCounts)
+    expect(uploads.map((upload) => upload.locked)).toEqual([false, false, false])
+  },
+)
+
+test("a cold upload whose source's cancel throws leaves no unhandled rejection", async () => {
+  const { call, withContext } = await page()
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown) => unhandled.push(reason)
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    const upload = new ReadableStream({
+      cancel() {
+        throw new Error('the source fails to cancel')
+      },
+    })
+    const controller = new AbortController()
+    const pending = withContext(call, { signal: controller.signal })([upload])
+    await vi.waitFor(() => expect(imported).toEqual(['channels']))
+    controller.abort()
+    expect(isAbort(await settledWithin(pending, 200))).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+  }
+  expect(unhandled).toEqual([])
+})
+
+test('a later invalid argument cancels a resource created by an extension replacer', async () => {
+  const { call, config, withContext } = await page()
+  const resource = {}
+  const abort = vi.fn()
+  config.extensions.push({
+    name: 'resource',
+    requestTypes: [
+      {
+        prefix: '!Resource:',
+        detect: (value: unknown): value is object => value === resource,
+        replace: () => ({ metadata: {}, close() {}, abort }),
+      },
+    ],
+  })
+  const controller = new AbortController()
+  const cyclic: { self?: unknown } = {}
+  cyclic.self = cyclic
+
+  expect(() => withContext(call, { signal: controller.signal })([resource, cyclic])).toThrow()
+  controller.abort()
+  expect(abort).toHaveBeenCalledOnce()
+  expect(posts).toEqual([])
+})
+
+test('a reply chunk load failure cancels the ongoing request upload', async () => {
+  const { call, ConnectionError } = await page()
+  const { NetworkError } = await import('../../../shared/NetworkError.js')
+  const cancel = vi.fn()
+  const upload = new ReadableStream({ cancel })
+  gates.channels.resolve()
+  failing.add('streams')
+  gates.streams.resolve()
+  respond = streamed({ gen: GENERATOR })
+
+  const error = await call([upload]).catch((err: unknown) => err)
+  assert(error instanceof ConnectionError)
+  expect(error).toBeInstanceOf(NetworkError)
+  expect(error.isChannel).toBe(false)
+  expect(error.isConnectionError).toBe(true)
+  expect(error.message).toBe('Failed to load Telefunc client module (streams). Retry the call or reload the page.')
+  // Vitest adds its own error around the rejected mock import.
+  assert(error.cause instanceof Error)
+  expect(error.cause.cause).toBe(chunkLoadError)
+  expect(cancel).toHaveBeenCalledOnce()
+  expect(upload.locked).toBe(false)
+  expect(posts).toHaveLength(1)
+})
+
+test('a returned promise stays a promise when another value of the response loads its chunk', async () => {
+  const { call } = await page()
+  await warmStreams(call)
+  respond = streamed({ channel: CHANNEL, promise: tag('!TelefuncPromise:', { __index: 0 }) })
+  const pending = call([])
+  gates.channels.resolve()
+  const ret = await pending
+  assertHas(ret, 'promise')
+  expect(ret.promise).toBeInstanceOf(Promise)
+  expect(await ret.promise).toBe(42)
+})
+
+test('each call loads only the code the values it carries need', async () => {
+  const { call } = await page()
+  for (const feature of FEATURES) gates[feature].resolve()
+  respond = streamed({ gen: GENERATOR })
+  await call([])
+  expect(imported).toEqual(['streams'])
+  respond = text(CHANNEL)
+  await call([])
+  expect(imported).toEqual(['streams', 'channels'])
+  respond = text(tag('!TelefuncBroadcast:', { channelId: 'b1', key: 'k' }))
+  await call([])
+  expect(imported).toEqual(['streams', 'channels', 'broadcasts'])
+})
+
+test('an extension that imports both capabilities revives a broadcast and a channel without loading another module', async () => {
+  const { call, config } = await page()
+  gates.channels.resolve()
+  gates.broadcasts.resolve()
+  // The extension's client code: its values create channels and broadcasts.
+  await import('../../../client/__internal/channels.js')
+  await import('../../../client/__internal/broadcasts.js')
+  imported = []
+  const created: string[] = []
+  config.extensions.push({
+    name: 'probe',
+    responseTypes: [
+      {
+        prefix: '!TelefuncProbe:',
+        revive(metadata: { channelId: string }, context) {
+          created.push(context.createChannel({ channelId: metadata.channelId }).id)
+          const value = context.createBroadcast({ channelId: 'b1', key: 'probe' })
+          return {
+            value,
+            async close() {
+              await value.close()
+            },
+            abort: () => value.abort(),
+          }
+        },
+      },
+    ],
+  })
+  respond = text(tag('!TelefuncProbe:', { channelId: 'p1' }))
+  expect(await call([])).toHaveProperty('subscribe', expect.any(Function))
+  expect(created).toEqual(['p1'])
+  expect(imported).toEqual([])
+})
+
+test('an extension response whose values are their metadata loads no code', async () => {
+  const { call, config } = await page()
+  for (const feature of FEATURES) {
+    failing.add(feature)
+    gates[feature].resolve()
+  }
+  config.extensions.push({
+    name: 'count',
+    responseTypes: [
+      {
+        prefix: '!Count:',
+        revive: (metadata: { count: number }) => ({ value: { count: metadata.count }, close() {}, abort() {} }),
+      },
+    ],
+  })
+  respond = text(tag('!Count:', { count: 7 }))
+  expect(await call([])).toHaveProperty('count', 7)
+  expect(imported).toEqual([])
+})
+
+test('a second client module instance gets native Files and Blobs from the shared feature cache', async () => {
+  const first = await page()
+  await warmStreams(first.call)
+  vi.resetModules()
+  const second = await page()
+  respond = streamed(
+    {
+      file: tag('!TelefuncFile:', { __index: 0, size: 3, name: 'cat.txt', type: 'text/plain', lastModified: 12 }),
+      blob: tag('!TelefuncBlob:', { __index: 1, size: 3, type: 'text/plain' }),
+    },
+    {
+      frames: [
+        encodeIndexedFrame(0, textEncoder.encode('cat')),
+        encodeIndexedFrame(0, new Uint8Array()),
+        encodeIndexedFrame(1, textEncoder.encode('dog')),
+        encodeIndexedFrame(1, new Uint8Array()),
+      ],
+    },
+  )
+
+  const ret = await second.call([])
+  assertHas(ret, 'file')
+  assertHas(ret, 'blob')
+  assert(ret.file instanceof File)
+  assert(ret.blob instanceof Blob)
+  expect(ret.file.name).toBe('cat.txt')
+  expect(ret.file.lastModified).toBe(12)
+  expect(await ret.file.text()).toBe('cat')
+  expect(await ret.blob.text()).toBe('dog')
+})
+
+test('plain RPC: sent at once, data that looks like a feature tag loads nothing and comes back as it was', async () => {
+  const { call } = await page()
+  for (const feature of FEATURES) gates[feature].resolve()
+  const value = {
+    '!TelefuncBroadcast:category': 42,
+    strings: [
+      '!',
+      '!Telefunc',
+      CHANNEL,
+      '!TelefuncRoom:x',
+      'Documentation example: "!TelefuncChannel:sample',
+      'Documentation example: "!TelefuncStream:sample',
+    ],
+  }
+  respond = () => new Response(stringify({ ret: value }))
+  const pending = call([value])
+  expect(posts).toHaveLength(1)
+  const ret = await pending
+  assert(typeof ret === 'object' && ret !== null)
+  expect(Object.fromEntries(Object.entries(ret))).toEqual(value)
+  expect(imported).toEqual([])
+})
+
+test('plain RPC: a response without a body stream, as fetch polyfills return, is read by its text()', async () => {
+  const { call } = await page()
+  const response = new Response(JSON.stringify({ ret: 'Welcome Eva' }), { headers: { 'content-type': 'text/plain' } })
+  // `whatwg-fetch`, React Native's fetch: the response has no `body`, its `text()` reads it.
+  Object.defineProperty(response, 'body', { value: null })
+  respond = () => response
+  expect(await call([])).toBe('Welcome Eva')
+})
+
+/** A response as `whatwg-fetch` returns: no body stream, and a `text()` that the test settles. */
+class BodylessResponse extends Response {
+  reads = 0
+  settle: { resolve: (text: string) => void; reject: (err: unknown) => void } = { resolve() {}, reject() {} }
+  constructor() {
+    super()
+    Object.defineProperty(this, 'body', { value: null })
+  }
+  override text() {
+    this.reads++
+    return new Promise<string>((resolve, reject) => (this.settle = { resolve, reject }))
+  }
+}
+
+test.each([
+  'before its text() starts',
+  'while its text() reads',
+  'while its text() reads, which then resolves',
+  'while its text() reads, which then rejects',
+] as const)(
+  'a call aborted %s, on a response without a body stream, rejects at once, telling onAbort() once',
+  async (when) => {
+    const { call, withContext } = await page()
+    const { onAbort } = await import('../../../client/remoteTelefunctionCall/onAbort.js')
+    const told: unknown[] = []
+    onAbort((err) => told.push(err))
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const response = new BodylessResponse()
+      const controller = new AbortController()
+      respond = () => {
+        if (when === 'before its text() starts') controller.abort()
+        return response
+      }
+      const pending = withContext(call, { signal: controller.signal })([])
+      if (when !== 'before its text() starts') {
+        await vi.waitFor(() => expect(response.reads).toBe(1))
+        controller.abort()
+      }
+      const rejected = await settledWithin(pending, 200)
+      expect(isAbort(rejected)).toBe(true)
+      expect(response.reads).toBe(when === 'before its text() starts' ? 0 : 1)
+      if (when === 'while its text() reads, which then resolves') response.settle.resolve(JSON.stringify({ ret: 1 }))
+      if (when === 'while its text() reads, which then rejects')
+        response.settle.reject(new TypeError('Failed to fetch'))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(told).toHaveLength(1)
+      expect(told[0]).toBe(rejected)
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+    expect(unhandled).toEqual([])
+  },
+)
+
+test('plain RPC: a response whose body an app read before rejects with TypeError, as its text() does', async () => {
+  const { call } = await page()
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(textEncoder.encode(' '))
+      controller.enqueue(textEncoder.encode(JSON.stringify({ ret: 'ok' })))
+      controller.close()
+    },
+  })
+  const response = new Response(body, { headers: { 'content-type': 'text/plain' } })
+  const reader = body.getReader()
+  await reader.read()
+  reader.releaseLock()
+  respond = () => response
+  await expect(call([])).rejects.toBeInstanceOf(TypeError)
+})
+
+test('plain RPC: DataView response chunks reject with TypeError, cancel the body and release its reader', async () => {
+  const { call } = await page()
+  const cancel = vi.fn()
+  const body = new ReadableStream(
+    {
+      start(controller) {
+        controller.enqueue(new DataView(textEncoder.encode('{"ret":"ok"}').buffer))
+      },
+      pull(controller) {
+        controller.close()
+      },
+      cancel,
+    },
+    { highWaterMark: 0 },
+  )
+  respond = () => new Response(body)
+  await expect(call([])).rejects.toBeInstanceOf(TypeError)
+  expect(cancel).toHaveBeenCalledOnce()
+  expect(body.locked).toBe(false)
+})
+
+test('plain RPC: a detached response chunk rejects with TypeError, cancels the body and releases its reader', async () => {
+  const { call } = await page()
+  const detached = textEncoder.encode('WORLD')
+  structuredClone(detached.buffer, { transfer: [detached.buffer] })
+  const chunks = [textEncoder.encode('{"ret":"hello '), detached, textEncoder.encode('!"}')]
+  const cancel = vi.fn()
+  const body = new ReadableStream(
+    {
+      pull(controller) {
+        const chunk = chunks.shift()
+        if (chunk) controller.enqueue(chunk)
+        else controller.close()
+      },
+      cancel,
+    },
+    { highWaterMark: 0 },
+  )
+  respond = () => new Response(body)
+  await expect(call([])).rejects.toBeInstanceOf(TypeError)
+  expect(cancel).toHaveBeenCalledOnce()
+  expect(body.locked).toBe(false)
+})
+
+test('plain RPC: a shared response chunk reaches the text decoder in a non-shared buffer', async () => {
+  const { call } = await page()
+  const encoded = textEncoder.encode('{"ret":"ok"}')
+  const buffer: SharedArrayBuffer = runInNewContext('new SharedArrayBuffer(length)', { length: encoded.length + 2 })
+  const bytes = Buffer.from(buffer, 1, encoded.length)
+  bytes.set(encoded)
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes)
+      controller.close()
+    },
+  })
+  respond = () => new Response(body)
+  const decode = vi.spyOn(TextDecoder.prototype, 'decode')
+  try {
+    await expect(call([])).resolves.toBe('ok')
+    const [chunk] = decode.mock.calls[0] ?? []
+    assert(ArrayBuffer.isView(chunk))
+    expect(Object.prototype.toString.call(chunk.buffer)).toBe('[object ArrayBuffer]')
+  } finally {
+    decode.mockRestore()
+  }
+})
+
+test('plain RPC: Uint8Array response chunks from another realm are accepted', async () => {
+  const { call } = await page()
+  const bytes: Uint8Array = runInNewContext('new Uint8Array(bytes)', { bytes: textEncoder.encode('{"ret":"ok"}') })
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes)
+      controller.close()
+    },
+  })
+  respond = () => new Response(body)
+  await expect(call([])).resolves.toBe('ok')
+})
+
+test("plain RPC: a text body that fails to decode rejects with that failure and lets the body's source go", async () => {
+  const { call } = await page()
+  // As a reply past the runtime's string length limit fails.
+  const failure = new RangeError('Invalid string length')
+  const decode = vi.spyOn(TextDecoder.prototype, 'decode').mockImplementationOnce(() => {
+    throw failure
+  })
+  let cancels = 0
+  const body = new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        controller.enqueue(textEncoder.encode('{"ret":'))
+      },
+      pull() {
+        return new Promise(() => {})
+      },
+      cancel() {
+        cancels++
+      },
+    },
+    { highWaterMark: 0 },
+  )
+  respond = () => new Response(body, { headers: { 'content-type': 'text/plain' } })
+  try {
+    expect(await settledWithin(call([]), 200)).toBe(failure)
+  } finally {
+    decode.mockRestore()
+  }
+  expect(cancels).toBe(1)
+  expect(body.locked).toBe(false)
+})
+
+/** An app's `config.fetch` that records, in `used`, each request it makes as `<name>:call` or `<name>:wire`. */
+function recordingFetch(name: string, used: string[]): typeof fetch {
+  return async (_url, init) => {
+    const body = init?.body
+    if (typeof body === 'string' && body.includes('"file"')) {
+      used.push(`${name}:call`)
+      posts.push(body)
+      return respond(init?.signal ?? undefined)
+    }
+    used.push(`${name}:wire`)
+    return new Promise<Response>(() => {})
+  }
+}
+
+async function abortAfterTicks(controller: AbortController, ticks: number) {
+  for (let tick = 0; tick < ticks; tick++) await null
+  controller.abort()
+}
+
+/** The page's chunk loads settle, then the call is aborted before its code resumes. */
+function abortOnceLoaded() {
+  vi.doMock('./loadFeatures.js', async (importOriginal: () => Promise<LoadFeaturesModule>) => {
+    const original = await importOriginal()
+    const loadFeatures: LoadFeaturesModule['loadFeatures'] = async (features, call) => {
+      const loaded = await original.loadFeatures(features, call)
+      call.abortController.abort()
+      return loaded
+    }
+    return { ...original, loadFeatures }
+  })
+}
+
+async function* oneChunk(byte: number) {
+  yield new Uint8Array([byte])
+}
+
+function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+  return typeof value === 'object' && value !== null && Symbol.asyncIterator in value
+}
+
+function assertHas<K extends string>(value: unknown, key: K): asserts value is Record<K, unknown> {
+  expect(value).toHaveProperty(key)
+}

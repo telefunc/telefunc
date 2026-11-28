@@ -4,19 +4,18 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
-import { createRequestReplacer } from '../../wire-protocol/values/client/request/registry.js'
+import { createRequestReplacer, type Claim, type Replaced } from '../../wire-protocol/values/client/request/registry.js'
 import { encodeRequestEnvelope } from '../../wire-protocol/wire/envelope.js'
-import { pumpClientProducerToChannel } from '../../wire-protocol/values/client/request/pumpToChannel.js'
-import { ClientChannel } from '../../wire-protocol/channel/client/ClientChannel.js'
-import { ClientConnection } from '../../wire-protocol/channel/client/ClientConnection.js'
+import { loadFeatures, loadedFeatures, loadedFeature } from '../../wire-protocol/values/client/loadFeatures.js'
+import { randomUuid } from '../../utils/randomUuid.js'
 import { getConnectionOptions } from './getConnectionOptions.js'
+import type { ConnectionOptions } from '../../wire-protocol/channel/client/ClientChannel.js'
 import { isObjectOrFunction } from '../../utils/isObjectOrFunction.js'
-import { makeAbortError } from './errors.js'
+import { makeAbortError, throwIfAborted } from './errors.js'
 import type { ChannelTransports, StreamTransport } from '../../wire-protocol/constants.js'
 import type { ReplacerType, TypeContract, ClientReplacerContext } from '../../wire-protocol/values/types.js'
 import { CloseHandler } from '../close.js'
 import { getGcRegistry } from '../../utils/GcRegistry.js'
-import { randomUuid } from '../../utils/randomUuid.js'
 
 type CallContext = {
   telefuncFilePath: string
@@ -31,14 +30,20 @@ type CallContext = {
   channelIdleTimeout?: number
   headers?: Record<string, string> | null
   telefuncUrl: string
+  fetch: typeof globalThis.fetch
 }
 
-type SerializeResult = {
+/** The call's request, serialized at its invocation. `prepareChannels`: what it awaits before its POST where it claimed
+ *  values carried over a channel of their own before the page loaded channels' code, to open their channels. */
+type CallRequest = {
   httpRequestBody: string | Blob
   requestCloseHandlers: CloseHandler[]
+  prepareChannels?: () => Promise<void>
 }
+type Claimed = { value: unknown; claim: Claim }
 
-function serializeTelefunctionArguments(callContext: CallContext): SerializeResult {
+/** Serializes the call's arguments, once, at its invocation, into the body its request sends. */
+function serializeTelefunctionArguments(callContext: CallContext): CallRequest {
   const dataMain: Record<string, unknown> = {
     file: callContext.telefuncFilePath,
     name: callContext.telefunctionName,
@@ -54,59 +59,100 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
     dataMain.extensions = callContext.extensions
   }
 
-  const wants = ClientConnection.unconfirmedWants(callContext.telefuncUrl)
+  const wants = loadedFeatures().broadcasts?.unconfirmedWants(callContext.telefuncUrl)
   if (wants) dataMain.wants = wants
 
-  const connection = getConnectionOptions(callContext)
-  const abortSignal = callContext.abortController.signal
   const files: Blob[] = []
-  const requestCloseHandlers: CloseHandler[] = []
-
+  const request: CallRequest = { httpRequestBody: '', requestCloseHandlers: [] }
+  let claimed: Claimed[] | undefined
+  const connection = getConnectionOptions(callContext)
   const replacer = createRequestReplacer(
     {
-      registerFile(body) {
-        const index = files.length
-        files.push(body)
-        return index
-      },
+      registerFile: (body) => files.push(body) - 1,
       createChannel(opts) {
+        const { ClientChannel } = loadedFeature('channels')
         return new ClientChannel({ channelId: randomUuid(), ack: opts?.ack, connection })
       },
       sendStream(createProducer) {
-        return pumpClientProducerToChannel(createProducer, connection)
+        const { ClientChannel, pumpProducerToChannel } = loadedFeature('channels')
+        const channel = new ClientChannel({ channelId: randomUuid(), connection })
+        return { metadata: { channelId: channel.id }, ...pumpProducerToChannel(createProducer(), channel) }
       },
     },
-    function onReplaced(replaced) {
-      {
-        // Track the user's actual value — when they drop all references to it, close.
-        // (Unlike the response side, we don't create a value here; the user already
-        //  holds the original, so it serves as its own GC anchor.)
-        const { value, close } = replaced
-        assert(isObjectOrFunction(value))
-        getGcRegistry().register(value, close)
+    (replaced) => attach(request, callContext, replaced),
+    (value, claim) => {
+      const { channels } = loadedFeatures()
+      if (!channels) {
+        claimed ??= []
+        claimed.push({ value, claim })
+        return
       }
-
-      {
-        const { close, abort } = replaced
-        abortSignal.addEventListener(
-          'abort',
-          () => {
-            abort(makeAbortError(undefined, callContext))
-          },
-          { once: true },
-        )
-        requestCloseHandlers.push(close)
+      // Till it is attached, the call's own cleanup doesn't reach the claim.
+      try {
+        attach(request, callContext, { value, ...claim.open(channels, connection) })
+      } catch (err) {
+        claim.release(err)
+        throw err
       }
     },
     callContext.extensionRequestTypes,
   )
-  const dataMainSerialized = serialize(dataMain, callContext, replacer)
-  const httpRequestBody = files.length > 0 ? encodeRequestEnvelope(dataMainSerialized, files) : dataMainSerialized
-  return { httpRequestBody, requestCloseHandlers }
+  try {
+    const serialized = serialize(dataMain, callContext, replacer)
+    request.httpRequestBody = files.length > 0 ? encodeRequestEnvelope(serialized, files) : serialized
+  } catch (err) {
+    cancelUnsentCall(callContext, claimed, err)
+    throw err
+  }
+  if (claimed) request.prepareChannels = channelsPreparation(claimed, request, connection, callContext)
+  return request
+}
+
+/** Loads channels' code for the values a call claimed before the page had it, then opens their channels. */
+function channelsPreparation(
+  claimed: Claimed[],
+  request: CallRequest,
+  connection: ConnectionOptions,
+  callContext: CallContext,
+): () => Promise<void> {
+  return async () => {
+    try {
+      await loadFeatures(['channels'], callContext)
+      throwIfAborted(callContext)
+      const { channels } = loadedFeatures()
+      assert(channels)
+      for (const { value, claim } of claimed) {
+        attach(request, callContext, { value, ...claim.open(channels, connection) })
+      }
+    } catch (err) {
+      cancelUnsentCall(callContext, claimed, err)
+      throw err
+    }
+  }
+}
+
+/** Undoes a call that ends before it is sent: what it replaced or opened, through its controller, and what it claimed. */
+function cancelUnsentCall(callContext: CallContext, claimed: Claimed[] | undefined, reason: unknown): void {
+  callContext.abortController.abort()
+  claimed?.forEach(({ claim }) => claim.release(reason))
+}
+
+/** Ties a value whose resources are live to its call: the call's abort aborts them, its end closes them, and so does
+ *  the app dropping the value. */
+function attach(request: CallRequest, callContext: CallContext, { value, close, abort }: Replaced): void {
+  const { signal } = callContext.abortController
+  const onAbort = () => abort(makeAbortError(undefined, callContext))
+  if (signal.aborted) onAbort()
+  else signal.addEventListener('abort', onAbort, { once: true })
+  request.requestCloseHandlers.push(close)
+
+  // The app's original value is the GC anchor.
+  assert(isObjectOrFunction(value))
+  getGcRegistry().register(value, close)
 }
 
 type Replacer = Parameters<typeof stringify>[1] extends infer O ? (O extends { replacer?: infer R } ? R : never) : never
-function serialize(dataMain: Record<string, unknown>, callContext: CallContext, replacer?: Replacer): string {
+function serialize(dataMain: unknown, callContext: CallContext, replacer?: Replacer): string {
   let serialized: string
   try {
     serialized = stringify(dataMain, { forbidReactElements: true, replacer })

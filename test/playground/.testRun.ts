@@ -2,6 +2,8 @@ export { testRun }
 
 import { page, test, expect, expectLog, run, getServerUrl, autoRetry, fetchHtml } from '@brillout/test-e2e'
 import { testCounter } from '../utils'
+import { readFileSync } from 'node:fs'
+import { posix } from 'node:path'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   run(cmd, {
@@ -81,6 +83,33 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   })
 
   if (!isDev) {
+    test('a plain call loads no script and a stream-only call loads only streams code', async () => {
+      const { onDemand, streams } = onDemandCode('/pages/index')
+      // The page makes the plain call during hydration.
+      const requested: string[] = []
+      const onRequest = (request: { url(): string }) => {
+        const { pathname } = new URL(request.url())
+        if (pathname.endsWith('.js') || pathname === '/_telefunc') requested.push(pathname)
+      }
+      page.on('request', onRequest)
+      try {
+        await page.goto(`${getServerUrl()}/`)
+        await autoRetry(async () => {
+          expect(await page.textContent('body')).toContain('Welcome Eva')
+        })
+        expect(requested.filter((script) => onDemand.has(script)).join(' ')).toBe('')
+        expect(requested.slice(requested.indexOf('/_telefunc')).join(' ')).toBe('/_telefunc')
+
+        await page.getByRole('button', { name: 'Read stream' }).click()
+        await autoRetry(async () => {
+          expect(await page.textContent('output')).toBe('hello stream')
+        })
+        expect([...new Set(requested.filter((script) => onDemand.has(script)))].sort()).deep.equal(streams)
+      } finally {
+        page.off('request', onRequest)
+      }
+    })
+
     test('shield() generation', async () => {
       {
         const resp = await makeTelefuncHttpRequest('Jon')
@@ -113,4 +142,69 @@ async function makeTelefuncHttpRequest(name: string | number) {
     }),
   })
   return resp
+}
+
+type Chunk = { file: string; imports?: string[]; dynamicImports?: string[] }
+
+/** The scripts of channels, broadcasts and streams that Telefunc's client imports when a call needs them, by the page's
+ *  client build (Vike's manifest): the page's own code imports none of them. */
+function onDemandCode(pageId: string) {
+  const manifest: Record<string, Chunk> = JSON.parse(
+    readFileSync(new URL('./dist/nested/assets.json', import.meta.url), 'utf8'),
+  )
+  const chunk = (key: string) => {
+    const found = manifest[key]
+    if (!found) throw new Error(`The manifest has no chunk ${key}`)
+    return found
+  }
+  const closure = (keys: string[], into = new Set<string>()) => {
+    for (const key of keys) {
+      const { file, imports = [] } = chunk(key)
+      if (into.has(`/${file}`)) continue
+      into.add(`/${file}`)
+      closure(imports, into)
+    }
+    return into
+  }
+  const entry = `virtual:vike:page-entry:client:${pageId}`
+  const scripts = closure([entry])
+  const features = chunk(entry).dynamicImports ?? []
+  expect(
+    features
+      .map((key) => key.replace(/.*\/wire-protocol\/values\/client\//, ''))
+      .sort()
+      .join(' '),
+  ).toBe('broadcasts.js channels.js streams.js')
+  const streamEntry = features.find((key) => key.endsWith('/wire-protocol/values/client/streams.js'))
+  if (!streamEntry) throw new Error('The manifest has no streams chunk')
+  const streamScripts = closure([streamEntry])
+  for (const feature of features) {
+    const file = `/${chunk(feature).file}`
+    expect(scripts.has(file)).toBe(false)
+    if (feature !== streamEntry) expect(streamScripts.has(file)).toBe(false)
+  }
+  const modulesByChunk: Record<string, string[]> = JSON.parse(
+    readFileSync(new URL('./dist/nested/client/chunk-modules.json', import.meta.url), 'utf8'),
+  )
+  const channelAndBroadcastModules = ['ClientChannel', 'ClientConnection', 'ClientBroadcast']
+  expectExcludedModules(scripts, modulesByChunk, [
+    'FrameDemuxer',
+    'StreamReader',
+    'SseStreamReader',
+    ...channelAndBroadcastModules,
+  ])
+  expectExcludedModules(streamScripts, modulesByChunk, channelAndBroadcastModules)
+  const onDemand = new Set([...closure(features)].filter((script) => !scripts.has(script)))
+  const streams = [...streamScripts].filter((script) => onDemand.has(script)).sort()
+  return { onDemand, streams }
+}
+
+function expectExcludedModules(scripts: Set<string>, modulesByChunk: Record<string, string[]>, moduleNames: string[]) {
+  const included: string[] = []
+  for (const script of scripts) {
+    const modules = modulesByChunk[script]
+    if (!modules) throw new Error(`The client build has no module list for ${script}`)
+    included.push(...modules.filter((id) => moduleNames.includes(posix.basename(id, '.js'))))
+  }
+  expect(included.join('\n')).toBe('')
 }

@@ -1,19 +1,18 @@
-export { readableStreamReplacer }
+export { readableStreamType }
 
-import type { ClientReplacerContext, StreamingReplacerType, ReadableStreamRequestContract } from '../../types.js'
+import type { ReadableStreamRequestContract } from '../../types.js'
+import type { ChannelCarriedType } from './registry.js'
 import { SERIALIZER_PREFIX_STREAM } from '../../../constants.js'
 import { producerOfStream } from '../../producerOfStream.js'
 import { assertUsage } from '../../../../utils/assert.js'
+import { randomUuid } from '../../../../utils/randomUuid.js'
 
-const readableStreamReplacer: StreamingReplacerType<ReadableStreamRequestContract, ClientReplacerContext> = {
+const readableStreamType: ChannelCarriedType<ReadableStreamRequestContract> = {
   prefix: SERIALIZER_PREFIX_STREAM,
   detect: (value) => value instanceof ReadableStream,
-  replace: (value, context) => {
-    const { metadata, close, abort } = context.sendStream(() => readableStreamReplacer.createProducer(value))
-    return { metadata, close, abort }
-  },
-  createProducer: (value) =>
-    producerOfStream(value, (chunk) => {
+  claim(stream) {
+    // The call takes the stream's reader now: a locked stream throws here, and the app can't read what it passed.
+    const producer = producerOfStream(stream, (chunk) => {
       try {
         assertUsage(chunk instanceof Uint8Array, 'Stream chunks given to a telefunction must be Uint8Array.')
       } catch (error) {
@@ -21,5 +20,13 @@ const readableStreamReplacer: StreamingReplacerType<ReadableStreamRequestContrac
         console.error(error)
         throw error
       }
-    }),
+    })
+    const channelId = randomUuid()
+    return {
+      metadata: { channelId },
+      open: ({ ClientChannel, pumpProducerToChannel }, connection) =>
+        pumpProducerToChannel(producer, new ClientChannel({ channelId, connection })),
+      release: (reason) => producer.cancel(reason),
+    }
+  },
 }

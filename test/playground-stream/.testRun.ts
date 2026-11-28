@@ -103,10 +103,10 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm p
 
   testFileDownload()
 
-  testStreaming()
+  testStreaming(isDev)
   testStreamingRequestContext()
 
-  testAbort()
+  testAbort(isDev)
 
   testClose()
 

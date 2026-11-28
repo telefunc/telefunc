@@ -1,6 +1,8 @@
 import { assert, assertUsage } from '../utils/assert.js'
 import { isObject } from '../utils/isObject.js'
 
+/** What every built-in value's wire string starts with: json-serializer escapes a string of the app's that starts with `!`. */
+export const SERIALIZER_PREFIX_STEM = '!Telefunc'
 export const SERIALIZER_PREFIX_FILE = '!TelefuncFile:'
 export const SERIALIZER_PREFIX_BLOB = '!TelefuncBlob:'
 export const SERIALIZER_PREFIX_FILE_DOWNLOAD = '!TelefuncFileDownload:'

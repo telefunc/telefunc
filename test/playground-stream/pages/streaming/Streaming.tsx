@@ -39,7 +39,7 @@ import {
   onReadUpload,
   onReturnAsyncGenerator as onNextCall,
 } from './Streaming.telefunc'
-import { Abort as TelefuncAbort, abort, withContext } from 'telefunc/client'
+import { Abort as TelefuncAbort, ConnectionError, abort, withContext } from 'telefunc/client'
 
 async function readRequestUser(user: string) {
   const read = withContext(onReadRequestUser, { headers: { 'x-test-user': user } })
@@ -67,7 +67,15 @@ function Streaming() {
       <button
         id="test-readable-stream"
         onClick={async () => {
-          const reader = (await onReturnReadableStream()).getReader()
+          let stream: ReadableStream<Uint8Array>
+          try {
+            stream = await onReturnReadableStream()
+          } catch (err) {
+            if (!(err instanceof ConnectionError)) throw err
+            setResult(JSON.stringify({ connectionError: true }))
+            return
+          }
+          const reader = stream.getReader()
           const chunks: string[] = []
           const decoder = new TextDecoder()
           while (true) {

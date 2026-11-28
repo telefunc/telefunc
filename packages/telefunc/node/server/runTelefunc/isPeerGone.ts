@@ -1,7 +1,7 @@
 export { isPeerGone }
 
 import { hasProp } from '../../../utils/hasProp.js'
-import { StreamTruncatedError } from '../../../wire-protocol/wire/BodyReader.js'
+import { StreamTruncatedError } from '../../../wire-protocol/wire/StreamTruncatedError.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { StreamAbortedError } from '../../../utils/StreamAbortedError.js'
 

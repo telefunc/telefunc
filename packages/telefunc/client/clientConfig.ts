@@ -59,7 +59,7 @@ type ConfigUser = {
 type ConfigResolved = {
   telefuncUrl: string
   headers: Record<string, string> | null
-  fetch: typeof globalThis.fetch | null
+  fetch: typeof globalThis.fetch
   stream?: StreamConfigUser
   channel: { transports: ChannelTransports }
   extensionResponseTypes: ReviverType<TypeContract, ClientReviverContext>[]
@@ -122,13 +122,15 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
   },
 })
 
+/** The config of a call, read at its invocation: an app's later change, to `config.headers` too, is the next call's. */
 function resolveClientConfig(): ConfigResolved {
+  const headers = configState.headers ?? configState.httpHeaders
   return {
-    headers: configState.headers ?? configState.httpHeaders ?? null,
+    headers: headers ? { ...headers } : null,
     telefuncUrl: configState.telefuncUrl || '/_telefunc',
-    fetch: configState.fetch ?? null,
+    fetch: configState.fetch ?? globalThis.fetch,
     stream: configState.stream.transport ? { ...configState.stream } : undefined,
-    channel: { transports: configState.channel.transports ?? [...DEFAULT_CLIENT_CHANNEL_TRANSPORTS] },
+    channel: { transports: [...(configState.channel.transports ?? DEFAULT_CLIENT_CHANNEL_TRANSPORTS)] },
     extensionResponseTypes: configState.extensions.flatMap((ext) => ext.responseTypes ?? []),
     extensionRequestTypes: configState.extensions.flatMap((ext) => ext.requestTypes ?? []),
   }

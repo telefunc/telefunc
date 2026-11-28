@@ -9,4 +9,4 @@ process.env.TELEFUNC_NATIVE = '1'
 
 runPlayground('pnpm preview')
 testClose()
-testAbort()
+testAbort(false)

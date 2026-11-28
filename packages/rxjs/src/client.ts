@@ -1,4 +1,6 @@
 import { config } from 'telefunc/client'
+// Its values create channels.
+import 'telefunc/__internal/channels'
 import type {
   TelefuncClientExtension,
   ReplacerType,

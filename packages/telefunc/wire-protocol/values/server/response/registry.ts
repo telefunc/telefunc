@@ -40,7 +40,7 @@ const serverTypes = [
  *  reference, so without the cache each occurrence would run `replace()` again — minting another
  *  stub channel, another lifecycle registration, another wire subscription. Instead, duplicates
  *  re-emit the first occurrence's replacement verbatim (wire format unchanged), and the client's
- *  mirror cache (createStreamingReviver) revives equal wire strings to one object. */
+ *  mirror cache (ResponseValues) revives equal wire strings to one object. */
 function createStreamingReplacer(
   getContext: (value: unknown) => ServerReplacerContext,
   onReplaced: (replaced: {

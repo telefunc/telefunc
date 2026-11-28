@@ -1,6 +1,7 @@
 export { testStreaming, testStreamingRequestContext }
 
-import { page, test, expect, expectLog, autoRetry, getServerUrl, skip } from '@brillout/test-e2e'
+import { readFileSync } from 'node:fs'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import {
   resetCleanupState,
   getCleanupState,
@@ -9,12 +10,10 @@ import {
   navigate,
   getResult,
   expectServerError,
+  withRoute,
 } from '../../e2e-utils'
-import { parseChannelTransports } from '../../channelTransports'
 
 const stallWarning = 'read all of the streams a call returned concurrently'
-const channelTransports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
-const channelTransport = channelTransports[channelTransports.length - 1]!
 
 function testStreamingRequestContext() {
   test('streaming: concurrent generators read their own request context after yielding', async () => {
@@ -29,7 +28,37 @@ function testStreamingRequestContext() {
   })
 }
 
-function testStreaming(inDocker = false) {
+function testStreaming(isDev: boolean, inDocker = false) {
+  if (!isDev) {
+    test("streaming: a call whose streams code can't load rejects with ConnectionError, and the next call loads it", async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      const manifest: Record<string, { file: string }> = JSON.parse(
+        readFileSync(new URL('./dist/nested/assets.json', import.meta.url), 'utf8'),
+      )
+      const streams = Object.entries(manifest).find(([key]) =>
+        key.endsWith('/wire-protocol/values/client/streams.js'),
+      )?.[1]
+      if (!streams) throw new Error('The manifest has no streams chunk')
+      let requests = 0
+      await withRoute(
+        `**/${streams.file}`,
+        (route) => (++requests === 1 ? route.fulfill({ status: 503 }) : route.fallback()),
+        async () => {
+          await page.click('#test-readable-stream')
+          await autoRetry(async () => {
+            expect(await getResult('#streaming-result')).deep.equal({ connectionError: true })
+          })
+          await page.click('#test-readable-stream')
+          await autoRetry(async () => {
+            expect((await getResult('#streaming-result')).content).toBe('hello stream')
+          })
+        },
+      )
+      expect(requests).toBe(2)
+      expectLog('the server responded with a status of 503')
+    })
+  }
+
   test('streaming: ReadableStream return', async () => {
     await navigate(`${getServerUrl()}/streaming`)
 
@@ -332,39 +361,6 @@ function testStreaming(inDocker = false) {
       expect(result.channelCloseErr?.abortValue).deep.equal({ reason: 'channel-listener-abort', code: 7 })
     })
   })
-
-  // Half-duplex: browser withholds the response until upload completes,
-  // so progress updates arrive simultaneously on the client side.
-  // When full duplex is supported, client duration will exceed server duration
-  // and the assertion below should be inverted.
-  if (false)
-    test('streaming: upload with progress (half duplex)', async () => {
-      if (channelTransport === 'ws') {
-        return skip(
-          'WS transport returns the HTTP response before the request body is fully consumed, breaking lazy file streaming (ERR_CONNECTION_RESET)',
-        )
-      }
-
-      await page.click('#test-upload-progress')
-      await autoRetry(async () => {
-        const result = await getResult('#streaming-result')
-        expect(result.done).toBe(true)
-        expect(result.updates.length).greaterThanOrEqual(1)
-        const last = result.updates[result.updates.length - 1]
-        expect(last.bytesRead).toBe(10_000_000)
-        expect(last.totalSize).toBe(10_000_000)
-        expect(result.updates.length).greaterThan(1)
-        for (let i = 1; i < result.updates.length; i++) {
-          expect(result.updates[i].bytesRead).greaterThan(result.updates[i - 1].bytesRead)
-        }
-        const firstMs: number = result.updates[0].clientMs
-        const lastMs: number = result.updates[result.updates.length - 1].clientMs
-        // Half-duplex: browser buffers the full response before delivering any chunk,
-        // so both updates arrive nearly simultaneously on the client.
-        // Client duration must be less than server duration to prove no real-time delivery.
-        expect(lastMs - firstMs).lessThan(last.duration)
-      })
-    })
 
   if (process.env.PUBLIC_ENV__STREAM_TRANSPORT !== 'channel') {
     test('streaming: an unread returned stream past 1 MiB stops the other, until it is read too', async () => {
