@@ -6,9 +6,6 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
-// How an app's tools resolve the package as built, `import 'telefunc/__internal'` of an extension shared by its server
-// and its browser: a Worker's bundler also sets `browser` (Cloudflare's Vite plugin sets `workerd, worker, browser`).
-
 const run = promisify(execFile)
 const packageDir = fileURLToPath(new URL('../', import.meta.url))
 let app = ''
@@ -20,10 +17,9 @@ beforeAll(async () => {
 })
 afterAll(() => rm(app, { recursive: true, force: true }))
 
-/** What `telefunc/__internal` exports and loads with the page, under the `conditions` of a tool. */
-async function importUnder(conditions: string[]) {
+async function importUnder(entry: string, conditions: string[]) {
   const script = `
-    const internal = await import('telefunc/__internal')
+    const internal = await import(${JSON.stringify(entry)})
     const loaded = globalThis._telefunc?.['wire-protocol/values/client/loadFeatures.ts']?.loaded ?? {}
     console.log(JSON.stringify({ exports: Object.keys(internal), loaded: Object.keys(loaded) }))`
   const flags = conditions.map((condition) => `--conditions=${condition}`)
@@ -31,12 +27,19 @@ async function importUnder(conditions: string[]) {
   return JSON.parse(stdout)
 }
 
-test("a Worker's bundler resolves the server half: it loads no client code", async () => {
-  expect(await importUnder(['workerd', 'worker', 'browser'])).toEqual({ exports: ['isPeerGone'], loaded: [] })
-})
+const workerConditions = ['workerd', 'worker', 'browser']
 
-test("a browser's bundler resolves the browser half: it loads the channels' and broadcasts' code", async () => {
-  expect(await importUnder(['browser'])).toEqual({ exports: ['isPeerGone'], loaded: ['channels', 'broadcasts'] })
+test.each([['browser'], workerConditions].map((conditions) => ({ conditions })))(
+  'the generic entry exports only the helper under $conditions',
+  async ({ conditions }) => {
+    expect(await importUnder('telefunc/__internal', conditions)).toEqual({ exports: ['isPeerGone'], loaded: [] })
+  },
+)
+
+test.each(['channels', 'broadcasts'])('the %s entry registers its capability only in the browser', async (feature) => {
+  const entry = `telefunc/__internal/${feature}`
+  expect(await importUnder(entry, ['browser'])).toEqual({ exports: [], loaded: [feature] })
+  expect(await importUnder(entry, workerConditions)).toEqual({ exports: [], loaded: [] })
 })
 
 test("TypeScript under the browser condition resolves the server half's types, the marker extensions' types import", async () => {
@@ -51,13 +54,18 @@ test("TypeScript under the browser condition resolves the server half's types, t
         noEmit: true,
         skipLibCheck: true,
         types: [],
+        noUncheckedSideEffectImports: true,
       },
       files: ['extension.ts'],
     }),
   )
   await writeFile(
     join(app, 'extension.ts'),
-    "import type { TELEFUNC_SHIELDS } from 'telefunc/__internal'\nexport type Shielded = { [TELEFUNC_SHIELDS]: true }\n",
+    `import type { TELEFUNC_SHIELDS } from 'telefunc/__internal'
+import 'telefunc/__internal/channels'
+import 'telefunc/__internal/broadcasts'
+export type Shielded = { [TELEFUNC_SHIELDS]: true }
+`,
   )
   const tsc = join(packageDir, 'node_modules/.bin/tsc')
   await run(tsc, ['-p', app])

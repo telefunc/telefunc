@@ -7,7 +7,7 @@ import { abortable } from '../../../client/remoteTelefunctionCall/errors.js'
 import { ConnectionError } from '../../../client/ConnectionError.js'
 
 /** The client code a call needs only for the values it carries, each loaded by the first call that carries one, unless
- *  an extension's import of `telefunc/__internal` loaded it with the page. */
+ *  an extension registered its capability with the page. */
 type Features = {
   /** Streams, files and promises a response's own body carries. */
   streams?: typeof import('./streams.js')
@@ -45,13 +45,16 @@ function loadedFeature<F extends 'channels' | 'broadcasts'>(feature: F): NonNull
   const loaded = globalObject.loaded[feature]
   assertUsage(
     loaded,
-    `A Telefunc extension's value creates a ${feature === 'channels' ? 'channel' : 'broadcast'}, yet the page hasn't loaded Telefunc's code for it: the extension's client code should \`import 'telefunc/__internal'\`.`,
+    `A Telefunc extension's value creates a ${feature === 'channels' ? 'channel' : 'broadcast'}, yet the page hasn't loaded Telefunc's code for it: the extension's client code should \`import 'telefunc/__internal/${feature}'\`.`,
   )
   return loaded
 }
 
 /** The code that an entry of `telefunc/__internal` imports statically, for the extensions that import it. */
-function loadedWithExtensions(features: Pick<Features, 'channels' | 'broadcasts'>): void {
+function loadedWithExtensions(features: {
+  channels?: Features['channels']
+  broadcasts?: Features['broadcasts']
+}): void {
   Object.assign(globalObject.loaded, features)
 }
 

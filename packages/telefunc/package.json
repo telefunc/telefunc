@@ -106,6 +106,18 @@
       "types": "./dist/serve/cloudflare.d.ts",
       "default": "./dist/serve/cloudflare.js"
     },
+    "./__internal/channels": {
+      "types": "./dist/node/server/__internal/noop.d.ts",
+      "worker": "./dist/node/server/__internal/noop.js",
+      "browser": "./dist/client/__internal/channels.js",
+      "default": "./dist/node/server/__internal/noop.js"
+    },
+    "./__internal/broadcasts": {
+      "types": "./dist/node/server/__internal/noop.d.ts",
+      "worker": "./dist/node/server/__internal/noop.js",
+      "browser": "./dist/client/__internal/broadcasts.js",
+      "default": "./dist/node/server/__internal/noop.js"
+    },
     "./__internal": {
       "types": "./dist/node/server/__internal.d.ts",
       "worker": "./dist/node/server/__internal.js",

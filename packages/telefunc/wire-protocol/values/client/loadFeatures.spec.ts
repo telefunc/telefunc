@@ -707,13 +707,12 @@ function askExtension(method: 'createChannel' | 'sendStream') {
 }
 
 test.each(['createChannel', 'sendStream'] as const)(
-  'an extension that imports telefunc/__internal replaces its value with %s() at invocation, in one POST',
+  'an extension that imports telefunc/__internal/channels replaces its value with %s() at invocation, in one POST',
   async (method) => {
     const { call, config } = await page()
     gates.channels.resolve()
-    gates.broadcasts.resolve()
     // The extension's client code: its values create channels.
-    await import('../../../client/__internal.js')
+    await import('../../../client/__internal/channels.js')
     imported = []
     config.extensions.push(askExtension(method))
     respond = text(1)
@@ -726,11 +725,13 @@ test.each(['createChannel', 'sendStream'] as const)(
 )
 
 test.each(['createChannel', 'sendStream'] as const)(
-  'an extension whose replacer calls %s() without importing telefunc/__internal gets a usage error naming it',
+  'an extension whose replacer calls %s() without importing telefunc/__internal/channels gets a usage error naming it',
   async (method) => {
     const { call, config } = await page()
     config.extensions.push(askExtension(method))
-    expect(() => call([{ kind: 'ask' }])).toThrow("the extension's client code should `import 'telefunc/__internal'`")
+    expect(() => call([{ kind: 'ask' }])).toThrow(
+      "the extension's client code should `import 'telefunc/__internal/channels'`",
+    )
     expect(posts).toEqual([])
     expect(imported).toEqual([])
   },
@@ -921,12 +922,13 @@ test('each call loads only the code the values it carries need', async () => {
   expect(imported).toEqual(['streams', 'channels', 'broadcasts'])
 })
 
-test('an extension that imports telefunc/__internal creates a broadcast and a channel from its response, loading no other code', async () => {
+test('an extension that imports both capabilities revives a broadcast and a channel without loading another module', async () => {
   const { call, config } = await page()
   gates.channels.resolve()
   gates.broadcasts.resolve()
   // The extension's client code: its values create channels and broadcasts.
-  await import('../../../client/__internal.js')
+  await import('../../../client/__internal/channels.js')
+  await import('../../../client/__internal/broadcasts.js')
   imported = []
   const created: string[] = []
   config.extensions.push({
