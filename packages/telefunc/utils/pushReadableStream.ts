@@ -1,6 +1,8 @@
 export { createPushReadableStream }
 export type { PushReadableStream }
 
+import { StreamAbortedError } from './StreamAbortedError.js'
+
 /**
  * Push-fed Web `ReadableStream` for streaming bodies on the Web side
  * (client SSE upstream, any cross-runtime use that hands a body to fetch /
@@ -11,14 +13,15 @@ export type { PushReadableStream }
  * Producer calls `push(chunk)` / `close()` synchronously; each chunk lands
  * directly in the stream's internal queue via `controller.enqueue`.
  * Consumers (fetch upstream, `pipeTo`) drain the queue natively — no async
- * generator, no `await` per chunk, no `new ReadableStream({ pull })` adapter.
+ * generator, no `await` per chunk.
  *
- * Backpressure is opt-in via `onPull`:
- *   - omit it (SSE upstream, client→server stream-request): `push` always
- *     returns `true`; channel-level credit bounds the producer.
- *   - wire it (inline streaming response): `push` returns the consumer's
- *     `desiredSize > 0` (false = queue full); producer awaits a deferred
- *     between `push`-returns-false and the next `onPull`.
+ * Backpressure: `push` returns whether the queue has room once the chunk is in
+ * it (`desiredSize > 0`), which is only while a read was waiting and took the
+ * chunk, and `false` once closed. `onPull` runs when the consumer wants more:
+ * a producer pacing on `push` (the server's SSE stream, an inline streaming
+ * response) waits for it after a `false`. One bounded otherwise (the page's
+ * SSE upload, by channel credit) passes no `onPull`, ignores the answer and
+ * reads `bufferedAmount`.
  *
  * `onCancel` fires once when the consumer cancels the stream (fetch
  * aborted, `pipeTo` destination errored, etc.). Producer-side `close()`
@@ -29,8 +32,11 @@ type PushReadableStream<T extends Uint8Array = Uint8Array<ArrayBuffer>> = {
   readonly readable: ReadableStream<T>
   push(chunk: T): boolean
   close(): void
+  /** Ends it at once, with what the consumer hasn't read: the body handed on fails with `StreamAbortedError`. */
+  abort(): void
   readonly isClosed: boolean
-  /** Bytes pushed that the consumer hasn't read yet, while open. */
+  /** Bytes pushed that the consumer hasn't read yet; once closed, those it hadn't read at `close()`, till `abort()` or a
+   *  cancel. */
   readonly bufferedAmount: number
 }
 
@@ -44,6 +50,8 @@ function createPushReadableStream<T extends Uint8Array = Uint8Array<ArrayBuffer>
 ): PushReadableStream<T> {
   let controller!: ReadableStreamDefaultController<T>
   let closed = false
+  let closedQueued = 0
+  const queued = () => HIGH_WATER_MARK - (controller.desiredSize ?? HIGH_WATER_MARK)
   const readable = new ReadableStream<T>(
     {
       start: (c) => {
@@ -54,6 +62,7 @@ function createPushReadableStream<T extends Uint8Array = Uint8Array<ArrayBuffer>
       },
       cancel: () => {
         closed = true
+        closedQueued = 0
         onCancel?.()
       },
     },
@@ -69,13 +78,19 @@ function createPushReadableStream<T extends Uint8Array = Uint8Array<ArrayBuffer>
     close: () => {
       if (closed) return
       closed = true
+      closedQueued = queued()
       controller.close()
+    },
+    abort: () => {
+      closed = true
+      closedQueued = 0
+      controller.error(new StreamAbortedError())
     },
     get isClosed() {
       return closed
     },
     get bufferedAmount() {
-      return closed ? 0 : HIGH_WATER_MARK - controller.desiredSize!
+      return closed ? closedQueued : queued()
     },
   }
 }

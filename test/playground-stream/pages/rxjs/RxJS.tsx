@@ -16,6 +16,7 @@ import {
   onSubjectArgNoErrorHandler,
   onSharedSubjectOneErrors,
   onSubjectNoHandler,
+  onSubjectPageLeaves,
   onShieldSubjectArg,
   onShieldSubjectReturn,
   onShieldObservableArg,
@@ -150,19 +151,14 @@ function RxJSDemo() {
         id="test-subject-close"
         onClick={async () => {
           setResult('')
-          console.log('subject close: clicked')
           const subject = await onSubject()
-          console.log('subject close: call returned')
           const received: string[] = []
           subject.subscribe((v) => {
             received.push(v)
-            console.log('subject close: tick')
           })
           setTimeout(async () => {
-            console.log('subject close: timer fired')
             try {
               await close(subject)
-              console.log('subject close: close settled')
               setResult(JSON.stringify({ received, closed: true }))
             } catch (err: any) {
               setResult(JSON.stringify({ received, closed: false, error: String(err?.message ?? err) }))
@@ -408,18 +404,35 @@ function RxJSDemo() {
           setResult('')
           const subject = await onSubjectNoHandler()
           const received: string[] = []
+          // Sent until the server errors the subject: the page's subject sends nothing before the server's subscription
+          // reached it.
+          const sending = setInterval(() => subject.next('hello-from-client'), 100)
           subject.subscribe({
             next(v) {
               received.push(v)
             },
             error(err) {
+              clearInterval(sending)
               setResult(JSON.stringify({ received, error: String(err?.message ?? err) }))
             },
           })
-          setTimeout(() => subject.next('hello-from-client'), 200)
         }}
       >
         Subject no-handler (server survives)
+      </button>
+
+      {/* Subject arg whose page leaves: the server's subscription without an error handler logs nothing */}
+      <button
+        id="test-subject-page-leaves"
+        onClick={async () => {
+          setResult('')
+          const subject = new RxSubject<string>()
+          await onSubjectPageLeaves(subject)
+          // Sent until the page leaves: the page's subject sends nothing before the server's subscription reached it.
+          setInterval(() => subject.next('hello'), 100)
+        }}
+      >
+        Subject whose page leaves
       </button>
 
       {/* Shield: all three data-flow paths (Subject arg, Subject return, Observable arg) */}

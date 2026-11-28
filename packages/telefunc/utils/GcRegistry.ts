@@ -1,6 +1,8 @@
-export { GcRegistry }
+export { GcRegistry, getGcRegistry }
 
+import { getGlobalObject } from './getGlobalObject.js'
 import { unrefTimer } from './unrefTimer.js'
+import { isNavigatedAwayRealm } from '../workarounds/chrome158IframeFinalization.js'
 
 type CloseFn = () => void | Promise<void>
 
@@ -33,7 +35,9 @@ class GcRegistry {
   private scanTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(private readonly periodicScanMs = 5000) {
-    this.finalReg = new FinalizationRegistry<Entry>((entry) => this.fireCleanup(entry))
+    this.finalReg = new FinalizationRegistry<Entry>((entry) => {
+      if (!isNavigatedAwayRealm()) this.fireCleanup(entry)
+    })
   }
 
   /** Returns what forgets `target` without closing it, once nothing is left for `close` to do. */
@@ -79,4 +83,9 @@ class GcRegistry {
       this.scanTimer = null
     }
   }
+}
+
+/** The realm's one registry, which every copy of Telefunc in the same JavaScript realm shares. */
+function getGcRegistry(): GcRegistry {
+  return getGlobalObject('utils/GcRegistry.ts', () => ({ gcRegistry: new GcRegistry() })).gcRegistry
 }

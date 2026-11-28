@@ -21,7 +21,7 @@ function Backlog() {
     channelRef.current = channel
     let expected = 0
     channel.listen((message) => {
-      const inOrder = Number(message.trimEnd()) === expected++
+      const inOrder = message === String(expected++).padEnd(16 * 1024)
       setState((s) => ({ ...s, received: s.received + 1, outOfOrder: s.outOfOrder + (inOrder ? 0 : 1) }))
     })
     channel.onClose((err) => setState((s) => ({ ...s, closeErr: err?.name ?? 'none' })))

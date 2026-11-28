@@ -1,24 +1,28 @@
-export { replayWindow }
+export { creditWindowOf }
 export type { CreditOwner, Urgency }
 
-import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES } from '../wire/frame.js'
+import { CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
 
 /** How soon a credit frame goes (`urgent-flow-control` at once, an `acknowledgement` rides); also its page frame kind. */
 type Urgency = 'urgent-flow-control' | 'acknowledgement' | 'flow-control'
 
 /** What a channel's credits send through and read: the frames they decide on, and what the channel's wire holds. */
 interface CreditOwner {
-  // Limits go out mod 2^32; a byte limit carries the last seq this side has, which acknowledges what arrived.
-  sendByteLimit(limit: number, urgency: Urgency): void
+  // Limits go out mod 2^32; a byte limit carries the last seq this side has, which acknowledges what arrived, and
+  // `receivedAt`, when that seq arrived if it is a lossy value.
+  sendByteLimit(limit: number, urgency: Urgency, receivedAt?: number): void
   sendMessageLimit(limit: number, urgency: Urgency): void
   sendBdpPing(probe: number): void
   /** Bytes waiting to go out on the channel's wire, `undefined` where the runtime can't tell. */
   backlogBytes(): number | undefined
   /** The bytes the channel's wire delivered in the `ms` before the frame being handled arrived. */
   deliveredBefore(ms: number): number
+  /** On a server: whether it holds enough that this side grants no more credit. */
+  holdsEnough?(): boolean
 }
 
-/** The largest window a sender whose replay queues hold `text` and `binary` bytes gets: what it holds in flight fits. */
-function replayWindow(text: number, binary: number): number {
-  return Math.max(1, Math.floor(Math.min(text, binary) / 2) - MESSAGE_FRAME_OVERHEAD_MAX_BYTES)
+/** The largest credit window, each way, of a server whose channels hold `maxMemory` together and `maxPendingBytes`
+ *  each: what a small host or channel holds is small. */
+function creditWindowOf(maxMemory: number, maxPendingBytes: number): number {
+  return Math.min(CREDIT_WINDOW_MAX_BYTES, Math.min(maxMemory, maxPendingBytes) / 2)
 }

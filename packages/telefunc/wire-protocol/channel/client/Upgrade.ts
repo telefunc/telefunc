@@ -13,20 +13,20 @@ export type {
   UpgradeTarget,
 }
 
+import type { ReceivedFrame } from './pairPublishes.js'
 import type { ClientChannelTransport, OutboundFrame } from './ClientConnection.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
-import type { DecodedFrame } from '../../wire/frame.js'
 import type { ReadyPayload, ReconciledPayload } from '../../wire/payloads.js'
 import {
   UPGRADE_ATTEMPT_TIMEOUT_MS,
   UPGRADE_HANDOFF_BUFFER_BYTES,
   UPGRADE_HANDOFF_BUFFER_FRAMES,
   UPGRADE_HANDOFF_JOIN_TIMEOUT_MS,
+  CHANNEL_TRANSPORT,
 } from '../../constants.js'
 import { encode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
-import { NetworkError } from '../../../shared/NetworkError.js'
 import { assert } from '../../../utils/assert.js'
 import { randomUuid } from '../../../utils/randomUuid.js'
 import { Heartbeat } from './Heartbeat.js'
@@ -47,7 +47,7 @@ type ProbeWire = {
 /** What a probed WebSocket tells the upgrade, from the PONG that proves it until it closes or is adopted. */
 interface ProbeOwner {
   onProbePong(): void
-  onProbeFrame(frame: DecodedFrame, byteLength: number): void
+  onProbeFrame(frame: ReceivedFrame, byteLength: number): void
   onProbeClosed(): void
 }
 
@@ -77,11 +77,13 @@ type AttemptHooks = {
  *  order, for the connection to apply before it calls `tryComplete`. */
 type AttemptEnd =
   | { tag: 'aborted' | 'not-ready' | 'not-emitted' | 'stranded' }
-  | { tag: 'flipped'; completion: DecodedFrame[] }
+  | { tag: 'flipped'; completion: ReceivedFrame[] }
 
 /** The wire an upgrade moves FROM: it has to carry the barrier as its last frame. */
 type UpgradeSource = ClientChannelTransport & {
   emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission>
+  /** When the wire last delivered part of a frame and not its end. */
+  readonly frameCrossingAt: number
 }
 
 /** The wire an upgrade moves TO: it has to be openable without becoming the transport, and
@@ -125,17 +127,19 @@ type UpgradeState =
       bufferedFrames: number
       deferredOmitted: number[]
       joinTimer: ReturnType<typeof setTimeout> | null
+      /** The flip, or the old wire's last frame after it if later: the FIN comes behind what that wire delivers. */
+      oldDeliveredAt: number
     }
 
 type CommittingUpgrade = Extract<UpgradeState, { tag: 'committing' }>
 
-type BufferedWireFrame = { frame: DecodedFrame; byteLength: number }
+type BufferedWireFrame = { frame: ReceivedFrame; byteLength: number }
 
 /** Per source wire, `old` draining first: the server wrote all of it before anything the new wire carries. */
 type UpgradeBuffer = { old: BufferedWireFrame[]; new: BufferedWireFrame[] }
 
 /** FIN (old wire) and RECONCILED (new wire) complete the join; everything else is payload. */
-function isUpgradeCompletionFrame(frame: DecodedFrame): boolean {
+function isUpgradeCompletionFrame(frame: ReceivedFrame): boolean {
   return frame.tag === TAG.FIN || frame.tag === TAG.RECONCILED
 }
 
@@ -146,12 +150,12 @@ type HandoffFrame = 'dispatch' | 'held' | 'complete' | 'fallback'
 
 /** What a join releases, in the order the server wrote it: the old wire's frames, then the new wire's. The channels its
  *  RECONCILED left out close unacknowledged between them. */
-type JoinRelease = { old: DecodedFrame[]; deferredOmitted: number[]; new: DecodedFrame[] }
+type JoinRelease = { old: ReceivedFrame[]; deferredOmitted: number[]; new: ReceivedFrame[] }
 
 /** The connection an upgrade moves from its SSE wire to a WebSocket. */
 interface UpgradeOwner {
   /** The join didn't complete in time: the connection goes back to SSE. */
-  onHandoffFailed(err: Error): void
+  onHandoffFailed(): void
 }
 
 type UpgradeOptions = {
@@ -215,7 +219,7 @@ class Upgrade implements ProbeOwner {
   }
 
   /** Takes a frame a wire delivered: what the connection does with it (see `HandoffFrame`). */
-  takeHandoffFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number): HandoffFrame {
+  takeHandoffFrame(frame: ReceivedFrame, source: ClientChannelTransport, byteLength: number): HandoffFrame {
     if (!this.flipped) return 'dispatch'
     return this.ingestDuringHandoff(frame, source === this.committing!.from ? 'old' : 'new', byteLength)
   }
@@ -271,11 +275,12 @@ class Upgrade implements ProbeOwner {
   /** Takes every frame that arrives during the handoff, and is the one place that counts it against the handoff's
    *  budget. Before the flip the probe is nobody's wire, so even a completion frame waits: acting on one would settle a
    *  swap that hasn't happened. After it, completion frames apply and the rest waits, split by the wire it came from. */
-  private ingestDuringHandoff(frame: DecodedFrame, source: 'old' | 'new', byteLength: number): HandoffFrame {
+  private ingestDuringHandoff(frame: ReceivedFrame, source: 'old' | 'new', byteLength: number): HandoffFrame {
     const u = this.committing
     if (u === null) return 'held'
     const { flipped } = u
     if (flipped && isUpgradeCompletionFrame(frame)) return 'complete'
+    if (flipped && source === 'old') u.oldDeliveredAt = performance.now()
     ;(flipped ? u.buffer[source] : u.heldBeforeFlip).push({ frame, byteLength })
     u.bufferedFrames += 1
     u.bufferedBytes += byteLength
@@ -294,7 +299,7 @@ class Upgrade implements ProbeOwner {
   }
 
   /** The probe delivers only before the flip, which hands its socket to the transport: what it delivers waits for it. */
-  onProbeFrame(frame: DecodedFrame, byteLength: number): void {
+  onProbeFrame(frame: ReceivedFrame, byteLength: number): void {
     if (frame.tag !== TAG.READY) {
       this.ingestDuringHandoff(frame, 'new', byteLength)
       return
@@ -372,6 +377,7 @@ class Upgrade implements ProbeOwner {
       bufferedFrames: 0,
       deferredOmitted: [],
       joinTimer: null,
+      oldDeliveredAt: 0,
     }
   }
 
@@ -400,13 +406,13 @@ class Upgrade implements ProbeOwner {
   async run(
     from: UpgradeSource,
     to: UpgradeTarget,
-    { sessionId, pingInterval }: { sessionId: string; pingInterval: number },
+    { sessionId, pingInterval, attempt: probeAttempt }: { sessionId: string; pingInterval: number; attempt: number },
     hooks: AttemptHooks,
   ): Promise<AttemptEnd> {
     const attempt = this.start()
     let adopted = false
     try {
-      const session = await this.stage(to, sessionId, pingInterval, attempt)
+      const session = await this.stage(to, { sessionId, attempt: probeAttempt }, pingInterval, attempt)
       if (session === 'no-probe') return { tag: 'aborted' }
       if (session === 'not-ready') return { tag: 'not-ready' }
       await hooks.reconcileSettled(attempt.signal)
@@ -441,7 +447,7 @@ class Upgrade implements ProbeOwner {
    *  attempt is aborted. */
   private async stage(
     to: UpgradeTarget,
-    sessionId: string,
+    { sessionId, attempt: probeAttempt }: { sessionId: string; attempt: number },
     pingInterval: number,
     attempt: AbortController,
   ): Promise<ProbeSession | 'no-probe' | 'not-ready'> {
@@ -461,7 +467,7 @@ class Upgrade implements ProbeOwner {
       attempt.signal.addEventListener('abort', () => resolve(null), { once: true })
     })
     this.armAttemptDeadline(attempt)
-    probe.send(encode.prepare({ upgradeId, sessionId }))
+    probe.send(encode.prepare({ upgradeId, sessionId, attempt: probeAttempt }))
     const ready = await readyP
     if (!ready || ready.upgradeId !== upgradeId || attempt.signal.aborted) {
       attempt.abort()
@@ -476,7 +482,8 @@ class Upgrade implements ProbeOwner {
   private keepProbeAlive(probe: ProbeWire, attempt: AbortController, intervalMs: number): Heartbeat {
     const heartbeat = new Heartbeat({
       intervalMs,
-      pongTimeoutMs: pingDeadline(intervalMs),
+      // The probe is a WebSocket.
+      pongTimeoutMs: pingDeadline(intervalMs, CHANNEL_TRANSPORT.WS),
       send: () => probe.ping(),
       onDead: () => attempt.abort(),
     })
@@ -497,7 +504,7 @@ class Upgrade implements ProbeOwner {
   /** The barrier went and the connection adopted the new wire: the probe becomes it, and the join begins. Returns the
    *  completion frames the probe delivered before, in order, for the connection to apply; then it calls `tryComplete`.
    *  The buffer is made whole first, so a RECONCILED among them cannot complete a join over a partial one. */
-  private flip(): DecodedFrame[] {
+  private flip(): ReceivedFrame[] {
     const u = this.committing
     assert(u !== null)
     if (u.deadline) {
@@ -507,6 +514,7 @@ class Upgrade implements ProbeOwner {
     u.probeHeartbeat.stop()
     u.flipped = true
     u.to.adoptProbe()
+    u.oldDeliveredAt = performance.now()
     u.joinTimer = setTimeout(() => this.onJoinTimeout(), UPGRADE_HANDOFF_JOIN_TIMEOUT_MS)
     const held = u.heldBeforeFlip.splice(0)
     for (const { frame, byteLength } of held)
@@ -518,14 +526,14 @@ class Upgrade implements ProbeOwner {
     const u = this.committing
     if (u === null) return
     u.joinTimer = null
-    // The FIN comes behind what the old wire still delivers: given up on once that wire went quiet for the timeout.
-    const quiet = u.finReceived ? Infinity : (u.from.heartbeat?.quietFor() ?? Infinity)
+    // The FIN comes behind what the old wire still delivers: given up on once that wire delivered no frame, whole or
+    // in part, for the timeout. Its PONGs don't count: they come whether or not the FIN ever will.
+    const quiet = u.finReceived ? Infinity : performance.now() - Math.max(u.oldDeliveredAt, u.from.frameCrossingAt)
     if (quiet < UPGRADE_HANDOFF_JOIN_TIMEOUT_MS) {
       u.joinTimer = setTimeout(() => this.onJoinTimeout(), UPGRADE_HANDOFF_JOIN_TIMEOUT_MS - quiet)
       return
     }
-    const waitingFor = u.finReceived ? 'RECONCILED' : 'FIN'
-    this.owner.onHandoffFailed(new NetworkError(`Upgrade handoff timed out waiting for ${waitingFor}`, true))
+    this.owner.onHandoffFailed()
   }
 }
 

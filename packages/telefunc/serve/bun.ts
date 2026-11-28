@@ -1,17 +1,15 @@
 export { Telefunc }
 
 import crossws from 'crossws/adapters/bun'
-import type { Peer } from 'crossws'
-import { serve as serveTelefunc } from '../node/server/telefunc.js'
+import { serve } from '../node/server/telefunc.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig } from '../node/server/serverConfig.js'
-import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
+import { getTelefuncChannelOptions } from '../wire-protocol/channel/server/ws.js'
 import { CHANNEL_TRANSPORT, WIRE_MAX_RAW_FRAME_BYTES } from '../wire-protocol/constants.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
 
 type BunWs = ReturnType<typeof crossws>
 type BunServer = Parameters<BunWs['handleUpgrade']>[1]
-type BunSocket = Parameters<NonNullable<BunWs['websocket']['open']>>[0]
 
 type ServeInput = {
   request: Request
@@ -32,35 +30,26 @@ class Telefunc {
 }
 
 function telefunc(): TelefuncServe {
-  // TODO: remove once Telefunc's own WebSocket adapter replaces crossws.
-  // A peer's `websocket` is a Proxy, and Bun's methods refuse one as `this`: the socket itself answers.
-  const sockets = new WeakMap<Peer, BunSocket>()
-  const ws = crossws({
-    hooks: getTelefuncChannelHooks({ bufferedAmount: (peer) => sockets.get(peer)!.getBufferedAmount() }),
-  })
+  const ws = crossws(getTelefuncChannelOptions({ copiesOnSend: true }))
 
   return {
     websocket: {
       ...ws.websocket,
-      // Bun drops sends past 16 MiB queued, a gap in a channel; channels bound what waits by getBufferedAmount().
+      // Bun drops sends past 16 MiB queued, a gap in a channel; channels bound what waits by `peer.bufferedAmount`.
       backpressureLimit: 0,
       // Bun closes the socket on a message over 16 MiB by default, below the frames telefunc accepts.
       maxPayloadLength: WIRE_MAX_RAW_FRAME_BYTES,
-      open(socket: BunSocket) {
-        ws.websocket.open!(socket)
-        sockets.set(socket.data.peer!, socket)
-      },
     },
     async serve({ request, server, context }: ServeInput): Promise<Response | undefined> {
-      const url = new URL(request.url)
+      if (!isTelefuncRequest(request)) return undefined
       const config = getServerConfig()
-      if (url.pathname === config.telefuncUrl && request.headers.get('upgrade') === 'websocket') {
+      if (request.headers.get('upgrade') === 'websocket') {
         if (!config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) return new Response(null, { status: 400 })
         return ws.handleUpgrade(request, server) as Response | Promise<Response>
       }
-      if (!isTelefuncRequest(request)) return undefined
-
-      const httpResponse = await serveTelefunc(context ? { request, context } : { request })
+      // Bun applies its idle timeout to quiet streams and SSE wires.
+      server.timeout(request, 0)
+      const httpResponse = await serve(context ? { request, context } : { request })
       return toResponse(httpResponse)
     },
   }

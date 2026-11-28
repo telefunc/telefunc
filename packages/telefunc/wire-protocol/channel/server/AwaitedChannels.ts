@@ -1,10 +1,10 @@
-export { AwaitedChannels, expireAwaited }
+export { AwaitedChannels, RegistrationWaits }
 export type { AwaitedChannel, RecvBacklog }
 
 import { encode, type ChannelFrame } from '../../wire/frame.js'
 import type { ReconcileOpenEntry } from '../../wire/payloads.js'
+import type { RefusalCause } from '../endCause.js'
 import type { WireEntry } from './ChannelMux.js'
-import type { RegistrationWaits } from './RegistrationWaits.js'
 
 /** What a wire received and hasn't handled yet. */
 type RecvBacklog = { bytes: number; frames: number }
@@ -23,13 +23,9 @@ type AwaitedChannel = {
   phase: 'waiting' | 'attached' | 'expired'
   /** The deadline of its wait for its channel's registration (see `RegistrationWaits`); null once it waits no more. */
   ttl: ReturnType<typeof setTimeout> | null
-}
-
-/** The awaited channel didn't register within `connectTtl`, or shut down as it registered: its wire gets an
- *  ATTACH_RESULT null. */
-function expireAwaited(awaited: AwaitedChannel): void {
-  awaited.entry.state.awaited.expire(awaited)
-  awaited.entry.sender.send(encode.attachResult(awaited.open.ix, null))
+  /** Why the server ended it while it was awaited, a frame its page sent it or the end of its session: its channel ends
+   *  with it as it registers. */
+  refused: RefusalCause | null
 }
 
 type AwaitedChannelsOptions = {
@@ -72,16 +68,30 @@ class AwaitedChannels {
     this.attachedCount++
   }
 
-  /** Awaited no more: it holds nothing, and stays while a RECONCILE names it. */
+  /** Its registration timed out or its channel shut down before attaching; it stays while a RECONCILE names it. */
   expire(awaited: AwaitedChannel): void {
     awaited.phase = 'expired'
     this.drop(awaited)
+    awaited.entry.sender.send(encode.attachResult(awaited.open.ix, null))
   }
 
   hold(awaited: AwaitedChannel, frame: ChannelFrame, bytes: number): void {
     awaited.held.push({ frame, bytes })
     this.backlog.bytes += bytes
     this.backlog.frames++
+  }
+
+  /** The server ended it for `cause`: the wire awaits it no more and drops what it held, and its registration wait goes
+   *  on past the wire's end, for its channel to end with `cause` as it registers. */
+  refuse(awaited: AwaitedChannel, cause: RefusalCause): void {
+    awaited.refused = cause
+    this.drop(awaited)
+    this.delete(awaited)
+  }
+
+  /** The page's session ended for `cause`: each channel it awaits ends with it as it registers. */
+  refuseAll(cause: RefusalCause): void {
+    for (const awaited of this.byIx.values()) this.refuse(awaited, cause)
   }
 
   /** Awaits it no more, and hands back what it held, to dispatch. */
@@ -127,11 +137,57 @@ class AwaitedChannels {
     if (awaited.phase === 'attached') this.attachedCount--
   }
 
+  /** Awaits none of them any more, and drops what it held. */
   stop(): void {
-    for (const awaited of this.byIx.values()) this.waits.stop(awaited)
+    for (const awaited of this.byIx.values()) {
+      this.waits.stop(awaited)
+      this.drop(awaited)
+    }
     this.byIx.clear()
     this.attachedCount = 0
   }
 }
 
 const NOTHING_HELD: AwaitedChannel['held'] = []
+
+/** The awaited channels on a mux's wires that wait for their channel's registration, by id, in the order they began;
+ *  one that waits `connectTtl` in vain expires. */
+class RegistrationWaits {
+  private readonly byId = new Map<string, Set<AwaitedChannel>>()
+
+  /** `awaited` waits for its channel's registration, `ttlMs` at most. */
+  wait(awaited: AwaitedChannel, ttlMs: number): void {
+    let waiting = this.byId.get(awaited.channelId)
+    if (waiting === undefined) this.byId.set(awaited.channelId, (waiting = new Set()))
+    waiting.add(awaited)
+    awaited.ttl = setTimeout(() => {
+      if (this.stop(awaited)) awaited.entry.state.awaited.expire(awaited)
+    }, ttlMs)
+  }
+
+  /** Whether a wait for channel `id` ends it as it registers. */
+  refuses(id: string): boolean {
+    for (const awaited of this.byId.get(id) ?? NONE) if (awaited.refused !== null) return true
+    return false
+  }
+
+  /** Those that wait for channel `id`, in the order they began: each still waits until `stop`. */
+  take(id: string): Iterable<AwaitedChannel> {
+    const waiting = this.byId.get(id)
+    if (waiting === undefined) return NONE
+    this.byId.delete(id)
+    return waiting
+  }
+
+  /** `awaited` waits no more; false where it didn't. */
+  stop(awaited: AwaitedChannel): boolean {
+    if (awaited.ttl === null) return false
+    clearTimeout(awaited.ttl)
+    awaited.ttl = null
+    const waiting = this.byId.get(awaited.channelId)
+    if (waiting?.delete(awaited) && waiting.size === 0) this.byId.delete(awaited.channelId)
+    return true
+  }
+}
+
+const NONE: readonly AwaitedChannel[] = []

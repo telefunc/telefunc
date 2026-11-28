@@ -6,7 +6,6 @@ export type { Telefunc }
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { isCallable } from '../../../utils/isCallable.js'
 import { isObject } from '../../../utils/isObject.js'
-import { objectAssign } from '../../../utils/objectAssign.js'
 import { getRawContext, provideContext, restoreContext, isAsyncMode } from './context.js'
 import { REQUEST_CONTEXT } from './requestContext.js'
 import type { RequestContext } from './requestContext.js'
@@ -26,15 +25,19 @@ function getContext<Context extends object = Telefunc.Context>(): Context & Tele
   assert(isObject(providedContext))
 
   const reqCtx = raw[REQUEST_CONTEXT] as RequestContext | undefined
-  const builtins: TelefuncBuiltins = reqCtx
-    ? { onClose: (cb) => reqCtx.onClose(() => restoreContext(raw, cb)), signal: reqCtx.signal }
-    : // SSR — no request context available
-      { onClose: () => {}, signal: new AbortController().signal }
+  if (!reqCtx) return { onClose: () => {}, signal: new AbortController().signal, ...providedContext }
 
-  const context = {}
-  objectAssign(context, builtins)
-  objectAssign(context, providedContext)
-  return context
+  let signal: AbortSignal | undefined
+  return {
+    onClose: (cb: () => void) => reqCtx.onClose(() => restoreContext(raw, cb)),
+    get signal() {
+      return signal ?? reqCtx.signal
+    },
+    set signal(value: AbortSignal) {
+      signal = value
+    },
+    ...providedContext,
+  }
 }
 
 type TelefuncBuiltins = {

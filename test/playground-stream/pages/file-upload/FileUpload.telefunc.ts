@@ -6,6 +6,8 @@ export {
   onUploadArrayBuffer,
   onReadTwice,
   onUploadOutOfOrder,
+  onUploadCancelSecond,
+  onUploadAfterFailedStart,
   onUploadBackpressure,
   onUploadSlice,
   onUploadEmpty,
@@ -19,6 +21,11 @@ export {
   onUploadConcurrent,
   onUploadProps,
   onUploadIgnored,
+  onLeaveFileUnread,
+  onReadDiscardedFile,
+  onIgnoreFile,
+  onGreet,
+  onTransferFirstFile,
 }
 
 const onUploadFile = async (file: File, description: string) => {
@@ -33,8 +40,7 @@ const onUploadFile = async (file: File, description: string) => {
 }
 
 const onUploadMultiple = async (file1: File, file2: File) => {
-  const text1 = await file1.text()
-  const text2 = await file2.text()
+  const [text1, text2] = await Promise.all([file1.text(), file2.text()])
   return {
     file1: { name: file1.name, content: text1 },
     file2: { name: file2.name, content: text2 },
@@ -127,6 +133,26 @@ const onUploadOutOfOrder = async (file1: File, file2: File) => {
   }
 }
 
+const onUploadCancelSecond = async (file1: File, file2: File, file3: File) => {
+  await file2.stream().cancel()
+  const first = file1.stream().getReader()
+  const { value } = await first.read()
+  await first.cancel()
+  return { firstBytes: value?.byteLength ?? 0, text3: await file3.text() }
+}
+
+// The first file read after the second skipped it fails, and the third still reads its own bytes
+const onUploadAfterFailedStart = async (file1: File, file2: File, file3: File) => {
+  const text2 = await file2.text()
+  let file1Error: string | null = null
+  try {
+    await file1.text()
+  } catch (e) {
+    file1Error = e instanceof Error ? e.message : String(e)
+  }
+  return { text2, file1Error, text3: await file3.text() }
+}
+
 const onUploadEmpty = async (file: File) => {
   const content = await file.text()
   return { name: file.name, size: file.size, content, isEmpty: content === '' }
@@ -215,4 +241,38 @@ const onUploadProps = async (file: File) => {
 // Files sent but never read on the server — should not hang or error
 const onUploadIgnored = async (_file1: File, _file2: File) => {
   return { ok: true }
+}
+
+let unreadFile: File | undefined
+
+const onLeaveFileUnread = async (file: File) => {
+  unreadFile = file
+  return 'ignored'
+}
+
+const onReadDiscardedFile = async () => {
+  const file = unreadFile
+  unreadFile = undefined
+  if (!file) return 'no file'
+  try {
+    return await file.text()
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err)
+  }
+}
+
+const onIgnoreFile = async (_file: File) => 'ignored'
+
+const onGreet = async () => 'hello'
+
+/** Reads `first`, detaching each chunk's buffer as an app handing it to a worker does, then sums `second`'s bytes. */
+const onTransferFirstFile = async (first: File, second: File) => {
+  let firstBytes = 0
+  for await (const chunk of first.stream()) {
+    firstBytes += chunk.byteLength
+    structuredClone(chunk, { transfer: [chunk.buffer] })
+  }
+  let secondSum = 0
+  for (const byte of new Uint8Array(await second.arrayBuffer())) secondSum += byte
+  return { firstBytes, secondSum }
 }

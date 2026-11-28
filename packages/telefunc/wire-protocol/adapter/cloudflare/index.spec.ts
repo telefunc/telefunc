@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => {
     readonly attachKV = vi.fn()
     readonly attachIsolateInfo = vi.fn()
     readonly attachRequest = vi.fn()
+    readonly runInObject = vi.fn(<T>(_doName: string, run: () => T): T => run())
     readonly publishToSubscribers = vi.fn()
     readonly deliverToLocal = vi.fn()
 
@@ -36,6 +37,7 @@ const mocks = vi.hoisted(() => {
     crosswsAdapter,
     crosswsFactory: vi.fn(() => crosswsAdapter),
     setAdapterMaxFrameBytes: vi.fn(),
+    setAdapterMaxMemory: vi.fn(),
     getServerConfig: vi.fn(() => ({ telefuncUrl: '/_telefunc', channel: { transports: ['WS'] } })),
     telefuncMock: vi.fn(async () => ({
       statusCode: 200,
@@ -69,12 +71,14 @@ vi.mock('crossws/adapters/cloudflare', () => ({
 }))
 
 vi.mock('../../channel/server/ws.js', () => ({
-  getTelefuncChannelHooks: vi.fn(() => ({})),
+  getTelefuncChannelOptions: vi.fn(() => ({ hooks: {} })),
 }))
 
 vi.mock('../../../node/server/serverConfig.js', () => ({
   getServerConfig: mocks.getServerConfig,
+  getTelefuncUrl: () => '/_telefunc',
   setAdapterMaxFrameBytes: mocks.setAdapterMaxFrameBytes,
+  setAdapterMaxMemory: mocks.setAdapterMaxMemory,
 }))
 
 vi.mock('../../../node/server/telefunc.js', () => ({
@@ -208,6 +212,23 @@ describe('cloudflare adapter entrypoint', () => {
     expect(response?.status).toBe(400)
   })
 
+  it.each([
+    ['an SSE request of another wire version', { 'x-telefunc-request': 'sse' }, 409, 'reload'],
+    ['a request that names no kind', {}, 400, 'route'],
+  ])('refuses %s as Telefunc, which says so in its media type', async (_request, headers, status, kind) => {
+    const { binding } = createBinding()
+    const env = { TelefuncDurableObject: binding }
+    const tf = new Telefunc()
+    const request = new Request('https://telefunc.test/_telefunc', { method: 'POST', headers, body: 'x' })
+
+    const response = await tf.serve({ request, env })
+
+    expect(response?.status).toBe(status)
+    expect(response?.headers.get('content-type')).toMatch(
+      new RegExp(`^text/vnd\\.telefunc\\.refusal; kind=${kind}; reason="[^"]+"$`),
+    )
+  })
+
   it('applies jurisdiction wrapping before binding lookups', async () => {
     const { binding, jurisdiction } = createBinding()
     const kv = createMockKV()
@@ -261,9 +282,12 @@ describe('cloudflare adapter entrypoint', () => {
         headers: { 'x-telefunc-shard': 'telefunc-shard-weur-1', 'x-telefunc-broadcast-bucket': 'weur' },
       }),
     )
-    expect(mocks.telefuncMock).toHaveBeenCalled()
+    expect(mocks.telefuncMock).toHaveBeenCalledWith({
+      request: expect.any(Request),
+      context: { userId: 'user-1' },
+    })
     expect(response.headers.get('x-telefunc-home')).toBe('weur')
-    expect(mocks.transportInstances[0]?.attachIsolateInfo).toHaveBeenCalledWith('telefunc-shard-weur-1', 'weur')
+    expect(mocks.transportInstances[0]?.attachIsolateInfo).toHaveBeenCalledWith('weur')
 
     instance.webSocketMessage({} as WebSocket, 'payload')
     expect(mocks.crosswsAdapter.handleDurableMessage).toHaveBeenCalledWith(instance, expect.anything(), 'payload')

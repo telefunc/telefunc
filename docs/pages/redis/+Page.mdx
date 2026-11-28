@@ -43,6 +43,22 @@ installRedis(redis)
 
 Internally, Telefunc calls `duplicate()` on the client to open a dedicated subscriber connection — your instance is never mutated or disconnected. You can continue to use it alongside Telefunc without interference.
 
+## Errors
+
+When a publish must wait for a subscription to be active, await its `opened`:
+
+```ts
+// Chat.telefunc.ts
+// Environment: server
+
+import { Broadcast } from 'telefunc'
+
+const subscription = Broadcast.subscribe(key, listener)
+await subscription.opened
+```
+
+`opened` resolves when Redis confirms the subscription or you unsubscribe. If the subscription fails first, `opened` rejects and any <Link href="/channel#new-broadcastchannel">`BroadcastChannel`</Link> using that subscription closes.
+
 ## Channels
 
 `Channel` is per-instance. Reconnects must land on the instance holding the channel's state, so multi-instance deployments need sticky sessions at the load balancer. See <Link href="/stream/scale" />.

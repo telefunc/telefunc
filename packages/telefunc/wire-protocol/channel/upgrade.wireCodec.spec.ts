@@ -1,15 +1,15 @@
 import { describe, expect, test } from 'vitest'
 
-import { ERROR_REASON, decode, decodeClientFrame, encode } from '../wire/frame.js'
-import { TAG } from '../wire/tags.js'
-import type { BarrierPayload, ReconcilePayload, ReconciledPayload } from '../wire/payloads.js'
-import { ProtocolViolationError } from '../wire/protocolViolation.js'
+import { decode, decodeClientFrame, encode } from '../wire/frame.js'
+import { WIRE_ERROR_CODE, TAG } from '../wire/tags.js'
 import {
-  CHANNEL_TRANSPORT,
-  MAX_CHANNELS_PER_CONNECTION,
-  UPGRADE_MAX_ID_BYTES,
   WIRE_MAX_CTRL_FRAME_BYTES,
-} from '../constants.js'
+  type BarrierPayload,
+  type ReconcilePayload,
+  type ReconciledPayload,
+} from '../wire/payloads.js'
+import { ProtocolViolationError } from '../wire/protocolViolation.js'
+import { CHANNEL_TRANSPORT, MAX_CHANNELS_PER_CONNECTION, UPGRADE_MAX_ID_BYTES } from '../constants.js'
 
 const clientFrame = (raw: Uint8Array<ArrayBuffer>) => decodeClientFrame(raw, 64 * 1024)
 const hostile = (build: (payload: never) => Uint8Array<ArrayBuffer>, payload: unknown) => build(payload as never)
@@ -21,33 +21,44 @@ const reconciled = (extra: Partial<ReconciledPayload> = {}): ReconciledPayload =
   idleTimeout: 2,
   pingInterval: 3,
   maxFrameBytes: 10,
-  serverReplayBuffer: 8,
-  serverReplayBufferBinary: 9,
-  clientReplayBuffer: 4,
-  clientReplayBufferBinary: 5,
+  creditWindow: 8,
   sseFlushThrottle: 6,
   ssePostIdleFlushDelay: 7,
   transports: [CHANNEL_TRANSPORT.SSE, CHANNEL_TRANSPORT.WS],
   ...extra,
 })
 
+test('a WINDOW reports the last seq and how long the page held its report', () => {
+  expect(decode(encode.window(2, 1024, 7, 650))).toEqual({
+    tag: TAG.WINDOW,
+    index: 2,
+    bytes: 1024,
+    lastSeq: 7,
+    heldMs: 650,
+  })
+  expect(decode(encode.window(2, 1024, 7, 70_000))).toMatchObject({ heldMs: 65_535 })
+})
+
 describe('upgrade wire vocabulary', () => {
   test('PREPARE and READY round-trip', () => {
-    const prepare = { upgradeId: 'upg-1', sessionId: 'sess-0' }
+    const prepare = { upgradeId: 'upg-1', sessionId: 'sess-0', attempt: 2 }
     expect(decode(encode.prepare(prepare))).toEqual({ tag: TAG.PREPARE, payload: prepare })
     expect(decode(encode.ready({ upgradeId: 'upg-9' }))).toEqual({ tag: TAG.READY, payload: { upgradeId: 'upg-9' } })
   })
 
-  test('a BARRIER round-trips at one entry and at the largest shape the caps admit', () => {
+  test('a BARRIER round-trips at one entry, and with every channel a connection may hold under the longest id', () => {
     const one: BarrierPayload = { sessionId: 'sess-0', upgradeId: 'upg-1', open: goodOpen }
     expect(decode(encode.barrier(one))).toEqual({ tag: TAG.BARRIER, payload: one })
     const open = Array.from({ length: MAX_CHANNELS_PER_CONNECTION }, (_, ix) => ({
       id: String(ix).padStart(UPGRADE_MAX_ID_BYTES, 'x'),
       ix: 0xffff - ix,
-      lastSeq: 0xffffffff,
+      lastSeq: Number.MAX_SAFE_INTEGER,
       initial: true as const,
+      want: { version: 0xffffffff, text: false, binary: false },
+      probe: 0xffffffff,
     }))
-    const max: BarrierPayload = { sessionId: 'x'.repeat(64), upgradeId: 'y'.repeat(64), open }
+    // Its ids at the length Telefunc issues them (`crypto.randomUUID()`'s), the longest the server takes.
+    const max: BarrierPayload = { sessionId: 'x'.repeat(36), upgradeId: 'y'.repeat(36), open }
     const encoded = encode.barrier(max)
     // The byte cap is derived from the entry caps precisely so this frame is admissible: a cap
     // that refuses the largest legal barrier would fail every client that hit the entry cap.
@@ -64,6 +75,7 @@ describe('upgrade wire vocabulary', () => {
 
 describe('decodeClientFrame — hostile schemas', () => {
   const badReconcile: [string, Record<string, unknown>][] = [
+    ['no sessionId', { open: goodOpen }],
     ['a non-string sessionId', { sessionId: 7, open: goodOpen }],
     ['open that is not an array', { sessionId: 's', open: 'nope' }],
     ['an entry with a non-string id', { sessionId: 's', open: [{ id: 7, ix: 0, lastSeq: 0 }] }],
@@ -87,9 +99,9 @@ describe('decodeClientFrame — hostile schemas', () => {
   test('control: every legal RECONCILE shape passes', () => {
     const legal: ReconcilePayload[] = [
       { sessionId: 's', open: goodOpen },
-      { open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] },
-      { open: [{ id: 'A', ix: 0xffff, lastSeq: 0xffffffff }] },
-      { open: [] },
+      { sessionId: 's', open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] },
+      { sessionId: 's', open: [{ id: 'A', ix: 0xffff, lastSeq: 0xffffffff }] },
+      { sessionId: 's', open: [] },
     ]
     for (const payload of legal) expect(clientFrame(encode.reconcile(payload)).tag).toBe(TAG.RECONCILE)
   })
@@ -152,9 +164,11 @@ describe('decodeClientFrame — direction', () => {
     ['FIN', encode.fin()],
     ['READY', encode.ready({ upgradeId: 'u' })],
     ['STREAM_REQUEST_OPEN_ACK', encode.streamRequestOpenAck()],
-    ['PUBLISH', encode.publish(0, `9,1700000000000\n${JSON.stringify(1)}`, 1)],
-    ['PUBLISH_BINARY', encode.publishBinary(0, new Uint8Array(14), 1)],
+    ['PUBLISH', encode.publish(JSON.stringify(1), { seq: 9, timestamp: 1700000000000 })],
+    ['PUBLISH_BINARY', encode.publishBinary(new Uint8Array(14), { seq: 9, timestamp: 1700000000000 })],
+    ['PUBLISH_TO', encode.publishTo(0, 1)],
     ['RECONCILED', encode.reconciled(reconciled())],
+    ['WANTED', encode.wanted(0, 1)],
   ]
   test.each(serverOnly)('a client-sent %s is refused', (_name, frame) => {
     expect(() => clientFrame(frame)).toThrow(ProtocolViolationError)
@@ -162,8 +176,8 @@ describe('decodeClientFrame — direction', () => {
 
   const clientLegal: [string, Uint8Array<ArrayBuffer>][] = [
     ['PING', encode.ping()],
-    ['RECONCILE', encode.reconcile({ open: goodOpen })],
-    ['PREPARE', encode.prepare({ upgradeId: 'u', sessionId: 's' })],
+    ['RECONCILE', encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open: goodOpen })],
+    ['PREPARE', encode.prepare({ attempt: 2, upgradeId: 'u', sessionId: 's' })],
     ['BARRIER', encode.barrier({ upgradeId: 'u', sessionId: 's', open: goodOpen })],
     ['TEXT', encode.text(0, '"hi"', 1)],
     ['BINARY', encode.binary(0, new Uint8Array([1]), 1)],
@@ -173,15 +187,14 @@ describe('decodeClientFrame — direction', () => {
     ['PUBLISH_ACK_REQ', encode.publishAckReq(0, '"hi"', 1)],
     ['PUBLISH_BINARY_ACK_REQ', encode.publishBinaryAckReq(0, new Uint8Array([1]), 1)],
     ['CLOSE', encode.close(0, 1_000, 1)],
-    ['CLOSE_ACK', encode.closeAck(0, 1)],
+    ['CLOSE_ACK', encode.closeAck(0, 1, 1)],
     ['ABORT', encode.abort(0, JSON.stringify('nope'), 1)],
-    ['ERROR', encode.error(0, ERROR_REASON.LOST, 1)],
+    ['ERROR', encode.error(0, WIRE_ERROR_CODE.LOST, 1)],
     ['WINDOW', encode.window(0, 1_024, 7)],
     ['MSG_WINDOW', encode.msgWindow(0, 8)],
     ['BDP_PING', encode.bdpPing(0, 1)],
     ['BDP_PING_ACK', encode.bdpPingAck(0, 1, 0, 50)],
-    ['BROADCAST_SUB', encode.broadcastSub(0, false)],
-    ['BROADCAST_UNSUB', encode.broadcastUnsub(0, false)],
+    ['WANT', encode.want(0, { version: 1, text: true, binary: false })],
   ]
   test.each(clientLegal)('control: a client-sent %s passes', (_name, frame) => {
     expect(clientFrame(frame).tag).toBe(frame[0])

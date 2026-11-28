@@ -2,7 +2,7 @@ export { readableStreamReplacer }
 
 import type { StreamingReplacerType, ReadableStreamContract, ServerReplacerContext } from '../../types.js'
 import { SERIALIZER_PREFIX_STREAM } from '../../../constants.js'
-import { createStreamProducer } from './createStreamProducer.js'
+import { producerOfStream } from '../../producerOfStream.js'
 
 const readableStreamReplacer: StreamingReplacerType<ReadableStreamContract, ServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_STREAM,
@@ -11,5 +11,5 @@ const readableStreamReplacer: StreamingReplacerType<ReadableStreamContract, Serv
     const { metadata, close, abort } = context.sendStream(() => readableStreamReplacer.createProducer(value))
     return { metadata, close, abort }
   },
-  createProducer: (value) => createStreamProducer(value),
+  createProducer: producerOfStream,
 }

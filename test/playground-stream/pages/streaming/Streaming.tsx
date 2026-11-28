@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import {
   onReturnReadableStream,
   onReturnAsyncGenerator,
+  onReadRequestUser,
   onReturnGeneratorWithMeta,
   onReturnEmptyGenerator,
   onReturnDelayedStream,
@@ -19,19 +20,33 @@ import {
   onGeneratorAbortMidStream,
   onGeneratorAbortWithValue,
   onGeneratorBugMidStream,
+  onGeneratorThrowsNonObject,
   onAbortOneOfManyStreamingValues,
   onChannelAbortAbortsSiblingStreamingValues,
   onUploadWithProgress,
   onReturnTwoLargeStreams,
+  onReturnFileBesideLargeStream,
+  onReturnManyTinyChunks,
   onReturnTwoStreamsOfSmallChunks,
   onReturnOneLargeChunk,
   onReturnFinishedAndEndlessStreams,
-  onReturnTwoEndless,
   onReturnFailingStream,
   onGeneratorFinallyThrows,
+  onYieldLargeString,
+  onReturnPromiseOfLargeString,
+  onReturnStreamWithEmptyChunk,
+  onStreamThenCircular,
+  onReadUpload,
   onReturnAsyncGenerator as onNextCall,
 } from './Streaming.telefunc'
-import { Abort as TelefuncAbort, abort } from 'telefunc/client'
+import { Abort as TelefuncAbort, abort, withContext } from 'telefunc/client'
+
+async function readRequestUser(user: string) {
+  const read = withContext(onReadRequestUser, { headers: { 'x-test-user': user } })
+  const users: (string | null)[] = []
+  for await (const value of read()) users.push(value)
+  return users
+}
 
 function Streaming() {
   const [result, setResult] = useState<string>('')
@@ -42,7 +57,6 @@ function Streaming() {
   } | null>(null)
   // The page keeps what a call returned, as an app holding its result does.
   const returnedRef = useRef<unknown>(null)
-  const twoEndless = useRef<{ first: EndlessReader; second: EndlessReader } | null>(null)
   useEffect(() => setHydrated(true), [])
 
   return (
@@ -127,6 +141,17 @@ function Streaming() {
         }}
       >
         Empty generator
+      </button>
+
+      <button
+        id="test-request-context"
+        onClick={async () => {
+          setResult('')
+          const users = await Promise.all([readRequestUser('alice'), readRequestUser('bob')])
+          setResult(JSON.stringify(users))
+        }}
+      >
+        Concurrent request context
       </button>
 
       <pre id="streaming-result">{result}</pre>
@@ -474,6 +499,22 @@ function Streaming() {
       </button>
 
       <button
+        id="test-generator-throws-non-object"
+        onClick={async () => {
+          setResult('')
+          const values: string[] = []
+          try {
+            for await (const v of onGeneratorThrowsNonObject()) values.push(v)
+            setResult(JSON.stringify({ error: false, values }))
+          } catch (e) {
+            setResult(JSON.stringify({ error: true, isBug: !(e instanceof TelefuncAbort), values }))
+          }
+        }}
+      >
+        Generator throws a non-object
+      </button>
+
+      <button
         id="test-abort-one-of-many-streaming-values"
         onClick={async () => {
           setResult('')
@@ -701,16 +742,120 @@ function Streaming() {
       <h2>Streams read one after the other, cancelled, or failing</h2>
 
       <button
-        id="test-two-large-streams-in-turn"
+        id="test-unread-stream-stops-the-other"
         onClick={async () => {
           setResult('')
           const { first, second } = await onReturnTwoLargeStreams()
-          const firstBytes = await byteCount(first)
-          const secondBytes = await byteCount(second)
-          setResult(JSON.stringify({ firstBytes, secondBytes }))
+          let firstBytesRead = 0
+          const firstDone = byteCount(first, (bytes) => {
+            firstBytesRead = bytes
+          })
+          await new Promise((resolve) => setTimeout(resolve, 1000))
+          const firstBytesWhileSecondUnread = firstBytesRead
+          const [firstBytes, secondBytes] = await Promise.all([firstDone, byteCount(second)])
+          setResult(JSON.stringify({ firstBytesWhileSecondUnread, firstBytes, secondBytes }))
         }}
       >
-        Two large streams, read in turn
+        Two large streams: read the first, then the second too
+      </button>
+
+      {(
+        [
+          ['test-unread-stream-cancelled', 1000],
+          ['test-stall-warning', 6000],
+        ] as const
+      ).map(([id, wait]) => (
+        <button
+          key={id}
+          id={id}
+          onClick={async () => {
+            setResult('')
+            const { first, second } = await onReturnTwoLargeStreams()
+            const firstDone = byteCount(first)
+            await new Promise((resolve) => setTimeout(resolve, wait))
+            second.cancel()
+            setResult(JSON.stringify({ firstBytes: await firstDone }))
+          }}
+        >
+          Two large streams: read the first, then cancel the second after {wait} ms
+        </button>
+      ))}
+
+      <button
+        id="test-stalled-call-aborted"
+        onClick={async () => {
+          setResult('')
+          const returned = await onReturnTwoLargeStreams()
+          const firstDone = byteCount(returned.first)
+          await new Promise((resolve) => setTimeout(resolve, 1000))
+          abort(returned)
+          try {
+            setResult(JSON.stringify({ firstBytes: await firstDone }))
+          } catch (err) {
+            setResult(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }))
+          }
+        }}
+      >
+        Two large streams: read the first, then abort the call
+      </button>
+
+      <button
+        id="test-second-stream-read-slowly"
+        onClick={async () => {
+          setResult('')
+          const { first, second } = await onReturnTwoLargeStreams()
+          const firstDone = byteCount(first)
+          const reader = second.getReader()
+          let secondBytes = 0
+          for (let i = 0; i < 7; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 1000))
+            const { value } = await reader.read()
+            if (value === undefined) throw new Error('the second stream ended early')
+            secondBytes += value.byteLength
+          }
+          reader.releaseLock()
+          secondBytes += await byteCount(second)
+          setResult(JSON.stringify({ firstBytes: await firstDone, secondBytes }))
+        }}
+      >
+        Two large streams: read the first, and the second one chunk a second
+      </button>
+
+      <button
+        id="test-file-beside-large-stream"
+        onClick={async () => {
+          setResult('')
+          const { file, stream } = await onReturnFileBesideLargeStream()
+          const fileBytes = Array.from(new Uint8Array(await file.arrayBuffer()))
+          setResult(JSON.stringify({ fileBytes, streamBytes: await byteCount(stream) }))
+        }}
+      >
+        A slow file beside a large stream
+      </button>
+
+      <button
+        id="test-many-tiny-chunks"
+        onClick={async () => {
+          setResult('')
+          const chunks = 200_000
+          const reader = (await onReturnManyTinyChunks(chunks)).getReader()
+          returnedRef.current = reader
+          let read = 0
+          while (read < chunks && (await reader.read()).value?.byteLength === 8) read++
+          setResult(JSON.stringify({ chunks: read }))
+        }}
+      >
+        Read many tiny chunks of a stream that stays open
+      </button>
+      <button
+        id="test-many-tiny-chunks-cancel"
+        onClick={() => {
+          const reader = returnedRef.current
+          if (!(reader instanceof ReadableStreamDefaultReader)) throw new Error('no reader of tiny chunks')
+          void reader.cancel()
+        }}
+      >
+        Cancel the stream of tiny chunks
       </button>
 
       <button
@@ -740,12 +885,72 @@ function Streaming() {
         id="test-one-large-returned-chunk"
         onClick={async () => {
           setResult('')
-          const start = performance.now()
           const bytes = await byteCount(await onReturnOneLargeChunk())
-          setResult(JSON.stringify({ bytes, ms: Math.round(performance.now() - start) }))
+          setResult(JSON.stringify({ bytes }))
         }}
       >
         One 256 MiB chunk
+      </button>
+
+      <button
+        id="test-values-larger-than-a-part"
+        onClick={async () => {
+          setResult('')
+          const yielded: string[] = []
+          for await (const value of onYieldLargeString()) yielded.push(value)
+          const { promise } = await onReturnPromiseOfLargeString()
+          const resolved = await promise
+          const chunks: number[][] = []
+          for await (const chunk of await onReturnStreamWithEmptyChunk()) chunks.push(Array.from(chunk))
+          setResult(
+            JSON.stringify({
+              yielded: yielded.map((value) => (value === 'x'.repeat(3_000_000) ? 'x * 3e6' : value)),
+              resolved: resolved === 'y'.repeat(3_000_000) ? 'y * 3e6' : resolved.length,
+              chunks,
+            }),
+          )
+        }}
+      >
+        Values larger than a channel part
+      </button>
+
+      <button
+        id="test-stream-then-circular"
+        onClick={async () => {
+          setResult('')
+          try {
+            await onStreamThenCircular()
+            setResult(JSON.stringify({ error: 'none' }))
+          } catch (err) {
+            setResult(JSON.stringify({ error: (err as Error).message }))
+          }
+        }}
+      >
+        Stream beside a value that can't be serialized
+      </button>
+
+      <button
+        id="test-upload-chunk-not-bytes"
+        onClick={async () => {
+          setResult('')
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              // A string, as a JavaScript app enqueues one.
+              controller.enqueue('str' as unknown as Uint8Array)
+              controller.close()
+            },
+          })
+          let call = 'resolved'
+          let read = ''
+          try {
+            read = await onReadUpload(stream)
+          } catch (err) {
+            call = (err as Error).message
+          }
+          setResult(JSON.stringify({ call, read }))
+        }}
+      >
+        Upload a chunk that isn't a Uint8Array
       </button>
 
       {(['finish-first', 'cancel-first'] as const).map((order) => (
@@ -770,42 +975,6 @@ function Streaming() {
           One stream finished, the other cancelled ({order})
         </button>
       ))}
-
-      {(
-        [
-          ['stream', 'stream'],
-          ['generator', 'generator'],
-          ['download', 'generator'],
-        ] as const
-      ).map(([firstKind, secondKind]) => (
-        <button
-          key={`${firstKind}-${secondKind}`}
-          id={`test-two-endless-${firstKind}-${secondKind}`}
-          onClick={async () => {
-            const returned = await onReturnTwoEndless(firstKind, secondKind)
-            const first = endlessReader(firstKind, returned.first)
-            const second = endlessReader(secondKind, returned.second)
-            returnedRef.current = returned
-            twoEndless.current = { first, second }
-            setTwoEndlessProgress({ key: returned.key, first: 0, second: 0, errors: [] })
-            readEndless(first, 'first')
-          }}
-        >
-          Two endless values, read only the first ({firstKind}, {secondKind})
-        </button>
-      ))}
-      <button id="test-two-endless-read-second" onClick={() => readEndless(twoEndless.current!.second, 'second')}>
-        Two endless values: read the second
-      </button>
-      <button id="test-two-endless-cancel-second" onClick={() => twoEndless.current!.second.cancel()}>
-        Two endless values: cancel the second
-      </button>
-      <button id="test-two-endless-cancel-first" onClick={() => twoEndless.current!.first.cancel()}>
-        Two endless values: cancel the first
-      </button>
-      <button id="test-two-endless-abort" onClick={() => abort(returnedRef.current as object)}>
-        Two endless values: abort the call
-      </button>
 
       <button
         id="test-cancel-failed-streams"
@@ -841,63 +1010,13 @@ async function transferToWorker(worker: Worker, name: string, stream: ReadableSt
   }
 }
 
-type EndlessReader = { read(): Promise<number | null>; cancel(): unknown }
-
-type TwoEndlessProgress = { key: string; first: number; second: number; errors: string[] }
-
-function setTwoEndlessProgress(progress: TwoEndlessProgress) {
-  ;(window as unknown as { __twoEndless: TwoEndlessProgress }).__twoEndless = progress
-}
-function getTwoEndlessProgress() {
-  return (window as unknown as { __twoEndless: TwoEndlessProgress }).__twoEndless
-}
-
-/** Reads chunks of an endless value down to each chunk's number, or `null` once cancelled. */
-function endlessReader(kind: 'stream' | 'generator' | 'download', value: any): EndlessReader {
-  if (kind === 'generator') {
-    return {
-      read: async () => {
-        const { done, value: chunk } = await value.next()
-        return done ? null : chunk.n
-      },
-      cancel: () => value.return(),
-    }
-  }
-  const reader: ReadableStreamDefaultReader<Uint8Array> = (kind === 'download' ? value.stream() : value).getReader()
-  return {
-    read: async () => {
-      const { done, value: chunk } = await reader.read()
-      if (done) return null
-      if (chunk.length !== 64 * 1024) throw new Error(`a chunk of ${chunk.length} bytes`)
-      return new DataView(chunk.buffer, chunk.byteOffset).getUint32(0)
-    },
-    cancel: () => reader.cancel(),
-  }
-}
-
-/** Reads to the end, counting chunks, and records any chunk out of order. */
-async function readEndless(reader: EndlessReader, name: 'first' | 'second') {
-  const progress = getTwoEndlessProgress()
-  try {
-    while (true) {
-      const n = await reader.read()
-      if (n === null) return
-      if (n !== progress[name]) progress.errors.push(`${name}: chunk ${n} where ${progress[name]} was due`)
-      progress[name]++
-      // An endless fast stream would otherwise keep the page from handling a click.
-      if (progress[name] % 8 === 0) await new Promise((resolve) => setTimeout(resolve))
-    }
-  } catch (err: any) {
-    progress.errors.push(`${name}: ${err?.message}`)
-  }
-}
-
-async function byteCount(stream: ReadableStream<Uint8Array>): Promise<number> {
+async function byteCount(stream: ReadableStream<Uint8Array>, onBytes?: (bytes: number) => void): Promise<number> {
   let bytes = 0
   const reader = stream.getReader()
   while (true) {
     const { done, value } = await reader.read()
     if (done) return bytes
     bytes += value.byteLength
+    onBytes?.(bytes)
   }
 }

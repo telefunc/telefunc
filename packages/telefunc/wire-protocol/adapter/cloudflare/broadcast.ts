@@ -2,18 +2,22 @@
 export { CloudflareBroadcastTransport, CloudflareBroadcastAuthorityState }
 export type { BroadcastDeliverRequest, BroadcastPublishRequest, TelefuncBroadcastStub }
 
-import { CHANNEL_BUFFER_LIMIT_BYTES } from '../../constants.js'
+import { PUBLISH_HOLD_BYTES } from '../../constants.js'
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorScale, getDeterministicKeyBucketIndex } from './routing.js'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
+import { Fifo } from '../../../utils/Fifo.js'
 import { OrderedStubs } from './OrderedStubs.js'
+import { Outcome } from '../../channel/channel.js'
 import type {
   BroadcastBinaryOnMessage,
+  BroadcastDelivery,
   BroadcastOnMessage,
   BroadcastPublishResult,
   BroadcastAdapter,
-  BroadcastUnsubscribe,
+  Listening,
 } from '../../broadcast/broadcastAdapter.js'
+import type { AsyncLocalStorage } from 'node:async_hooks'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 
@@ -63,12 +67,14 @@ type BufferedPublish = {
   pending: PendingBucketPublish
 }
 
-/** KV takes one write a second per key, so a write it refuses is expected. */
-async function warnRefusedWrite(write: Promise<void>, warning: string): Promise<void> {
+/** KV takes one write a second per key, so a write it refuses is expected. Whether KV took it. */
+async function warnRefusedWrite(write: Promise<void>, warning: string): Promise<boolean> {
   try {
     await write
+    return true
   } catch (err) {
     assertWarning(false, `${warning} (${String(err)})`, { onlyOnce: false })
+    return false
   }
 }
 
@@ -78,8 +84,7 @@ async function warnRefusedWrite(write: Promise<void>, warning: string): Promise<
  * Payload-agnostic — each entry carries its own send function (works for both text and binary).
  */
 class CloudflareBucketPublishBuffer {
-  private entries: BufferedPublish[] = []
-  private head = 0
+  private readonly entries = new Fifo<BufferedPublish>()
   private totalBytes = 0
   private readonly maxBytes: number
   private isFlushing = false
@@ -112,11 +117,9 @@ class CloudflareBucketPublishBuffer {
     if (this.isFlushing) return
     this.isFlushing = true
     try {
-      while (this.head < this.entries.length) {
-        // It leaves before its send: eviction and clear() are for what still waits, and its send holds its bytes.
-        const entry = this.entries[this.head++]!
+      // Each leaves before its send: eviction and clear() are for what still waits, and its send holds its bytes.
+      for (let entry = this.entries.shift(); entry !== undefined; entry = this.entries.shift()) {
         this.totalBytes -= entry.bytes
-        this.compact()
         try {
           const ack = await entry.send()
           entry.pending.resolve(ack)
@@ -130,11 +133,9 @@ class CloudflareBucketPublishBuffer {
   }
 
   clear(): void {
-    for (let i = this.head; i < this.entries.length; i++) {
-      this.entries[i]!.pending.reject(new Error('Keyed publish was dropped from the Cloudflare bucket buffer'))
+    for (let entry = this.entries.shift(); entry !== undefined; entry = this.entries.shift()) {
+      entry.pending.reject(new Error('Keyed publish was dropped from the Cloudflare bucket buffer'))
     }
-    this.entries.length = 0
-    this.head = 0
     this.totalBytes = 0
   }
 
@@ -153,21 +154,14 @@ class CloudflareBucketPublishBuffer {
   }
 
   private evict(): void {
-    while (this.totalBytes > this.maxBytes && this.head < this.entries.length) {
-      this.entries[this.head]!.pending.reject(
+    while (this.totalBytes > this.maxBytes) {
+      const entry = this.entries.shift()
+      if (entry === undefined) return
+      entry.pending.reject(
         new Error('Keyed publish was evicted from the Cloudflare bucket buffer before bucket setup completed'),
       )
-      this.totalBytes -= this.entries[this.head]!.bytes
-      this.head++
+      this.totalBytes -= entry.bytes
     }
-    this.compact()
-  }
-
-  private compact(): void {
-    if (this.head === 0) return
-    if (this.head < this.entries.length - this.head) return
-    this.entries = this.entries.slice(this.head)
-    this.head = 0
   }
 }
 
@@ -177,6 +171,9 @@ class MemberBucketState {
   setupsInFlight = 0
   /** Each Durable Object with subscribers on the key here, with how many: each has a presence of its own. */
   readonly owners = new Map<string, number>()
+  /** Each owner's presence KV hasn't written, by owner: being written, its subscribers are in effect once it is; refused,
+   *  they never are, nor any it gets until a refresh writes it or it has none left. */
+  readonly unwritten = new Map<string, Outcome>()
   refreshTimer: ReturnType<typeof setInterval> | null = null
   /** A stub can only be used by the Durable Object that got it, and this state is the isolate's, so it holds none. */
   private readonly authority: () => TelefuncBroadcastStub
@@ -187,7 +184,7 @@ class MemberBucketState {
     this.key = key
     this.locationBucket = locationBucket
     this.authority = authority
-    this.pendingPublishes = new CloudflareBucketPublishBuffer(CHANNEL_BUFFER_LIMIT_BYTES)
+    this.pendingPublishes = new CloudflareBucketPublishBuffer(PUBLISH_HOLD_BYTES)
   }
 
   publish(serialized: string): Promise<BroadcastPublishResult> {
@@ -281,7 +278,7 @@ class CloudflareBroadcastAuthorityState {
 //   - memberStates: per key, the presences of the DOs with subscribers here and the publishes waiting on them
 //   - requestOwners: each request a DO received, with its name
 //   - locationBucket: set once on first attachIsolateInfo call
-//   - representativeDOName: the isolate's first DO, the owner of the server's own subscribers
+// The DO whose code runs is kept in `runningObject` (`runInObject`).
 // ---------------------------------------------------------------------------
 
 class CloudflareBroadcastTransport implements BroadcastAdapter {
@@ -291,8 +288,9 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   private binding: DurableObjectNamespace | null = null
   private kv: KVNamespace | null = null
   private locationBucket: LocationBucket | null = null
-  private representativeDOName: string | null = null
   private readonly memberStates = new Map<string, MemberBucketState>()
+  /** Each presence's KV write or delete under way, by its key and owner: the next one waits for it. */
+  private readonly presenceOperations = new Map<string, Promise<void>>()
   /** Each subscriber with the Durable Object whose context may write to its page. */
   private readonly textSubs = new Map<string, Map<BroadcastOnMessage, string>>()
   private readonly binarySubs = new Map<string, Map<BroadcastBinaryOnMessage, string>>()
@@ -301,10 +299,21 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   /** The stub to each key's authority of this synchronous run, which is one Durable Object's: its publishes in one run
    *  stay in order. Later runs may be another's, so they get their own. */
   private readonly authorityStubsOfThisRun = new Map<string, TelefuncBroadcastStub>()
+  /** The Durable Object whose code runs (`runInObject`); null on a Worker without AsyncLocalStorage. */
+  private readonly runningObject: AsyncLocalStorage<string> | null
 
-  constructor({ baseInstanceName, scale }: { baseInstanceName: string; scale?: CloudflareScale }) {
+  constructor({
+    baseInstanceName,
+    scale,
+    runningObject = null,
+  }: {
+    baseInstanceName: string
+    scale?: CloudflareScale
+    runningObject?: AsyncLocalStorage<string> | null
+  }) {
     this.baseInstanceName = baseInstanceName
     this.scale = scale
+    this.runningObject = runningObject
   }
 
   attachBinding(binding: DurableObjectNamespace, bindingName: string): void {
@@ -320,15 +329,18 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     this.requestOwners.set(request, doName)
   }
 
-  attachIsolateInfo(doName: string, locationBucket: LocationBucket): void {
+  /** Runs `run` as the Durable Object `doName`'s code: what it subscribes with no page's wire is `doName`'s. Without
+   *  AsyncLocalStorage no scope survives an await, so nothing is kept. */
+  runInObject<T>(doName: string, run: () => T): T {
+    return this.runningObject ? this.runningObject.run(doName, run) : run()
+  }
+
+  attachIsolateInfo(locationBucket: LocationBucket): void {
     assert(
       KNOWN_BROADCAST_BUCKETS.has(locationBucket),
       `attachIsolateInfo received invalid locationBucket "${locationBucket}".`,
     )
-    if (!this.locationBucket) {
-      this.locationBucket = locationBucket
-      this.representativeDOName = doName
-    }
+    this.locationBucket ??= locationBucket
   }
 
   // --- KV presence ---
@@ -343,11 +355,6 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     return this.locationBucket
   }
 
-  private requireRepresentativeDOName(): string {
-    assert(this.representativeDOName, 'Expected attachIsolateInfo() to be called before subscribe/publish.')
-    return this.representativeDOName
-  }
-
   private getPresenceKey(key: string, owner: string): string {
     return `tfps:${encodeURIComponent(key)}:${this.locationBucket}:${owner}`
   }
@@ -356,17 +363,60 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     return `tfps:${encodeURIComponent(key)}:`
   }
 
-  private async putPresence(key: string, owner: string): Promise<void> {
-    await warnRefusedWrite(
-      this.requireKV().put(this.getPresenceKey(key, owner), owner, { expirationTtl: PRESENCE_TTL_SECONDS }),
-      `KV refused to record that this Durable Object has subscribers to the Broadcast key ${JSON.stringify(key)}, so they may miss publishes made on other Durable Objects until Telefunc's next try, within ${PRESENCE_REFRESH_INTERVAL_MS / 1000} s`,
+  /** Writes `owner`'s presence again; once KV takes it, a refusal of that presence is no longer its subscribers'
+   *  outcome. One its owner got after leaving and coming back meanwhile is a presence the write didn't make. */
+  private async refreshPresence(key: string, memberState: MemberBucketState, owner: string): Promise<void> {
+    const unwritten = memberState.unwritten.get(owner)
+    const wrote = await this.warnRefusedPresence(key, this.writePresence(key, owner))
+    if (wrote && unwritten?.failure && memberState.unwritten.get(owner) === unwritten)
+      memberState.unwritten.delete(owner)
+  }
+
+  private writePresence(key: string, owner: string): Promise<void> {
+    return this.inPresenceOrder(key, owner, (kv, presenceKey) =>
+      kv.put(presenceKey, owner, { expirationTtl: PRESENCE_TTL_SECONDS }),
+    )
+  }
+
+  /** Runs `operation` on `owner`'s presence once every write and delete asked of it before has settled, so they go to
+   *  KV in the order asked: the delete of an owner that left after a write still under way, and the write of one that
+   *  came back after a delete still under way, which its subscribers' `opened` so waits for. An operation that throws at
+   *  once fails as one KV refuses does. */
+  private inPresenceOrder(
+    key: string,
+    owner: string,
+    operation: (kv: KVNamespace, presenceKey: string) => Promise<void>,
+  ): Promise<void> {
+    // Its KV name is formed in the operation too: `encodeURIComponent` throws on a key with a lone surrogate.
+    const presence = JSON.stringify([key, owner])
+    const previous = this.presenceOperations.get(presence) ?? Promise.resolve()
+    const done = previous.then(() => operation(this.requireKV(), this.getPresenceKey(key, owner)))
+    const settled = done.then(
+      () => {},
+      () => {},
+    )
+    this.presenceOperations.set(presence, settled)
+    void this.forgetPresenceOperation(presence, settled)
+    return done
+  }
+
+  /** Drops `presence`'s queue once `settled`, its last operation, has settled, unless another one joined it meanwhile. */
+  private async forgetPresenceOperation(presence: string, settled: Promise<void>): Promise<void> {
+    await settled
+    if (this.presenceOperations.get(presence) === settled) this.presenceOperations.delete(presence)
+  }
+
+  private warnRefusedPresence(key: string, write: Promise<void>): Promise<boolean> {
+    return warnRefusedWrite(
+      write,
+      `KV refused to record that this Durable Object has subscribers to the Broadcast key ${JSON.stringify(key)}, so they may miss publishes made on other Durable Objects until a later write of that record succeeds`,
     )
   }
 
   private async deletePresence(key: string, owner: string): Promise<void> {
     await warnRefusedWrite(
-      this.requireKV().delete(this.getPresenceKey(key, owner)),
-      `KV refused to remove the record that this Durable Object has subscribers to the Broadcast key ${JSON.stringify(key)}, so publishes to that key keep reaching this Durable Object, which no longer needs them, for up to ${PRESENCE_TTL_SECONDS} s`,
+      this.inPresenceOrder(key, owner, (kv, presenceKey) => kv.delete(presenceKey)),
+      `KV refused to remove the record that this Durable Object has subscribers to the Broadcast key ${JSON.stringify(key)}, so publishes to that key may still reach this Durable Object until the record expires, ${PRESENCE_TTL_SECONDS} s after its last write`,
     )
   }
 
@@ -406,21 +456,39 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     return binary !== undefined && binary.size > 0
   }
 
-  /** The Durable Object that may write to a subscriber's page; the server's own subscribers go with the isolate's first. */
-  private ownerOf(wireRequest: Request | undefined): string {
-    if (!wireRequest) return this.requireRepresentativeDOName()
+  /** The Durable Object that may write to a subscriber's page: its wire's; else the one whose code subscribes, where
+   *  the page will be, as a call and its page's wire reach one object. */
+  ownerOf(wireRequest: Request | undefined): string {
+    if (!wireRequest) return this.requireRunningObject()
     const owner = this.requestOwners.get(wireRequest)
     assert(owner, 'a wire opened by a request no Durable Object received')
     return owner
   }
 
-  /** Adds `onMessage` to `subsByKey` under `key`, with its owner's presence; the returned function removes both. */
+  /** The Durable Object whose code runs (`runInObject`). */
+  private requireRunningObject(): string {
+    assertUsage(
+      this.runningObject,
+      'Broadcast on Cloudflare finds the Durable Object its server-side subscriber runs in through AsyncLocalStorage: ' +
+        // spellcheck-ignore  nodejs_als is Cloudflare's AsyncLocalStorage compatibility flag
+        'add "nodejs_als" to the compatibility_flags of your wrangler.jsonc',
+    )
+    const doName = this.runningObject.getStore()
+    assertUsage(
+      doName !== undefined,
+      'Broadcast on Cloudflare subscribes on the server only in code a Durable Object runs: a telefunction, or a channel or broadcast callback',
+    )
+    return doName
+  }
+
+  /** Adds `onMessage` to `subsByKey` under `key`, with its owner's presence, which it is in effect once KV wrote, and
+   *  never where KV refused it. */
   private addSubscriber<OnMessage>(
     subsByKey: Map<string, Map<OnMessage, string>>,
     key: string,
     onMessage: OnMessage,
     wireRequest: Request | undefined,
-  ): BroadcastUnsubscribe {
+  ): Listening {
     const locationBucket = this.requireLocationBucket()
     const owner = this.ownerOf(wireRequest)
     let subs = subsByKey.get(key)
@@ -433,7 +501,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       subs.set(onMessage, owner)
       this.ensurePresence(key, locationBucket, owner)
     }
-    return () => {
+    const unsubscribe = () => {
       const current = subsByKey.get(key)
       const entryOwner = current?.get(onMessage)
       if (!current || entryOwner === undefined) return
@@ -441,15 +509,16 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       if (current.size === 0) subsByKey.delete(key)
       this.releasePresence(key, entryOwner)
     }
+    return { unsubscribe, opened: this.memberStates.get(key)?.unwritten.get(owner) }
   }
 
   // --- BroadcastAdapter interface ---
 
-  subscribe(key: string, onMessage: BroadcastOnMessage, wireRequest?: Request): BroadcastUnsubscribe {
+  subscribe(key: string, onMessage: BroadcastOnMessage, wireRequest?: Request): Listening {
     return this.addSubscriber(this.textSubs, key, onMessage, wireRequest)
   }
 
-  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, wireRequest?: Request): BroadcastUnsubscribe {
+  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, wireRequest?: Request): Listening {
     return this.addSubscriber(this.binarySubs, key, onMessage, wireRequest)
   }
 
@@ -535,7 +604,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     const info = { seq, timestamp }
     const activeBuckets = Array.from(presenceByBucket.keys())
     await Promise.all(
-      activeBuckets.map((activeBucket) => {
+      Array.from(presenceByBucket, ([activeBucket, doNames]) => {
         const coordinator = this.getBucketCoordinatorName(key, activeBucket)
         return authorityState.broadcastCalls.call(
           coordinator,
@@ -547,7 +616,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
               binaryData,
               forwarded: true,
               locationBucket: activeBucket,
-              doNames: presenceByBucket.get(activeBucket)!,
+              doNames,
               info,
             }),
         )
@@ -585,6 +654,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     if (count > 0) memberState.owners.set(owner, count)
     else {
       memberState.owners.delete(owner)
+      memberState.unwritten.delete(owner)
       void this.deletePresence(key, owner)
     }
     this.teardownPresenceIfEmpty(key)
@@ -604,17 +674,18 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
   private async initializePresence(key: string, memberState: MemberBucketState, owner: string): Promise<void> {
     memberState.setupsInFlight++
-    try {
-      await this.putPresence(key, owner)
-    } finally {
-      memberState.setupsInFlight--
-    }
-    // Its release may have deleted the presence before the put above wrote it.
-    if (!memberState.owners.has(owner)) void this.deletePresence(key, owner)
+    const written = this.writePresence(key, owner)
+    const unwritten = new Outcome()
+    void unwritten.follow(written)
+    memberState.unwritten.set(owner, unwritten)
+    const wrote = await this.warnRefusedPresence(key, written)
+    memberState.setupsInFlight--
+    // A refused write stays its owner's outcome until the refresh below writes it.
+    if (wrote && memberState.unwritten.get(owner) === unwritten) memberState.unwritten.delete(owner)
     if (memberState.setupsInFlight > 0) return
 
     memberState.refreshTimer ??= setInterval(() => {
-      for (const current of memberState.owners.keys()) void this.putPresence(key, current)
+      for (const current of memberState.owners.keys()) void this.refreshPresence(key, memberState, current)
     }, PRESENCE_REFRESH_INTERVAL_MS)
 
     await memberState.pendingPublishes.flush()
@@ -649,11 +720,12 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
 /** Calls each of `subs` the Durable Object `doName` owns with `payload`. */
 function deliverToOwned<T>(
-  subs: Map<(payload: T, info: WirePublishInfo) => void, string> | undefined,
+  subs: Map<(payload: T, info: WirePublishInfo, delivery?: BroadcastDelivery) => void, string> | undefined,
   doName: string,
   payload: T,
   info: WirePublishInfo,
 ): void {
   if (subs === undefined) return
-  for (const [cb, owner] of subs) if (owner === doName) cb(payload, info)
+  const delivery: BroadcastDelivery = { body: undefined }
+  for (const [cb, owner] of subs) if (owner === doName) cb(payload, info, delivery)
 }

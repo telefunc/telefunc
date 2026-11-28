@@ -1,9 +1,73 @@
 export { testFileUpload }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult, serverRuntime } from '../../e2e-utils'
+import { Agent, request } from 'node:http'
+import { request as requestOverTls } from 'node:https'
 
-function testFileUpload() {
+// Calls sent as the Telefunc client sends a binary call (`x-telefunc-request: bin`, then
+// `[u32 metadata length][metadata][the files' bytes]`).
+const telefuncFile = '/pages/file-upload/FileUpload.telefunc.ts'
+const encoder = new TextEncoder()
+
+/** A binary call to `name` with one File of `size` bytes. */
+function binaryCall(name: string, size: number): Uint8Array<ArrayBuffer> {
+  const metadata = encoder.encode(
+    JSON.stringify({
+      file: telefuncFile,
+      name,
+      args: [`!TelefuncFile:${JSON.stringify({ index: 0, size, name: 'upload.txt', type: '', lastModified: 0 })}`],
+    }),
+  )
+  const body = new Uint8Array(4 + metadata.length + size)
+  new DataView(body.buffer).setUint32(0, metadata.length)
+  body.set(metadata, 4)
+  body.fill(120, 4 + metadata.length)
+  return body
+}
+
+/** Sends `bodies` one after the other on one HTTP/1.1 keep-alive connection, without waiting for an answer in between. */
+async function postOnOneConnection(bodies: { kind: 'bin' | 'txt'; body: Uint8Array }[]) {
+  const agent = new Agent({ keepAlive: true, maxSockets: 1 })
+  try {
+    return await Promise.all(
+      bodies.map(
+        ({ kind, body }) =>
+          new Promise<{ status: number; text: string; socket: unknown }>((resolve, reject) => {
+            const req = request(`${getServerUrl()}/_telefunc`, {
+              method: 'POST',
+              agent,
+              headers: { 'x-telefunc-request': kind, 'content-length': body.byteLength },
+            })
+            req.on('response', (response) => {
+              let text = ''
+              response.setEncoding('utf8')
+              response.on('data', (chunk: string) => (text += chunk))
+              response.on('end', () => resolve({ status: response.statusCode!, text, socket: req.socket }))
+            })
+            req.on('error', reject)
+            req.end(body)
+          }),
+      ),
+    )
+  } finally {
+    agent.destroy()
+  }
+}
+
+/** `cookie` sends a call to the server instance that set it, behind the Docker lanes' sticky load balancer. */
+async function post(kind: 'bin' | 'txt', body: BodyInit, cookie?: string) {
+  const headers: Record<string, string> = { 'x-telefunc-request': kind }
+  if (cookie !== undefined) headers.cookie = cookie
+  const response = await fetch(`${getServerUrl()}/_telefunc`, { method: 'POST', headers, body })
+  return {
+    status: response.status,
+    text: await response.text(),
+    cookie: response.headers.get('set-cookie')?.split(';', 1)[0],
+  }
+}
+
+function testFileUpload(isDev = false, inDocker = false) {
   test('file upload: single file + text arg', async () => {
     await navigate(`${getServerUrl()}/file-upload`)
 
@@ -20,7 +84,7 @@ function testFileUpload() {
     })
   })
 
-  test('file upload: multiple files', async () => {
+  test('file upload: multiple files read in parallel', async () => {
     await page.click('#test-multiple')
     await autoRetry(async () => {
       const result = await getResult('#upload-result')
@@ -82,6 +146,26 @@ function testFileUpload() {
       const result = await getResult('#upload-result')
       expect(result.text2).toBe('BBB')
       expect(result.file1Error).toBeTruthy()
+    })
+  })
+
+  test('file upload: cancelling a partially read first file and an unread second file leaves the third intact', async () => {
+    await page.click('#test-cancel-second')
+    await autoRetry(async () => {
+      const result = await getResult('#upload-result')
+      expect(result.firstBytes).greaterThan(0)
+      expect(result.firstBytes).lessThan(16 * 1024 * 1024)
+      expect(result.text3).toBe('CCC')
+    })
+  })
+
+  test('file upload: after a skipped file fails to start, the next file reads its own bytes', async () => {
+    await page.click('#test-after-failed-start')
+    await autoRetry(async () => {
+      const result = await getResult('#upload-result')
+      expect(result.text2).toBe('BBB')
+      expect(result.file1Error).toContain('has already been consumed')
+      expect(result.text3).toBe('CCC')
     })
   })
 
@@ -223,6 +307,80 @@ function testFileUpload() {
     await autoRetry(async () => {
       const result = await getResult('#upload-result')
       expect(result).deep.equal({ ok: true })
+    })
+  })
+
+  test('file upload: reading a discarded file after its call ends reports server truncation', async () => {
+    const ignored = await post('bin', binaryCall('onLeaveFileUnread', 1000))
+    expect(ignored.status).toBe(200)
+    expect(ignored.text).toContain('ignored')
+    const read = await post(
+      'txt',
+      JSON.stringify({ file: telefuncFile, name: 'onReadDiscardedFile', args: [] }),
+      ignored.cookie,
+    )
+    expect(read.text).toContain('The server answered before reading the request body to its end')
+  })
+
+  test('file upload: a binary call whose body ends before its envelope is complete is refused as malformed (400)', async () => {
+    const statuses: number[] = []
+    for (const body of ['', new Uint8Array([0, 0]), new Uint8Array([0, 0, 3, 232, 123])]) {
+      statuses.push((await post('bin', body)).status)
+    }
+    expect(statuses).deep.equal([400, 400, 400])
+    if (isDev) {
+      await autoRetry(() => {
+        expectLog('Malformed request in development', { filter: (log) => log.logSource === 'stderr' })
+      })
+    }
+  })
+
+  // On Node's HTTP/1.1 server, which keeps the connection for the next call.
+  if (process.env.NO_HTTPS && serverRuntime() === 'node')
+    test('file upload: on an HTTP/1.1 keep-alive connection, a call that leaves its 4 MiB File unread does not hold up the next call', async () => {
+      const [ignored, greeted] = await postOnOneConnection([
+        { kind: 'bin', body: binaryCall('onIgnoreFile', 4 * 1024 * 1024) },
+        { kind: 'txt', body: encoder.encode(JSON.stringify({ file: telefuncFile, name: 'onGreet', args: [] })) },
+      ])
+      expect(ignored!.text).toContain('ignored')
+      expect(greeted!.text).toContain('hello')
+      expect(greeted!.socket).toBe(ignored!.socket)
+    })
+
+  // Caddy in Docker holds a half-open 4-byte upload stream until its read timeout; direct server lanes cover this.
+  if (!inDocker)
+    test('file upload: a binary call whose metadata length says 2 GiB is answered 400 before any metadata is sent', async () => {
+      const started = Date.now()
+      const status = await new Promise<number>((resolve, reject) => {
+        const url = `${getServerUrl()}/_telefunc`
+        const options = { method: 'POST', headers: { 'x-telefunc-request': 'bin' } }
+        const req = url.startsWith('https:')
+          ? requestOverTls(url, { ...options, rejectUnauthorized: false })
+          : request(url, options)
+        req.on('response', (response) => {
+          resolve(response.statusCode!)
+          req.destroy()
+        })
+        req.on('error', reject)
+        const header = new Uint8Array(4)
+        new DataView(header.buffer).setUint32(0, 2 ** 31)
+        // The body stays open: no metadata follows the length.
+        req.write(header)
+      })
+      expect(status).toBe(400)
+      expect(Date.now() - started).lessThan(1000)
+      if (isDev) {
+        await autoRetry(() => {
+          expectLog('Malformed request in development', { filter: (log) => log.logSource === 'stderr' })
+        })
+      }
+    })
+
+  test("file upload: a telefunction that transfers one File's chunks away reads the next File's bytes intact", async () => {
+    await navigate(`${getServerUrl()}/file-upload`)
+    await page.click('#test-transfer-first-file')
+    await autoRetry(async () => {
+      expect(await getResult('#upload-result')).deep.equal({ firstBytes: 1024 * 1024, secondSum: 2 * 1024 * 1024 })
     })
   })
 }

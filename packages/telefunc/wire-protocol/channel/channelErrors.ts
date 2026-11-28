@@ -1,17 +1,20 @@
-export { ChannelClosedError, ChannelOverflowError, replayLossError }
+export { ChannelClosedError, ChannelOverflowError, ChannelCloseUnknownError, ChannelPageLeftError }
 
 import { NetworkError } from '../../shared/NetworkError.js'
+import { markErrorClass } from '../../shared/markErrorClass.js'
 
-/** Thrown synchronously by `send()` when the channel is already closed.
- *  Also used to reject pending ack promises when the channel shuts down. */
+/** The channel is closed: `send()` on it throws this synchronously, and acknowledged sends still pending reject with it
+ *  as it shuts down. A channel the server ends closes with it too: a refused frame, a broadcast subscription that didn't
+ *  take effect, a close that timed out. */
 class ChannelClosedError extends Error {
-  constructor(message = 'Channel is closed') {
-    super(message)
+  constructor(message = 'Channel is closed', options?: { cause?: unknown }) {
+    super(message, options)
     this.name = 'ChannelClosedError'
   }
 }
 
-/** Used when a buffered channel send is dropped in order to keep memory usage hard-capped. */
+/** Telefunc can't hold more for the channel: a refused `send()`, `{ ack: true }` reply or `publish()` rejects with it and
+ *  the channel stays open; an overloaded inbound channel or a broadcast subscriber too far behind closes with it. */
 class ChannelOverflowError extends Error {
   constructor(message = 'Channel send buffer overflow') {
     super(message)
@@ -19,10 +22,31 @@ class ChannelOverflowError extends Error {
   }
 }
 
-/** How a channel ends when a reconnect needs what `side`'s replay buffer dropped. */
-function replayLossError(side: 'server' | 'client'): NetworkError {
-  return new NetworkError(
-    `Channel closed: a reconnect needed messages the ${side}'s replay buffer had dropped to stay within its size. Raise config.channel.${side}ReplayBuffer, or ${side}ReplayBufferBinary for binary messages and streams.`,
-    true,
-  )
+/** A channel whose connection was lost during its close, on either end: the verdict that both ends' cleanups finished
+ *  within the timeout couldn't cross, so whether they did can't be known. It is a channel `NetworkError`, so code that
+ *  handles a lost connection handles it; where a lost connection is why, `cause` is its error. */
+class ChannelCloseUnknownError extends NetworkError {
+  constructor(options?: { cause?: unknown }) {
+    super(
+      "Channel closed, but how its close ended can't be known: the connection was lost before both ends' verdict crossed",
+      true,
+      options,
+    )
+    this.name = 'ChannelCloseUnknownError'
+  }
 }
+
+/** How the server's channel ends when its page leaves for good (closed, reloaded or navigated away), during a close or
+ *  outside one: the page's side can't finish, and what the server still held for it reaches no one. A channel
+ *  `NetworkError`. */
+class ChannelPageLeftError extends NetworkError {
+  constructor() {
+    super('Channel ended: its page left (the tab was closed, reloaded or navigated away)', true)
+    this.name = 'ChannelPageLeftError'
+  }
+}
+
+markErrorClass(ChannelClosedError, 'ChannelClosedError')
+markErrorClass(ChannelOverflowError, 'ChannelOverflowError')
+markErrorClass(ChannelCloseUnknownError, 'ChannelCloseUnknownError')
+markErrorClass(ChannelPageLeftError, 'ChannelPageLeftError')

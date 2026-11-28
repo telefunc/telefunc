@@ -1,4 +1,5 @@
 export {
+  U32_SIZE,
   encodeU32,
   decodeU32,
   concat,
@@ -45,8 +46,8 @@ function writeU32(bytes: Uint8Array, at: number, n: number): void {
   bytes[at + 3] = n
 }
 
-function decodeU32(buf: Uint8Array<ArrayBuffer>, offset = 0): number {
-  return new DataView(buf.buffer, buf.byteOffset + offset, U32_SIZE).getUint32(0, false)
+function decodeU32(bytes: Uint8Array): number {
+  return ((bytes[0]! << 24) | (bytes[1]! << 16) | (bytes[2]! << 8) | bytes[3]!) >>> 0
 }
 
 function concat(...parts: Uint8Array<ArrayBuffer>[]): Uint8Array<ArrayBuffer> {
@@ -183,7 +184,7 @@ function parseSseRequestMetadata(value: unknown): SseRequestMetadata {
 
 const INDEX_BYTES = 1 // u8 stream index
 
-function encodeIndexedFrame(index: number, payload: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+function encodeIndexedFrame(index: number, payload: Uint8Array): Uint8Array<ArrayBuffer> {
   const bodyLen = INDEX_BYTES + payload.byteLength
   const frame = new Uint8Array(U32_SIZE + bodyLen)
   writeU32(frame, 0, bodyLen)

@@ -187,8 +187,10 @@ services:
 
   proxy:
     image: caddy:2-alpine
+    # `TELEFUNC_DOCKER_PROXY_PORTS=443` lets Docker assign the host port, read back with `docker compose port proxy 443`,
+    # where the machine is shared; the project's name is compose's own `COMPOSE_PROJECT_NAME`.
     ports:
-      - "8443:443"
+      - "${TELEFUNC_DOCKER_PROXY_PORTS:-8443:443}"
     configs:
       - source: caddyfile
         target: /etc/caddy/Caddyfile

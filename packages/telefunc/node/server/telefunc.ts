@@ -7,15 +7,21 @@ import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
 import { nodeReadableToWebRequest, normalizeHeaders } from '../../utils/nodeReadableToWebRequest.js'
 import type { Readable, Writable } from 'node:stream'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import { getTelefuncUrl } from './serverConfig.js'
+import { getRequestPathname, readRequestUrl } from '../../utils/getUrlPathname.js'
+import { REQUEST_KIND, REQUEST_KIND_HEADER } from '../../wire-protocol/wire/requestKind.js'
 
 type HttpRequestResolved = {
   request: Request
   /** Node `Readable` source for the request body, when the entry adapter has one
    *  (currently: `serve/node.ts` passes its `IncomingMessage`). Downstream body
-   *  consumers prefer this over `request.body` to skip Node's webstreams overhead.
+   *  consumers read it directly for binary and SSE requests, which have no Web body.
    *  `undefined` on Web-runtime adapters (`{ request }` input from Bun / Deno / edge). */
   readable?: Readable
   context?: Telefunc.Context
+  /** Signals a disconnect even if a read of the request body stays pending. */
+  clientGone: AbortSignal
 }
 
 type HttpRequest =
@@ -56,12 +62,21 @@ type HttpRequest =
 async function serve(httpRequest: HttpRequest): Promise<HttpResponse> {
   assertHttpRequest(httpRequest, arguments.length)
   assertRequestSignalFlag()
-  const httpRequestResolved = await resolveHttpRequest(httpRequest)
+  return runRequest(httpRequest)
+}
+
+async function runRequest(httpRequest: HttpRequest, response?: Writable): Promise<HttpResponse> {
+  const httpRequestResolved = await resolveHttpRequest(httpRequest, response)
+  let releaseClientGone = true
   try {
-    return await runTelefunc(httpRequestResolved)
+    const httpResponse = await runTelefunc(httpRequestResolved)
+    // A 2xx call can return a channel/stream that keeps reading its upload after answering.
+    if (httpResponse.statusCode < 400) releaseClientGone = false
+    return httpResponse
   } finally {
     // Past this, `httpResponse.pipe(res)` ends a streaming response's body once the client is gone.
     httpRequestResolved.unwatch?.()
+    if (releaseClientGone) httpRequestResolved.unwatchClientGone?.()
   }
 }
 
@@ -75,15 +90,30 @@ function assertRequestSignalFlag(): void {
   )
 }
 
-/** `serve()` for adapters holding the Node.js `res`, so that a client disconnect aborts `request.signal`. */
+/** Handles matching requests for the Node adapter and Vite's middleware. */
 async function serveNode(
-  httpRequest: Extract<HttpRequest, { readable: Readable }>,
-  response: Writable,
-): Promise<HttpResponse> {
+  req: IncomingMessage & { originalUrl?: string },
+  res: ServerResponse,
+  context?: Telefunc.Context,
+): Promise<boolean> {
+  if (res.headersSent) return false
+  const url = req.originalUrl || req.url
+  if (!url || getRequestPathname(url) !== getTelefuncUrl()) return false
+
+  const input = { url, method: req.method || 'GET', readable: req, headers: req.headers }
+  const httpRequest = context ? { ...input, context } : input
   assertHttpRequest(httpRequest, 1)
-  const httpRequestResolved = await resolveHttpRequest(httpRequest, response)
-  const httpResponse = await runTelefunc(httpRequestResolved)
-  return httpResponse
+  const httpResponse = await runRequest(httpRequest, res)
+  httpResponse.headers.forEach(([name, value]) => res.setHeader(name, value))
+  res.statusCode = httpResponse.statusCode
+  res.socket?.setNoDelay(true)
+  // An HTTP/1.1 400 response that refused an unread body cannot reuse the keep-alive socket (RFC 9112 §9.6).
+  if (req.httpVersionMajor < 2 && httpResponse.statusCode === 400 && !req.readableEnded) {
+    res.setHeader('Connection', 'close')
+  }
+  res.flushHeaders()
+  await httpResponse.pipe(res)
+  return true
 }
 
 /** @deprecated `telefunc()` is deprecated, use `new Telefunc()` instead, see https://telefunc.com/Telefunc */
@@ -98,21 +128,38 @@ async function telefunc(httpRequest: HttpRequest): Promise<HttpResponse> {
 async function resolveHttpRequest(
   httpRequest: HttpRequest,
   response?: Writable,
-): Promise<HttpRequestResolved & { unwatch?: () => void }> {
+): Promise<HttpRequestResolved & { unwatch?: () => void; unwatchClientGone?: () => void }> {
   if ('request' in httpRequest) {
-    return { request: httpRequest.request, context: httpRequest.context }
+    // A `Request` handed over as it is: its signal says its client left, as the Fetch standard has it.
+    return {
+      request: httpRequest.request,
+      context: httpRequest.context,
+      clientGone: httpRequest.request.signal,
+    }
   }
   // `url` is either the full URL (e.g. `request.url`) or only its pathname (e.g. `req.originalUrl`)
-  const url = new URL(httpRequest.url, 'http://localhost').href
+  const url = readRequestUrl(httpRequest.url)
+  assertUsage(url, '`serve({ url })`: argument `url` should be a valid request URL or path.')
   if ('readable' in httpRequest) {
-    const { request, unwatch } = await nodeReadableToWebRequest(
+    const headers = new Headers(normalizeHeaders(httpRequest.headers))
+    const kind = headers.get(REQUEST_KIND_HEADER)
+    const nativeBody = kind === REQUEST_KIND.BINARY || kind === REQUEST_KIND.SSE
+    const { request, unwatch, unwatchClientGone, clientGone } = await nodeReadableToWebRequest(
       httpRequest.readable,
-      url,
+      url.href,
       httpRequest.method,
-      httpRequest.headers,
+      headers,
+      nativeBody,
       response,
     )
-    return { request, readable: httpRequest.readable, context: httpRequest.context, unwatch }
+    return {
+      request,
+      readable: httpRequest.readable,
+      context: httpRequest.context,
+      clientGone,
+      unwatch,
+      unwatchClientGone,
+    }
   }
   // Backward compat: construct a Request from primitives
   const request = new Request(url, {
@@ -120,7 +167,11 @@ async function resolveHttpRequest(
     body: httpRequest.body,
     headers: normalizeHeaders(httpRequest.headers),
   })
-  return { request, context: httpRequest.context }
+  return {
+    request,
+    context: httpRequest.context,
+    clientGone: request.signal,
+  }
 }
 
 function assertHttpRequest(httpRequest: unknown, numberOfArguments: number) {

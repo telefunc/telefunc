@@ -21,10 +21,16 @@ function getCiJobs() {
     os: 'windows-latest',
     node_version: '26',
   }
-  // The oldest Node.js Telefunc supports.
+  // The oldest Node.js major Telefunc supports, at its latest release.
   const ubuntuOldest = {
     os: 'ubuntu-latest',
     node_version: '22',
+  }
+  // The lowest Node.js that `engines` allows: before 22.21 Node has no `shouldUpgradeCallback`, and Telefunc's WebSocket
+  // answers a request with `Upgrade` that isn't Telefunc's itself.
+  const ubuntuLowest = {
+    os: 'ubuntu-latest',
+    node_version: '22.0.0',
   }
   const setups = [ubuntu, win]
   const setupModern = [ubuntu]
@@ -34,7 +40,7 @@ function getCiJobs() {
     {
       name: 'Vitest',
       command: 'pnpm run test:units',
-      setups: [ubuntu, ubuntuOldest],
+      setups: [ubuntu, ubuntuOldest, ubuntuLowest],
     },
 
     // TypeScript

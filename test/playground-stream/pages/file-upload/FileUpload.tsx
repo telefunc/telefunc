@@ -9,6 +9,8 @@ import {
   onUploadArrayBuffer,
   onReadTwice,
   onUploadOutOfOrder,
+  onUploadCancelSecond,
+  onUploadAfterFailedStart,
   onUploadBackpressure,
   onUploadSlice,
   onUploadEmpty,
@@ -22,6 +24,7 @@ import {
   onUploadConcurrent,
   onUploadProps,
   onUploadIgnored,
+  onTransferFirstFile,
 } from './FileUpload.telefunc'
 
 function FileUpload() {
@@ -138,6 +141,35 @@ function FileUpload() {
         }}
       >
         Out of order
+      </button>
+
+      <button
+        id="test-cancel-second"
+        onClick={async () => {
+          // The first file large enough that its bytes still arrive as the server cancels the second
+          const res = await onUploadCancelSecond(
+            file('first.txt', 'A'.repeat(16 * 1024 * 1024)),
+            file('second.txt', 'BBB'),
+            file('third.txt', 'CCC'),
+          )
+          setResult(JSON.stringify(res))
+        }}
+      >
+        Cancel the second file
+      </button>
+
+      <button
+        id="test-after-failed-start"
+        onClick={async () => {
+          const res = await onUploadAfterFailedStart(
+            file('first.txt', 'AAA'),
+            file('second.txt', 'BBB'),
+            file('third.txt', 'CCC'),
+          )
+          setResult(JSON.stringify(res))
+        }}
+      >
+        After a failed start
       </button>
 
       <button
@@ -264,6 +296,18 @@ function FileUpload() {
         }}
       >
         Ignored files
+      </button>
+
+      <button
+        id="test-transfer-first-file"
+        onClick={async () => {
+          const size = 1024 * 1024
+          const first = new File([new Uint8Array(size).fill(1)], 'first.bin')
+          const second = new File([new Uint8Array(size).fill(2)], 'second.bin')
+          setResult(JSON.stringify(await onTransferFirstFile(first, second)))
+        }}
+      >
+        First file's chunks transferred
       </button>
 
       <pre id="upload-result">{result}</pre>

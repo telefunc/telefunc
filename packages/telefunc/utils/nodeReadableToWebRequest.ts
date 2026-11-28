@@ -2,7 +2,7 @@ export { nodeReadableToWebRequest, normalizeHeaders }
 
 import type { EventEmitter } from 'node:events'
 import type { Readable, Writable } from 'node:stream'
-import { loadStreamNodeModule } from './loadStreamNodeModule.js'
+import { getStreamNodeModule, loadStreamNodeModuleOnce } from './loadStreamNodeModule.js'
 import { assertIsNotBrowser } from './assertIsNotBrowser.js'
 assertIsNotBrowser()
 
@@ -12,28 +12,43 @@ async function nodeReadableToWebRequest(
   readable: Readable,
   url: string,
   method: string,
-  headers: HeadersInput,
+  headers: Headers,
+  nativeBody: boolean,
   response?: Writable,
-): Promise<{ request: Request; unwatch: () => void }> {
-  const { Readable: ReadableClass } = await loadStreamNodeModule()
-  // `new Request()` refuses a body for these methods.
-  const hasBody = !['GET', 'HEAD'].includes(method.toUpperCase())
-  const body = hasBody ? (ReadableClass.toWeb(readable) as ReadableStream<Uint8Array>) : null
-
-  const headerPairs = normalizeHeaders(headers)
-
+): Promise<{ request: Request; unwatch: () => void; unwatchClientGone: () => void; clientGone: AbortSignal }> {
+  // Even a closed readable can still emit its error on the next tick.
+  const unwatchEarlyError = () => {
+    readable.off('error', ignoreEarlyReadableError)
+    readable.off('close', unwatchEarlyError)
+    readable.off('newListener', onNewListener)
+  }
+  const onNewListener = (event: string | symbol, listener: (...args: unknown[]) => void) => {
+    if (event === 'error' && listener !== ignoreEarlyReadableError) unwatchEarlyError()
+  }
+  readable.on('error', ignoreEarlyReadableError)
+  readable.once('close', unwatchEarlyError)
+  readable.on('newListener', onNewListener)
   // Wire the readable's close event to an AbortSignal so that
   // request.signal fires when the client disconnects.
   // `close` fires both after normal completion and on premature disconnect —
   // readableAborted is true when the stream was destroyed before emitting 'end'
   // (i.e. client disconnected).
   const abortController = new AbortController()
-  readable.on('close', () => {
-    if (readable.readableAborted && !abortController.signal.aborted) abortController.abort()
+  const gone = new AbortController()
+  // Register before Request so its abort listeners see that the client is gone.
+  abortController.signal.addEventListener('abort', () => gone.abort(abortController.signal.reason), { once: true })
+  readable.once('close', () => {
+    if (readable.readableAborted) abortController.abort(readable.errored ?? undefined)
   })
+  let body: ReadableStream<Uint8Array<ArrayBuffer>> | null = null
+  if (!nativeBody && !['GET', 'HEAD'].includes(method.toUpperCase())) {
+    await loadStreamNodeModuleOnce()
+    const { Readable } = getStreamNodeModule()
+    body = Readable.toWeb(readable, { strategy: { highWaterMark: 0 } }) as ReadableStream<Uint8Array<ArrayBuffer>>
+  }
   const request = new Request(url, {
     method,
-    headers: headerPairs,
+    headers,
     body,
     signal: abortController.signal,
     // @ts-expect-error duplex required for streaming request bodies
@@ -51,8 +66,21 @@ async function nodeReadableToWebRequest(
     socket.once('close', abort)
     unwatch = () => socket.off('close', abort)
   }
-  return { request, unwatch }
+  // Even after unwatch(), a socket that closes before the body's end interrupts its upload.
+  let unwatchClientGone = () => {}
+  if (socket && !readable.readableEnded) {
+    const left = () => gone.abort()
+    socket.once('close', left)
+    unwatchClientGone = () => {
+      socket.off('close', left)
+      readable.off('end', unwatchClientGone)
+    }
+    readable.once('end', unwatchClientGone)
+  }
+  return { request, unwatch, unwatchClientGone, clientGone: gone.signal }
 }
+
+function ignoreEarlyReadableError(): void {}
 
 function normalizeHeaders(headers: HeadersInput): [string, string][] {
   // HTTP/2 puts `:method`, `:path`, `:authority`, `:scheme`, `:status` into `req.headers`.

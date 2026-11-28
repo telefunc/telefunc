@@ -4,6 +4,7 @@ export { isLazyBlob }
 export { isLazyFile }
 
 import { assertUsage } from '../../utils/assert.js'
+import { textDecoder, concatAll } from '../wire/envelope.js'
 
 const LAZY_BLOB_BRAND = Symbol.for('telefunc.LazyBlob')
 const LAZY_FILE_BRAND = Symbol.for('telefunc.LazyFile')
@@ -37,25 +38,17 @@ abstract class BaseStreamBlob implements Blob {
   async bytes(): Promise<Uint8Array<ArrayBuffer>> {
     const stream = this.stream()
     const reader = stream.getReader()
-    let total = 0
-    const chunks: Uint8Array[] = []
+    const chunks: Uint8Array<ArrayBuffer>[] = []
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
       chunks.push(value)
-      total += value.byteLength
     }
-    const result = new Uint8Array(total)
-    let offset = 0
-    for (const c of chunks) {
-      result.set(c, offset)
-      offset += c.byteLength
-    }
-    return result
+    return concatAll(chunks)
   }
 
   async text(): Promise<string> {
-    return new TextDecoder().decode(await this.bytes())
+    return textDecoder.decode(await this.bytes())
   }
 
   slice(start?: number, end?: number, contentType?: string): Blob {
@@ -85,9 +78,9 @@ class LazyBlob extends BaseStreamBlob {
   readonly [LAZY_BLOB_BRAND] = true
 
   private getStream: GetStream
-  protected consumed = false
+  private consumed = false
 
-  // Brand-checked `instanceof` (Abort.ts pattern) — accepts any object carrying
+  // Brand-checked `instanceof` — accepts any object carrying
   // the brand symbol, including plain objects across realms / serialization.
   static [Symbol.hasInstance](value: unknown): boolean {
     return isLazyBlob(value)

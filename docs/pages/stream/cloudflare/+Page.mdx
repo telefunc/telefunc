@@ -1,4 +1,4 @@
-import { Link, Warning, Advanced } from '@brillout/docpress'
+import { Link, Warning } from '@brillout/docpress'
 import { TelefuncStreamBeta } from '../../../components'
 
 **Environment**: server.
@@ -30,11 +30,15 @@ export default {
 }
 ```
 
+{/* spellcheck-ignore:on */}
+
 ```jsonc
 // wrangler.jsonc
 {
   "compatibility_date": "2025-08-15", // or later
-  "compatibility_flags": ["enable_request_signal"], // a Worker's request.signal aborts when its client disconnects
+  // nodejs_als (or nodejs_compat): server code that subscribes to a broadcast needs it.
+  // enable_request_signal: a Worker's request.signal aborts when its client disconnects.
+  "compatibility_flags": ["nodejs_als", "enable_request_signal"],
   "durable_objects": {
     "bindings": [
       { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
@@ -49,14 +53,14 @@ export default {
 }
 ```
 
-> `enable_request_signal` is what lets <Link href="/onClose#context-signal">`context.signal` and `onClose()`</Link> see a client that disconnects before its telefunction answers.
+{/* spellcheck-ignore:off */}
 
 > Fundamentally, channels are stateful: the server holds live state for each open channel. Cloudflare Workers, however, are stateless and ephemeral — any request can be served by any worker, and nothing is remembered between requests. The state therefore needs to live somewhere else — Durable Objects and KV are Cloudflare's primitives for exactly that:
 >
 > - **Durable Objects** provide stateful compute: each channel lives on a Durable Object, which holds the connection and its state.
 > - **KV** provides shared storage: it's how a broadcast finds the Durable Objects, in every region, that have subscribers.
 >
-> Both bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel` or `BroadcastChannel`, there's no state to keep — you can skip both bindings and use <Link href="/serve"><code>serve()</code></Link> instead, keeping `enable_request_signal`.
+> Both bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel`, `BroadcastChannel`, or cross-instance `Broadcast`, you can skip both bindings and use <Link href="/serve"><code>serve()</code></Link>.
 >
 > See <Link href="#architecture" /> for implementation details.
 
@@ -100,13 +104,9 @@ Each region runs its own Durable Objects so that channel state stays close to us
 
 Every telefunction call and channel message from a client must reach the **same Durable Object** — otherwise that client's channel state would be unavailable.
 
-The client sends a session token with every request, as the `session` query parameter. Telefunc routes all requests with the same token to the same Durable Object, in the region nearest to the client.
-
-That Durable Object names its region in its responses' `x-telefunc-home` header, and the client then sends it as the `home` query parameter, so its requests reach the same Durable Object from any region.
-
 <Warning>
 
-**CDN / reverse proxy** — make sure the `session` and `home` query parameters aren't stripped from requests, nor the `x-telefunc-home` header from responses (a cross-origin server exposes it with `Access-Control-Expose-Headers`). Without the token, each request would be routed to a random Durable Object and channel state would be lost.
+**CDN / reverse proxy** — keep the `session` and `home` query parameters and the `x-telefunc-home` response header, so that requests reach the Durable Object that holds the client's channels. For a cross-origin client, expose `x-telefunc-home` with `Access-Control-Expose-Headers`.
 
 </Warning>
 
@@ -136,40 +136,9 @@ Only specified regions get Durable Objects. Requests from unspecified regions fa
 
 <Link href="/channel#broadcast">Broadcasts</Link> fan out across all regions automatically.
 
-### How it works
-
-<Advanced>
-
-You can skip this section — it's Telefunc's internal fan-out, not anything you configure.
-
-</Advanced>
-
-```
-Publisher (Durable Object)
-  → Authority DO (one per key — assigns sequence numbers)
-    → Coordinators (one per active region)
-      → Durable Objects (deliver to local subscribers)
-```
-
-1. The publisher forwards the message to an **authority** Durable Object for the key.
-2. The authority assigns a monotonic sequence number, reads active presence from KV, and forwards to each region with subscribers.
-3. Each region's coordinator fans out to the Durable Objects in that region.
-4. Each Durable Object delivers to its local subscribers.
-
 ### Ordering
 
-<Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, so subscribers receive messages in order with a <Link href="/channel#broadcast">monotonic `seq`</Link>. A Durable Object's publishes get their `seq` in call order when they are made in one synchronous run or awaited one by one. Any others get it in the order they reach the authority.
-
-### Presence
-
-Telefunc uses KV to track which Durable Objects have active subscribers:
-
-| Setting | Value |
-|---|---|
-| TTL | 90 seconds |
-| Refresh | every 30 seconds |
-
-A KV record is created on subscribe and deleted on unsubscribe. If a Durable Object is evicted (e.g. during a deployment), the record expires after 90 seconds and the region is excluded from fan-out.
+<Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, so subscribers receive messages in order with a <Link href="/channel#broadcast">monotonic `seq`</Link>.
 
 
 ## Delivery guarantees
@@ -179,20 +148,20 @@ A KV record is created on subscribe and deleted on unsubscribe. If a Durable Obj
 | Guarantee | Details |
 |---|---|
 | Ordering | Messages are delivered in order. |
-| Buffering | The server buffers messages while the client is disconnected: up to `config.channel.bufferLimit` for text (default: 512 KB) and up to `config.channel.bufferLimitBinary` for binary (default: 2 MB). Binary frames have a separate budget and can never evict text. |
-| Replay | Both sides keep a replay buffer. On reconnect, missing messages are replayed and duplicates are ignored. |
+| Buffering | The server holds messages while the client is disconnected, within <Link href="/channel-config">`config.channel.maxMemory`</Link>, which all its channels share (default on Cloudflare: 64 MiB). |
+| Replay | On reconnect, the kept reliable messages are resent and duplicates are ignored (see <Link href="/channel#errors" />). |
 | Acknowledgements | `send(data, { ack: true })` resolves when the other side processes the message. |
-| Loss | If the disconnection lasts longer than `config.channel.reconnectTimeout`, or one side missed more messages than the replay buffer holds, the channel closes with <Link href="/channel#errors">`NetworkError`</Link>. |
+| Loss | If the disconnection lasts longer than `config.channel.reconnectTimeout`, the channel closes with <Link href="/channel#errors">`NetworkError`</Link>. |
 
 ### Broadcast messages (`publish` / `subscribe`)
 
 | Guarantee | Details |
 |---|---|
-| Ordering | Publishes for a given key are serialized and delivered in `seq` order, which is call order for a Durable Object's publishes made in one synchronous run or awaited one by one. |
-| Delivery | `publish()` resolves after all Durable Objects whose KV presence record the publish found have received the message. Delivery to clients then happens over the channel connection. |
-| Presence lag | A new subscriber's presence reaches the key's authority through KV, which [can take 60 seconds or more](https://developers.cloudflare.com/kv/concepts/how-kv-works/) to show a write in other locations. A presence write KV refuses is retried at the next refresh, within 30 s. Publishes made meanwhile can miss the subscriber. |
+| Ordering | Publishes for a given key are serialized and delivered in order. |
+| Delivery | A publish waits for delivery to the Durable Objects Telefunc found in KV. Those objects forward it to their clients. |
+| Presence lag | A new subscriber may miss publishes from other locations until KV shows its presence record there, which [can take 60 seconds or more](https://developers.cloudflare.com/kv/concepts/how-kv-works/). |
 
-> Once a broadcast message reaches a Durable Object, it has the same buffering and replay guarantees as regular channel messages.
+> Once a reliable broadcast message reaches a Durable Object, it has the same buffering and replay guarantees as regular channel messages; a `lossy` one skips to the newest.
 
 
 ## Configuration
@@ -216,15 +185,14 @@ See also: <Link href="/Telefunc" />.
 >
 > Channel state is in-memory JavaScript. If the Durable Object hibernates, that state is gone. Telefunc keeps the Durable Object alive while channels are open.
 
-The Durable Object can hibernate once all channels are closed, no clients remain connected, and both the reconnect and idle windows have expired.
+The Durable Object can hibernate once all channels are closed and no clients remain connected. To hibernate sooner, lower `reconnectTimeout`: a disconnected client then has less time to reconnect.
 
 ```ts
 import { config } from 'telefunc'
 
-// Shorter windows = hibernate sooner, less disconnect tolerance
+// Shorter window = hibernate sooner, less disconnect tolerance
 config.channel = {
   reconnectTimeout: 5_000,
-  idleTimeout: 5_000,
   pingInterval: 2_000
 }
 ```

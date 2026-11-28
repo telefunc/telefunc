@@ -17,11 +17,7 @@ A <Link href="/channel">`Channel`</Link> is a stateful connection. Its server-si
 
 > This is the same constraint Socket.IO documents under [Using multiple nodes](https://socket.io/docs/v4/using-multiple-nodes/). The same load-balancer feature solves the problem for Telefunc: a sticky session, usually backed by a cookie or by the client IP.
 
-> Behind a reverse proxy, set Node.js's [`server.keepAliveTimeout`](https://nodejs.org/api/http.html#serverkeepalivetimeout) (5 seconds by default) above how long your proxy keeps an idle connection. Otherwise the proxy can reuse a connection Node.js just closed and answer 502, which the page recovers from by reconnecting.
-
 > Without sticky sessions, a reconnect that lands on a different instance sees no matching channel state, the recovery handshake fails, and the client's `Channel` ends.
-
-> Sanity check: after deploying behind a sticky load balancer, open the browser network tab and refresh once. With a cookie (HAProxy below), confirm every request to `/_telefunc` carries the same sticky cookie. If two consecutive requests carry different sticky values, the load balancer isn't configured for sticky sessions. With `ip_hash` there's no cookie to read, so add `add_header X-Upstream $upstream_addr always;` to your Nginx `location` and confirm every `/_telefunc` response shows the same address.
 
 
 ### Nginx — `ip_hash`
@@ -42,6 +38,8 @@ backend telefunc
   server app1 app1:3000 check cookie app1
   server app2 app2:3000 check cookie app2
 ```
+
+> Sanity check: after deploying, open the browser network tab, refresh once, and confirm every request to `/_telefunc` carries the same `SERVERID` cookie. With all app instances healthy, if two consecutive requests carry different values, the load balancer isn't configured for sticky sessions.
 
 ### Caddy — `lb_policy cookie`
 
@@ -78,15 +76,18 @@ For other backends (NATS, Kafka, …), implement `BroadcastTransport` and assign
 ```ts ts-only
 type BroadcastTransport = {
   send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
-  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
+  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): BroadcastUnsubscribe
   sendBinary(key: string, payload: Uint8Array): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
-  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void): () => void
+  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void): BroadcastUnsubscribe
 }
+type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; opened: Promise<void> }
 ```
 
-`send()` / `sendBinary()` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. `listen()` / `listenBinary()` return an unsubscribe function and are called at most once per key.
+`send()` / `sendBinary()` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. `listen()` / `listenBinary()` return an unsubscribe function, or `{ unsubscribe, opened }`, and Telefunc calls each at most once per key at a time.
 
 A transport that sends `sendBinary()`'s `payload` after `sendBinary()` returns (after an `await`, or from a queue) must send a copy: the publisher may reuse its buffer once `publishBinary()` returns.
+
+> If your broker confirms a subscription only after `listen()` returns, return `{ unsubscribe, opened }` instead, and resolve `opened` once the broker has registered the subscription.
 
 > On Cloudflare Workers, Telefunc handles distributed broadcast automatically via Durable Objects — no transport needed. See <Link href="/stream/cloudflare" />.
 

@@ -14,14 +14,25 @@ const globalObject = getGlobalObject<{ sessions: Map<string, Session> }>('channe
  *  channels reach one session, and with its home once the server named it. A query parameter adds no header for a
  *  cross-origin server to allow. */
 function getSessionUrl(telefuncUrl: string): string {
-  const { token, home } = getSession(telefuncUrl)
-  const params = home === null ? `session=${token}` : `session=${token}&home=${home}`
-  return telefuncUrl.includes('?') ? `${telefuncUrl}&${params}` : `${telefuncUrl}?${params}`
+  return withParams(telefuncUrl, sessionParams(telefuncUrl))
 }
 
 /** The session URL of a channel's wire, which names the wire's version. */
 function getWireUrl(telefuncUrl: string): string {
-  return `${getSessionUrl(telefuncUrl)}&wire=${WIRE_VERSION}`
+  return withParams(telefuncUrl, `${sessionParams(telefuncUrl)}&wire=${WIRE_VERSION}`)
+}
+
+function sessionParams(telefuncUrl: string): string {
+  const { token, home } = getSession(telefuncUrl)
+  return home === null ? `session=${token}` : `session=${token}&home=${home}`
+}
+
+/** `url` with `params` in its query, ahead of a fragment, which a request never sends. */
+function withParams(url: string, params: string): string {
+  const hashAt = url.indexOf('#')
+  const beforeHash = hashAt === -1 ? url : url.slice(0, hashAt)
+  const hash = hashAt === -1 ? '' : url.slice(hashAt)
+  return `${beforeHash}${beforeHash.includes('?') ? '&' : '?'}${params}${hash}`
 }
 
 /** Records the home the server named for the page's session (`SESSION_HOME_HEADER`), if it named one. */

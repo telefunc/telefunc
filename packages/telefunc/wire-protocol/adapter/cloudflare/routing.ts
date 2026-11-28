@@ -19,8 +19,8 @@ import { assert, assertUsage } from '../../../utils/assert.js'
 /**
  * Cloudflare routing primitives for Telefunc's session and broadcast Durable Objects.
  *
- * Routing now always resolves to one of Telefunc's canonical Cloudflare location hints.
- * If Cloudflare doesn't provide a precise mapping, Telefunc uses `locationFallback`.
+ * Routing resolves to one of Telefunc's canonical Cloudflare location hints, or to `locationFallback` where
+ * Cloudflare gives no precise one.
  */
 const DEFAULT_BROADCAST_BUCKETS = [
   'wnam',
@@ -92,9 +92,7 @@ function resolveSessionRoutingTarget(
 }
 
 /** The session Durable Object and region the Worker forwarded `request` to, as its routing headers name them. */
-function readForwardedTarget(
-  request: Request,
-): Pick<SessionRoutingTarget, 'sessionInstanceName' | 'locationBucket'> | null {
+function readForwardedTarget(request: Request): SessionRoutingTarget | null {
   const sessionInstanceName = request.headers.get(TELEFUNC_SHARD_HEADER)
   const locationBucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
   return sessionInstanceName && locationBucket ? { sessionInstanceName, locationBucket } : null

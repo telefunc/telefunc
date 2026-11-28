@@ -6,12 +6,9 @@ import { LazyBlob } from '../../LazyFile.js'
 
 const blobReviver: ReviverType<BlobRequestContract, ServerReviverContext> = {
   prefix: SERIALIZER_PREFIX_BLOB,
-  // Blobs are fully consumed during request parsing — no ongoing resource to clean up.
   revive: (metadata, context) => {
-    context.registerFile(metadata.index, metadata.size)
-    const lazyBlob = new LazyBlob(metadata.size, metadata.type, () =>
-      context.consumeFile(metadata.index, metadata.size),
-    )
+    const stream = context.registerFile(metadata.index, metadata.size)
+    const lazyBlob = new LazyBlob(metadata.size, metadata.type, stream)
     return { value: lazyBlob, close() {}, abort() {} }
   },
 }

@@ -61,8 +61,8 @@ type TypeContract<V = unknown, R = unknown, M extends Record<string, unknown> = 
 /** Replacer: detect a value during serialization and replace it with prefix+metadata on the wire.
  *  `replace` is the primary verb of the Replacer API — it runs once per serialized value and may
  *  perform side effects (register channels, install listeners, wire lifecycle). The returned
- *  `metadata` is what crosses the wire; `close` / `abort` are lifecycle hooks tracked by the
- *  registry and invoked when the carrier message completes or is aborted.
+ *  `metadata` is what crosses the wire; `abort` runs when the carrier message is aborted, and on the page
+ *  `close` runs once the value it sent is let go.
  *
  *  Duplicated references run `replace` once and revive as one client object (see
  *  createStreamingReplacer), so metadata must identify the value uniquely within the
@@ -110,8 +110,9 @@ type StreamingProducer = {
 }
 
 type StreamingValueServer = {
-  createProducer: () => StreamingProducer
+  producer: StreamingProducer
   index: number
+  eager: boolean
 }
 
 // ===== Contexts =====
@@ -148,14 +149,19 @@ type ClientReviverContext = {
     ack?: boolean
     maxFrameBytes?: number
   }): ClientChannel<ClientToServer, ServerToClient>
-  createBroadcast<T = unknown>(opts: { channelId: string; key: string; maxFrameBytes?: number }): ClientBroadcast<T>
+  createBroadcast<T = unknown>(opts: {
+    channelId: string
+    key: string
+    lossy?: true
+    maxFrameBytes?: number
+  }): ClientBroadcast<T>
   receiveStream(metadata: StreamingMetadata): StreamSource
 }
 
 /** Context for all server-side request revivers (File/Blob + Function + ReadableStream). */
 type ServerReviverContext = {
-  registerFile(index: number, size: number): void
-  consumeFile(index: number, size: number): ReadableStream<Uint8Array<ArrayBuffer>>
+  /** Registers a file of the call's body. */
+  registerFile(index: number, size: number): () => ReadableStream<Uint8Array<ArrayBuffer>>
   createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts: {
     id: string
     ack?: boolean
@@ -169,12 +175,18 @@ type ServerReviverContext = {
 
 /** Context for all server-side response replacers (streaming + placeholder). */
 type ServerReplacerContext = {
+  /** The largest wire frame the adapter accepts, where it sets a smaller limit. */
+  maxFrameBytes?: number
   createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts?: {
     ack?: boolean
   }): ServerChannel<ClientToServer, ServerToClient>
-  /** Registers a channel with the response lifecycle. Also installs shield validators if the channel has shields. */
+  /** Registers a channel with the response lifecycle: the response carries it, with its shield validators, once
+   *  serialized. */
   registerChannel(channel: ServerChannel<any, any>): void
-  sendStream(createProducer: () => StreamingProducer): {
+  sendStream(
+    createProducer: () => StreamingProducer,
+    options?: { eager: true },
+  ): {
     metadata: StreamingMetadata
     close: () => Promise<void> | void
     abort: (abortError: AbortError) => void
@@ -200,7 +212,7 @@ type ClientReplacerContext = {
 
 // ===== Metadata =====
 
-type StreamingMetadata = { channelId: string } | { __index: number; flowId?: string }
+type StreamingMetadata = { channelId: string } | { __index: number }
 
 /** Request-direction (client→server): bytes are framed back-to-back in the request body,
  *  so the reader needs an explicit `index` and `size` to know where this file starts and ends. */
@@ -254,7 +266,7 @@ type ChannelContract = TypeContract<
 type BroadcastContract = TypeContract<
   ServerBroadcast,
   ClientBroadcast,
-  { channelId: string; key: string; maxFrameBytes?: number }
+  { channelId: string; key: string; lossy?: true; maxFrameBytes?: number }
 >
 
 type FunctionContract = TypeContract<

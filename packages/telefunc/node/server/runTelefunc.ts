@@ -2,6 +2,7 @@ export { runTelefunc }
 export type { HttpResponse }
 
 import { assert, assertUsage, assertWarning } from '../../utils/assert.js'
+import { refusalContentType, type RefusalContentType } from '../../wire-protocol/refusal.js'
 import { isProduction } from '../../utils/isProduction.js'
 import { objectAssign } from '../../utils/objectAssign.js'
 import { hasProp } from '../../utils/hasProp.js'
@@ -16,6 +17,7 @@ import { handleTelefunctionBug } from './runTelefunc/validateTelefunctionError.j
 import { handleError } from './runTelefunc/handleError.js'
 import { applyShield } from './runTelefunc/applyShield.js'
 import { findTelefunction } from './runTelefunc/findTelefunction.js'
+import { textEncoder } from '../../wire-protocol/wire/envelope.js'
 import { resolveReturnShields } from './shield.js'
 import { getServerConfig } from './serverConfig.js'
 import { isShieldValidationError } from '../../shared/ShieldValidationError.js'
@@ -32,7 +34,8 @@ import {
   STATUS_CODE_SUCCESS,
 } from '../../shared/constants.js'
 import { STREAM_TRANSPORT } from '../../wire-protocol/constants.js'
-import { createRequestContext } from './context/requestContext.js'
+import { createRequestContext, type RequestContext } from './context/requestContext.js'
+import { getChannelMux } from '../../wire-protocol/channel/server/ChannelMux.js'
 
 type StreamWritableWeb = WritableStream
 type StreamReadableWeb = ReadableStream
@@ -64,7 +67,7 @@ type HttpResponse = {
   err?: unknown
 }
 
-type ContentType = 'text/plain' | 'application/octet-stream' | 'text/event-stream'
+type ContentType = 'text/plain' | 'application/octet-stream' | 'text/event-stream' | RefusalContentType
 /** A response body is either a literal string or a concrete stream of the
  *  matching runtime (Node `Readable` when the adapter passed a Node
  *  `IncomingMessage`, Web `ReadableStream` otherwise). Producers commit to one
@@ -73,19 +76,28 @@ type ContentType = 'text/plain' | 'application/octet-stream' | 'text/event-strea
  *  middleman on the hot path. */
 type ResponseBody = string | StreamReadableNode | ReadableStream<Uint8Array<ArrayBuffer>>
 
-function createHttpResponse({
-  statusCode,
-  contentType,
-  headers,
-  body: responseBody,
-  err,
-}: {
+/** What a response is made of, as the call ends. */
+type HttpResponseParts = {
   statusCode: HttpResponse['statusCode']
   contentType: ContentType
   headers: [string, string][]
   body: ResponseBody
   err?: unknown
-}): HttpResponse {
+}
+
+/** A Deno upload may outlive its response. Keep actual response streams open until their uploads end. */
+function createHttpResponse(
+  { statusCode, contentType, headers, body: responseBody, err }: HttpResponseParts,
+  hold: RequestContext['responseHold'],
+): HttpResponse {
+  const sent = (): ResponseBody => {
+    if (typeof responseBody === 'string') {
+      // The client needs the complete text response to attach channels that may still read the upload.
+      hold?.answeredAsString()
+      return responseBody
+    }
+    return hold === null ? responseBody : hold.heldBody(getStreamReadableWeb(responseBody))
+  }
   return {
     statusCode,
     headers: [...headers, ['Content-Type', contentType]],
@@ -110,33 +122,45 @@ function createHttpResponse({
         typeof responseBody === 'string',
         "httpResponse.body can't be used for streaming responses. Use httpResponse.pipe() or httpResponse.getReadableWebStream() instead.",
       )
+      hold?.answeredAsString()
       return responseBody
     },
     pipe(writable: StreamWritableWeb | StreamWritableNode): Promise<void> {
-      if (isStreamWritableWeb(writable)) return pipeToStreamWritableWeb(responseBody, writable)
-      if (isStreamWritableNode(writable)) return pipeToStreamWritableNode(responseBody, writable)
+      if (isStreamWritableWeb(writable)) return pipeToStreamWritableWeb(sent(), writable)
+      if (isStreamWritableNode(writable)) return pipeToStreamWritableNode(sent(), writable)
       assertUsage(
         false,
         "The argument `writable` passed to `httpResponse.pipe(writable)` doesn't seem to be a Web WritableStream nor a Node.js Writable.",
       )
     },
     getReadableWebStream() {
-      return getStreamReadableWeb(responseBody)
+      return getStreamReadableWeb(sent())
     },
     getReadableNodeStream() {
-      return getStreamReadableNode(responseBody)
+      return getStreamReadableNode(sent())
     },
     async getBody() {
-      if (typeof responseBody === 'string') return responseBody
+      const body = sent()
+      if (typeof body === 'string') return body
       const decoder = new TextDecoder()
-      let result = ''
-      // A `ReadableStream` is iterable on modern runtimes; the cast is just to
-      // satisfy `lib.dom.d.ts` which doesn't declare `[Symbol.asyncIterator]`.
-      for await (const chunk of responseBody as AsyncIterable<Uint8Array<ArrayBuffer>>) {
-        result += decoder.decode(chunk, { stream: true })
+      let text = ''
+      if (!(body instanceof ReadableStream)) {
+        for await (const chunk of body) text += decoder.decode(chunk, { stream: true })
+        return text + decoder.decode()
       }
-      result += decoder.decode()
-      return result
+      const reader = body.getReader()
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) return text + decoder.decode()
+          text += decoder.decode(value, { stream: true })
+        }
+      } catch (err) {
+        await reader.cancel(err).catch(() => {})
+        throw err
+      } finally {
+        reader.releaseLock()
+      }
     },
     err,
   }
@@ -155,7 +179,7 @@ async function pipeToStreamWritableWeb(responseBody: ResponseBody, writable: Str
   try {
     if (typeof responseBody === 'string') {
       const writer = writable.getWriter()
-      await writer.write(encodeForWebStream(responseBody))
+      await writer.write(textEncoder.encode(responseBody))
       await writer.close()
       return
     }
@@ -197,7 +221,7 @@ function getStreamReadableWeb(responseBody: ResponseBody): StreamReadableWeb {
   if (typeof responseBody === 'string') {
     return new ReadableStream({
       start(controller) {
-        controller.enqueue(encodeForWebStream(responseBody))
+        controller.enqueue(textEncoder.encode(responseBody))
         controller.close()
       },
     })
@@ -214,17 +238,6 @@ function getStreamReadableNode(responseBody: ResponseBody): StreamReadableNode {
     return Readable.fromWeb(responseBody as import('stream/web').ReadableStream)
   }
   return responseBody
-}
-
-let encoder: TextEncoder
-function encodeForWebStream(thing: unknown) {
-  if (!encoder) {
-    encoder = new TextEncoder()
-  }
-  if (typeof thing === 'string') {
-    return encoder.encode(thing)
-  }
-  return thing
 }
 
 const shieldValidationError = {
@@ -261,27 +274,36 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
   // No-op on subsequent calls and a silent no-op on Workers (load fails,
   // sync access guarded by `useNodeStream`).
   await loadStreamNodeModuleOnce()
+  const requestContext = createRequestContext(httpRequestResolved.request)
+  let response: HttpResponseParts | undefined
   try {
-    return await runTelefunc_(httpRequestResolved)
+    response = await runTelefunc_(httpRequestResolved, requestContext)
   } catch (err: unknown) {
     handleTelefunctionBug(err)
-    return createHttpResponse({
-      ...serverError,
-      err,
-    })
+    response = { ...serverError, err }
+  } finally {
+    // A call that answers without a value ends the live values it was passed as arguments.
+    if (response?.statusCode !== STATUS_CODE_SUCCESS) requestContext.markCallFailed()
+    // However the call ended: what its response still sends, a stream or a channel, holds the request from here on.
+    requestContext.markComplete()
   }
+  return createHttpResponse(response, requestContext.responseHold)
 }
 
-async function runTelefunc_({
-  request,
-  readable,
-  context,
-}: {
-  request: Request
-  readable?: StreamReadableNode
-  context?: Telefunc.Context
-}): Promise<HttpResponse> {
-  const requestContext = createRequestContext(request)
+async function runTelefunc_(
+  {
+    request,
+    readable,
+    context,
+    clientGone,
+  }: {
+    request: Request
+    readable?: StreamReadableNode
+    context?: Telefunc.Context
+    clientGone: AbortSignal
+  },
+  requestContext: RequestContext,
+): Promise<HttpResponseParts> {
   const runContext = { requestContext }
 
   {
@@ -290,6 +312,7 @@ async function runTelefunc_({
     objectAssign(runContext, {
       request,
       readable,
+      clientGone,
       serverConfig,
       appRootDir: serverConfig.root,
       telefuncFilesManuallyProvidedByUser: serverConfig.telefuncFiles,
@@ -310,10 +333,11 @@ async function runTelefunc_({
   {
     const parsed = await parseHttpRequest(runContext)
     if (parsed.isMalformedRequest) {
-      return createHttpResponse({ ...malformedRequest })
+      const contentType = parsed.refusal ? refusalContentType(parsed.refusal) : malformedRequest.contentType
+      return { ...malformedRequest, contentType }
     }
-    if (parsed.wireResponse) {
-      return createHttpResponse(parsed.wireResponse)
+    if (parsed.isSseRequest) {
+      return parsed.sseResponse
     }
     const { telefunctionKey, telefuncFilePath, telefunctionName } = parsed
     objectAssign(runContext, {
@@ -321,6 +345,7 @@ async function runTelefunc_({
       telefuncFilePath,
       telefunctionName,
       resolveRequest: parsed.resolveRequest,
+      wants: parsed.wants,
     })
   }
 
@@ -333,7 +358,7 @@ async function runTelefunc_({
   {
     const telefunction = await findTelefunction(runContext)
     if (!telefunction) {
-      return createHttpResponse({ ...malformedRequest })
+      return { ...malformedRequest }
     }
     objectAssign(runContext, { telefunction })
   }
@@ -343,7 +368,7 @@ async function runTelefunc_({
   {
     const resolved = runContext.resolveRequest(runContext.telefunction)
     if (resolved.isMalformedRequest) {
-      return createHttpResponse({ ...malformedRequest })
+      return { ...malformedRequest }
     }
     const { telefunctionArgs, streamTransport, requestExtensions } = resolved
     objectAssign(runContext, { telefunctionArgs, streamTransport, requestExtensions })
@@ -357,9 +382,12 @@ async function runTelefunc_({
         telefunctionAborted: true,
         telefunctionReturn: undefined,
       })
-      return createHttpResponse({ ...shieldValidationError })
+      return { ...shieldValidationError }
     }
   }
+
+  // Each subscription the page made before this call is in effect, or its broadcast ended, before the telefunction runs.
+  if (runContext.wants) await getChannelMux().applyCallWants(request, runContext.wants)
 
   {
     assert(runContext.isValidRequest)
@@ -380,28 +408,21 @@ async function runTelefunc_({
     })
   }
 
-  if (runContext.telefunctionHasErrored || runContext.telefunctionAborted) {
-    runContext.requestContext.markTopLevelError()
-  }
-
   if (runContext.telefunctionHasErrored) {
     if (isShieldValidationError(runContext.telefunctionTopLevelError)) {
-      return createHttpResponse({ ...shieldValidationError })
+      return { ...shieldValidationError }
     }
     throw runContext.telefunctionTopLevelError
   }
 
   {
-    objectAssign(runContext, {
-      abortSignal: runContext.requestContext.abortSignal,
-      useNodeStream: readable !== undefined,
-    })
+    objectAssign(runContext, { useNodeStream: readable !== undefined })
     const result = serializeTelefunctionResult(runContext)
 
     if (result.type === 'streaming') {
       const contentType =
         result.streamTransport === STREAM_TRANSPORT.SSE_INLINE ? 'text/event-stream' : 'application/octet-stream'
-      return createHttpResponse({
+      return {
         statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,
         contentType,
         headers: [
@@ -409,16 +430,16 @@ async function runTelefunc_({
           ['X-Accel-Buffering', 'no'],
         ],
         body: result.body,
-      })
+      }
     }
 
     objectAssign(runContext, { httpResponseBody: result.body })
   }
 
-  return createHttpResponse({
+  return {
     statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,
     contentType: 'text/plain',
     headers: [],
     body: runContext.httpResponseBody,
-  })
+  }
 }

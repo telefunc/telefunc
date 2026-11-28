@@ -20,6 +20,8 @@ class Heartbeat {
   private pongTimer: ReturnType<typeof setTimeout> | null = null
   /** When the wire last delivered a frame, or the heartbeat started or got a PONG. */
   private lastReceivedAt = 0
+  /** When the peer last said it took more of what was sent on the wire, or the heartbeat started. */
+  private lastConfirmedAt = 0
   private readonly deliveries = new Deliveries()
   /** Until when the wire may deliver nothing: what it still carries takes that long. */
   private expectedBy = () => 0
@@ -34,6 +36,7 @@ class Heartbeat {
   /** `pingNow`: its first PING goes at once, rather than once its interval passed. */
   start(pingNow: boolean): void {
     if (this.pingTimer) return
+    this.lastConfirmedAt = performance.now()
     if (pingNow) this.send()
     this.resetPong()
     this.pingTimer = setInterval(this.send, this.intervalMs)
@@ -47,6 +50,16 @@ class Heartbeat {
   noteReceived(bytes: number, at = performance.now()): void {
     this.deliveries.note(at, bytes)
     this.lastReceivedAt = at
+  }
+
+  /** The peer said at `at` that it took more of what was sent on the wire. */
+  noteConfirmed(at = performance.now()): void {
+    this.lastConfirmedAt = at
+  }
+
+  /** How long the peer said it took nothing more of what was sent on the wire. */
+  unconfirmedFor(): number {
+    return performance.now() - this.lastConfirmedAt
   }
 
   /** The bytes the wire delivered in the `ms` before it last delivered. */

@@ -2,18 +2,37 @@ export { ChannelDemo }
 
 import { prepareIteratorAck, sendIteratorAck, type IteratorAckOptions } from './iteratorAckProbe'
 import { sendOwnBytes, listenOwnBytesAlone, listenOwnBytesBeside } from './ownBytesProbe'
+import { openChannel } from './openChannel'
+import {
+  PublishesBehind,
+  BroadcastOverflow,
+  BroadcastBehind,
+  LossyKeepsUp,
+  LossyTicker,
+  BroadcastBehindCloses,
+  BroadcastAwayShared,
+  initialBroadcastBackpressureState,
+  type BroadcastBackpressureState,
+} from './BroadcastBackpressure'
+import { LossySends, LossyFromPage, initialLossySendsState, type LossySendsState } from './LossySends'
+import { ChannelsQueued, AcksWaiting, initialSendsPastMemoryState, type SendsPastMemoryState } from './SendsPastMemory'
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Abort as TelefuncAbort, abort, close, ConnectionError, withContext } from 'telefunc/client'
+import { Abort as TelefuncAbort, abort, ChannelOverflowError, close, withContext } from 'telefunc/client'
 import {
   onChannelInit,
   onChannelAbortTest,
+  onChannelAbortUnsendable,
+  onChannelCounted,
   onChannelPerSendAck,
   onChannelHookInstrument,
   onChannelBinary,
   onChannelClientAbortInstrument,
   onChannelMulti,
   onChannelAckListenerAbort,
+  onChannelListenerAbortHolds,
+  onChannelLateAnswerHolds,
+  onChannelHeldBytes,
   onChannelAckListenerBug,
   onChannelClientAckListenerBug,
   onChannelServerPendingAckAbort,
@@ -31,6 +50,7 @@ import {
   onChannelShieldClient,
   onChannelShieldServerAck,
   onChannelSelfRemovingListener,
+  onChannelSendOrder,
   onChannelUnserializableAnswer,
   onChannelOversize,
   onChannelHeldBinary,
@@ -45,8 +65,11 @@ import {
   onChannelManyListeners,
   onChannelLinkShare,
   onChannelSlowUplink,
+  onChannelAcrossFlip,
+  onPublishAcrossFlip,
   onChannelOpenAnswer,
   onChannelOpenHello,
+  onChannelConfigChecks,
   onChannelBudgets,
   onChannelAwaitedFromOffline,
   onChannelAtLimit,
@@ -61,35 +84,32 @@ import {
   onChannelLateOpenAbort,
 } from './Channel.telefunc'
 
-/**
- * Establishes a channel, retrying if the handshake's HTTP round-trip is dropped.
- *
- * Opening a channel is a one-shot telefunc call. In the Docker e2e environment, Chromium's
- * NetworkChangeNotifier aborts in-flight requests with a transient `ConnectionError` when the Docker
- * bridge interface shifts — most notably right after a reconnect test restarts the proxy container.
- * If that abort lands on a channel handshake the channel never comes back, so retry until it does.
- *
- * This is the channel-handshake half of the suite's Docker-resilience story; the navigation half
- * lives in `navigate()` (../../e2e-utils.ts). Steady-state message delivery needs no such retry —
- * telefunc's own reconnect/replay covers it. Retrying the handshake is safe: each attempt opens an
- * independent channel, so a superseded half-open one merely gets reaped server-side after its grace
- * period.
- */
-async function openChannel<T>(open: () => Promise<T>): Promise<T> {
-  let lastErr: unknown
-  for (let attempt = 1; attempt <= OPEN_CHANNEL_ATTEMPTS; attempt++) {
-    try {
-      return await open()
-    } catch (err) {
-      if (!(err instanceof ConnectionError)) throw err
-      lastErr = err
-      await new Promise((resolve) => setTimeout(resolve, OPEN_CHANNEL_RETRY_DELAY_MS))
-    }
+declare global {
+  interface Window {
+    /** The across-flip row's publish of `bytes`, and its send once the page took the new wire. */
+    publishAcrossFlip?: (bytes: number) => Promise<unknown>
+    sendAcrossFlip?: () => Promise<unknown>
+    /** Lets the send-order row go on. */
+    sendOrderGo?: (value: unknown) => void
+    /** Opens a channel the server keeps open (`onChannelPerSendAck`): 'opened', or the message it ended with. */
+    openAckChannel?: () => Promise<string>
+    /** Opens a channel the server aborts with a reason it can't send (`onChannelAbortUnsendable`), and how it ended. */
+    abortWithUnsendable?: (
+      reason: 'circular' | 'oversize',
+      beforeOpen: boolean,
+    ) => Promise<{ id: string; isAbort: boolean; abortValue: unknown }>
+    /** Opens a channel the server counts the messages of (`onChannelCounted`), over `transports` when given, as `name`,
+     *  on the connection of `connectionKey`, else on one of its own: its id once it opened, or the message it ended with. */
+    openCounted?: (
+      transports?: ('sse' | 'ws')[],
+      slot?: { name?: string; connectionKey?: string },
+    ) => Promise<{ id: string } | { ended: string }>
+    /** Sends `msg` on the channel `openCounted()` opened as `name`: its answer, or the message the send failed with. */
+    sendCounted?: (msg: string, name?: string) => Promise<string>
+    /** How the channel `openCounted()` opened as `name` ended: the message it ended with. */
+    countedEnd?: (name?: string) => Promise<string>
   }
-  throw lastErr
 }
-const OPEN_CHANNEL_ATTEMPTS = 4
-const OPEN_CHANNEL_RETRY_DELAY_MS = 500
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -133,6 +153,9 @@ type ChannelState = {
   clientAbortServerOnOpenFired: boolean | null
   earlyCloseChannelId: string | null
   ackListenerAbortErr: { isAbort: boolean; abortValue: unknown } | null
+  heldBytes: number | null
+  lateAnswerAsked: boolean
+  listenerAborted: boolean
   ackListenerBugErr: string | null
   ackListenerBugRecoveryAck: string | null
   clientAckListenerBugChannelId: string | null
@@ -168,7 +191,9 @@ type ChannelState = {
   /** C2: server.send(valid, {ack:true}), client listener returns invalid → rejects. */
   shieldServerAckInvalid: { ok: boolean; value?: string; error?: string } | null
   selfRemovingListener: { pageSeen: string[]; serverSeen: string[] } | null
+  sendOrder: { id: string; sent: boolean } | null
   unserializableAnswer: { channelId: string; pageSend: string; pageFollowUp: string; isClosed: boolean } | null
+  leftOpen: boolean
   oversize: {
     channelId: string
     thrown: string[]
@@ -193,9 +218,12 @@ type ChannelState = {
   manyListenersMs: { page: number; server: number | null } | null
   linkShare: { pingMs: number[]; downloaded: number } | null
   slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
+  acrossFlip: { received: number[] } | null
   lateCallbacks: { channelId: string; onOpen: boolean; onCloseAbortValue: unknown } | null
   openAbort: { channelId: string; abortValue: unknown } | null
-}
+} & BroadcastBackpressureState &
+  LossySendsState &
+  SendsPastMemoryState
 
 const initialState: ChannelState = {
   connected: false,
@@ -226,6 +254,9 @@ const initialState: ChannelState = {
   clientAbortServerOnOpenFired: null,
   earlyCloseChannelId: null,
   ackListenerAbortErr: null,
+  heldBytes: null,
+  lateAnswerAsked: false,
+  listenerAborted: false,
   ackListenerBugErr: null,
   ackListenerBugRecoveryAck: null,
   clientAckListenerBugChannelId: null,
@@ -254,8 +285,10 @@ const initialState: ChannelState = {
   shieldServerAckValid: null,
   shieldServerAckInvalid: null,
   selfRemovingListener: null,
+  sendOrder: null,
   unserializableAnswer: null,
   oversize: null,
+  leftOpen: false,
   heldBinary: null,
   unattachedFlood: null,
   durationLimits: null,
@@ -273,8 +306,12 @@ const initialState: ChannelState = {
   manyListenersMs: null,
   linkShare: null,
   slowUplink: null,
+  acrossFlip: null,
   lateCallbacks: null,
   openAbort: null,
+  ...initialBroadcastBackpressureState,
+  ...initialLossySendsState,
+  ...initialSendsPastMemoryState,
 }
 
 /** One case of a cancelled iterator: `direction` is the side whose iterator is cancelled. */
@@ -306,6 +343,13 @@ async function runIteratorAck(iteratorCase: IteratorAckOptions & { direction: 's
   return result
 }
 
+/** Shows `text` in the page's element at `selector`. */
+function showResult(selector: string, text: string) {
+  const output = document.querySelector(selector)
+  if (!output) throw new Error(`Expected ${selector} on the page`)
+  output.textContent = text
+}
+
 function timestamp() {
   return new Date().toLocaleTimeString('en-US', { hour12: false, fractionalSecondDigits: 3 })
 }
@@ -319,6 +363,8 @@ function ChannelDemo() {
   const [disconnecting, setDisconnecting] = useState(false)
   const [echoInput, setEchoInput] = useState('')
   const [channelState, setChannelState] = useState<ChannelState>(initialState)
+  // The scenarios in files of their own show their state here too: the e2e tests read all of it from `#channel-state`.
+  const showState = useCallback((state: Partial<ChannelState>) => setChannelState((s) => ({ ...s, ...state })), [])
 
   const idRef = useRef(0)
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -420,7 +466,7 @@ function ChannelDemo() {
     })
     channel.onClose((err) => {
       addLog('system', `onClose fired — err=${err ? err.message : 'none'}`)
-      setChannelState((s) => ({ ...s, mainChannelOnCloseFiredClean: err === undefined }))
+      setChannelState((s) => ({ ...s, mainChannelOnCloseFiredClean: err === null }))
     })
     channel.listen((msg) => {
       addLog('in', JSON.stringify(msg))
@@ -498,6 +544,43 @@ function ChannelDemo() {
     addLog('system', 'abort(result) called')
   }, [addLog])
 
+  useEffect(() => {
+    window.openAckChannel = async () => {
+      const { channel } = await openChannel(onChannelPerSendAck)
+      return new Promise<string>((resolve) => {
+        channel.onOpen(() => resolve('opened'))
+        channel.onClose((err) => resolve(err instanceof Error ? err.message : String(err)))
+      })
+    }
+    const counted = new Map<
+      string,
+      { channel: { send(msg: string, options: { ack: true }): Promise<string> }; end: Promise<string> }
+    >()
+    window.openCounted = async (transports, { name = '', connectionKey = crypto.randomUUID() } = {}) => {
+      const context = { connectionKey, ...(transports ? { transports } : {}) }
+      const { id, channel } = await openChannel(withContext(onChannelCounted, { channel: context }))
+      const end = new Promise<string>((resolve) =>
+        channel.onClose((err) => resolve(err instanceof Error ? err.message : String(err))),
+      )
+      counted.set(name, { channel, end })
+      return Promise.race([
+        new Promise<{ id: string }>((resolve) => channel.onOpen(() => resolve({ id }))),
+        end.then((ended) => ({ ended })),
+      ])
+    }
+    window.sendCounted = (msg, name = '') =>
+      counted
+        .get(name)!
+        .channel.send(msg, { ack: true })
+        .catch((err: unknown) => (err instanceof Error ? err.message : String(err)))
+    window.countedEnd = (name = '') => counted.get(name)!.end
+    window.abortWithUnsendable = async (reason, beforeOpen) => {
+      const { id, channel } = await openChannel(() => onChannelAbortUnsendable(reason, beforeOpen))
+      const err = await new Promise<unknown>((resolve) => channel.onClose(resolve))
+      return { id, isAbort: err instanceof TelefuncAbort, abortValue: (err as { abortValue?: unknown }).abortValue }
+    }
+  }, [])
+
   const testServerAbort = useCallback(async () => {
     addLog('system', 'Starting server-abort test...')
     const { channel } = await openChannel(onChannelAbortTest)
@@ -537,7 +620,7 @@ function ChannelDemo() {
     setChannelState((s) => ({ ...s, hookChannelId: channelId }))
     channel.onClose((err) => {
       addLog('system', `hook-channel onClose fired — err=${err ? err.message : 'none'}`)
-      setChannelState((s) => ({ ...s, hookClientOnCloseClean: err === undefined }))
+      setChannelState((s) => ({ ...s, hookClientOnCloseClean: err === null }))
       hookChannelRef.current = null
     })
     channel.listen((msg) => {
@@ -671,6 +754,26 @@ function ChannelDemo() {
       ackListenerAbortChannelRef.current = null
     }
   }, [addLog])
+
+  const readHeldBytes = useCallback(async () => {
+    const heldBytes = await onChannelHeldBytes()
+    setChannelState((s) => ({ ...s, heldBytes }))
+  }, [])
+
+  const testListenerAbortHolds = useCallback(async () => {
+    const { channel } = await openChannel(onChannelListenerAbortHolds)
+    const closed = new Promise((resolve) => channel.onClose(resolve))
+    void channel.send('stop')
+    await closed
+    setChannelState((s) => ({ ...s, listenerAborted: true }))
+  }, [])
+
+  const testLateAnswerHolds = useCallback(async () => {
+    const { channel } = await openChannel(onChannelLateAnswerHolds)
+    channel.send('late', { ack: true }).catch(() => {})
+    await channel.send('arrived', { ack: true })
+    setChannelState((s) => ({ ...s, lateAnswerAsked: true }))
+  }, [])
 
   const testAckListenerBug = useCallback(async () => {
     addLog('system', 'Starting ack-listener-bug test...')
@@ -816,7 +919,9 @@ function ChannelDemo() {
     if (!channel || channel.isClosed) return
     addLog('system', `queueing send({ ack: true }) + close() for channel ${channelId}`)
     const ackPromise = channel.send('offline-close', { ack: true })
-    const closePromise = channel.close({ timeout: 10_000 })
+    // Made offline, the close waits for the page to be back: its timeout is past any test's, so it doesn't count how
+    // long the page stays offline, which in Docker includes the proxy's restart.
+    const closePromise = channel.close({ timeout: 300_000 })
     void closePromise.finally(() => {
       clientPendingAckCloseReconnectChannelRef.current = null
     })
@@ -839,7 +944,7 @@ function ChannelDemo() {
     channel.listen((msg) => `ack:${msg}`)
     channel.onClose((err) => {
       serverPendingAckCloseReconnectChannelRef.current = null
-      setChannelState((s) => ({ ...s, serverPendingAckCloseReconnectClientOnCloseClean: err === undefined }))
+      setChannelState((s) => ({ ...s, serverPendingAckCloseReconnectClientOnCloseClean: err === null }))
       addLog('system', `server-pending-ack-close reconnect channel closed — err=${err ? err.message : 'none'}`)
     })
     serverPendingAckCloseReconnectChannelRef.current = channel
@@ -957,6 +1062,23 @@ function ChannelDemo() {
     addLog('system', 'Shield tests complete.')
   }, [addLog])
 
+  // Once the test says go, two more channels; the second comes while the RECONCILE naming the first is out, and the
+  // page sends on it, then on the channel it had.
+  const testSendOrder = useCallback(async () => {
+    const id = crypto.randomUUID()
+    const first = await openChannel(() => onChannelSendOrder(id))
+    await first.opened
+    await new Promise((go) => {
+      window.sendOrderGo = go
+      setChannelState((s) => ({ ...s, sendOrder: { id, sent: false } }))
+    })
+    await onChannelSendOrder(id)
+    const newest = await onChannelSendOrder(id)
+    void newest.send('c1')
+    void first.send('a2')
+    setChannelState((s) => ({ ...s, sendOrder: { id, sent: true } }))
+  }, [])
+
   const testSelfRemovingListener = useCallback(async () => {
     const { channel, getServerSeen } = await openChannel(onChannelSelfRemovingListener)
     const pageSeen: string[] = []
@@ -1003,6 +1125,8 @@ function ChannelDemo() {
   const testOversize = useCallback(async () => {
     const { channel, channelId, limit, broadcast } = await openChannel(onChannelOversize)
     channel.listen((msg) => (msg === 'big' ? 'x'.repeat(limit + 1) : `client-ack:${msg}`))
+    // The sends below take the page seconds on a busy machine: it attaches first, within the server's `connectTtl`.
+    await channel.opened
     const thrown: string[] = []
     for (const send of [
       () => channel.sendBinary(new Uint8Array(limit + 1)),
@@ -1020,6 +1144,12 @@ function ChannelDemo() {
     const followUp = String(await channel.send('ok', { ack: true }))
     const oversize = { channelId, thrown, followUp, isClosed: channel.isClosed, broadcastIsClosed: broadcast.isClosed }
     setChannelState((s) => ({ ...s, oversize }))
+  }, [])
+
+  const testLeftOpen = useCallback(async () => {
+    const { channel } = await openChannel(onChannelOpenAnswer)
+    await channel.opened
+    setChannelState((s) => ({ ...s, leftOpen: true }))
   }, [])
 
   const testHeldBinary = useCallback(async () => {
@@ -1088,8 +1218,8 @@ function ChannelDemo() {
       channel.listenBinary((data) => {
         received.push(new DataView(data.buffer, data.byteOffset).getUint32(0))
         ;(window as unknown as { __burstReceived: number }).__burstReceived = received.length
-        if (received.length === count) resolve(null)
       })
+      channel.listen(() => resolve(null))
       channel.onClose((err) => resolve(err?.name ?? 'none'))
     })
     void channel.send({ count, awaited })
@@ -1124,6 +1254,7 @@ function ChannelDemo() {
     const received: number[] = []
     const ended = new Promise<string | null>((resolve) => {
       channel.listen((message) => {
+        if (message === 'end') return resolve(null)
         received.push(Number.parseInt(message))
         if (received.length === count) resolve(null)
       })
@@ -1142,7 +1273,7 @@ function ChannelDemo() {
     let received = 0
     const closeErr = await new Promise<string | null>((resolve) => {
       channel.listenBinary(() => {
-        if (++received === 3) resolve(null)
+        if (++received === 2) resolve(null)
       })
       channel.onClose((err) => resolve(err?.name ?? 'none'))
     })
@@ -1155,7 +1286,7 @@ function ChannelDemo() {
     const { channel } = await openChannel(onChannelOpenBurst)
     let received = 0
     channel.listen(() => {
-      if (++received < 500) return
+      if (++received < 2000) return
       setChannelState((s) => ({ ...s, openBurstReceived: received }))
       channel.close()
     })
@@ -1187,25 +1318,25 @@ function ChannelDemo() {
 
   const testLateOpenAbort = useCallback(async () => {
     const { channel } = await openChannel(onChannelLateOpenAbort)
-    const err = await channel.closed.catch((error) => error)
-    document.querySelector('#channel-late-abort-result')!.textContent = err.abortValue
+    const outcome = await channel.closed
+    showResult(
+      '#channel-late-abort-result',
+      outcome instanceof TelefuncAbort ? String(outcome.abortValue) : String(outcome),
+    )
   }, [])
 
   const testBudgets = useCallback(async () => {
-    const { bytes, acks } = await openChannel(onChannelBudgets)
-    acks.listen(() => new Promise<void>(() => {}))
-    const ends = await Promise.allSettled([bytes.closed, acks.closed])
-    document.querySelector('#channel-budgets-result')!.textContent = JSON.stringify({
-      bytes: bytes.id,
-      acks: acks.id,
-      errors: ends.map((end) => (end.status === 'rejected' ? `${end.reason.name}: ${end.reason.message}` : 'clean')),
-    })
+    const { bytes } = await openChannel(onChannelBudgets)
+    showResult('#channel-budgets-result', JSON.stringify({ bytes: bytes.id }))
   }, [])
 
-  // A channel the page drops closes once garbage-collected.
-  const atLimitChannels = useRef<unknown>(null)
   const testAtLimit = useCallback(async () => {
-    atLimitChannels.current = await openChannel(onChannelAtLimit)
+    for (const kind of ['twoBytes', 'threeBytes', 'fourBytes'] as const) {
+      for (const over of [false, true]) {
+        const { channel } = await openChannel(() => onChannelAtLimit(kind, over))
+        await channel.closed
+      }
+    }
   }, [])
 
   const testOwnBytes = useCallback(async () => {
@@ -1220,14 +1351,16 @@ function ChannelDemo() {
   }, [])
 
   const testOfflineBudgets = useCallback(async () => {
-    const { bytes, acks } = await openChannel(onChannelOfflineBudgets)
-    for (const channel of [bytes, acks]) channel.listen(() => new Promise<void>((done) => setTimeout(done, 1000)))
-    const ends = await Promise.allSettled([bytes.closed, acks.closed])
-    document.querySelector('#channel-offline-budgets-result')!.textContent = JSON.stringify({
-      bytes: bytes.id,
-      acks: acks.id,
-      errors: ends.map((end) => (end.status === 'rejected' ? `${end.reason.name}: ${end.reason.message}` : 'clean')),
-    })
+    const { channel } = await openChannel(onChannelOfflineBudgets)
+    channel.listen(() => new Promise<void>((done) => setTimeout(done, 1000)))
+    // The page's own: one more than the server holds for a channel is refused, and the next is answered.
+    const refused = await channel.send('x'.repeat(3 * 1024 * 1024), { ack: true }).then(
+      () => 'answered',
+      (err: Error) => (err instanceof ChannelOverflowError ? 'ChannelOverflowError' : `${err.name}: ${err.message}`),
+    )
+    const next = await channel.send('next', { ack: true })
+    const result = { id: channel.id, refused, next, isClosed: channel.isClosed }
+    showResult('#channel-offline-budgets-result', JSON.stringify(result))
   }, [])
 
   const testCreditFailure = useCallback(async () => {
@@ -1237,7 +1370,7 @@ function ChannelDemo() {
     const results = await Promise.allSettled(sends)
     document.querySelector('#channel-credit-result')!.textContent = JSON.stringify({
       id: channel.id,
-      rejected: results.some((r) => r.status === 'rejected' && r.reason.abortValue === 'capacity-failure'),
+      resolved: results.every((r) => r.status === 'fulfilled'),
     })
   }, [])
 
@@ -1388,6 +1521,18 @@ function ChannelDemo() {
     setChannelState((s) => ({ ...s, linkShare: { pingMs, downloaded } }))
     download.close()
     ping.close()
+  }, [])
+
+  const testAcrossFlip = useCallback(async () => {
+    const { key, broadcast, control } = await openChannel(onChannelAcrossFlip)
+    const received: number[] = []
+    broadcast.subscribe((body) => {
+      received.push(body.length)
+      setChannelState((s) => ({ ...s, acrossFlip: { received: [...received] } }))
+    })
+    window.publishAcrossFlip = (bytes) => onPublishAcrossFlip(key, bytes)
+    window.sendAcrossFlip = () => control.send('after-flip')
+    setChannelState((s) => ({ ...s, acrossFlip: { received } }))
   }, [])
 
   const testSlowUplink = useCallback(async () => {
@@ -1544,6 +1689,15 @@ function ChannelDemo() {
           >
             Test Ack Listener Abort
           </button>
+          <button id="channel-test-listener-abort-holds" type="button" onClick={testListenerAbortHolds}>
+            Test Listener Abort Holds
+          </button>
+          <button id="channel-test-late-answer-holds" type="button" onClick={testLateAnswerHolds}>
+            Test Late Answer Holds
+          </button>
+          <button id="channel-read-held-bytes" type="button" onClick={readHeldBytes}>
+            Read Held Bytes
+          </button>
           <button
             id="channel-test-ack-listener-bug"
             type="button"
@@ -1689,12 +1843,28 @@ function ChannelDemo() {
             Self-removing Listener
           </button>
           <button
+            id="channel-test-send-order"
+            type="button"
+            onClick={testSendOrder}
+            className="px-3 py-1.5 text-sm rounded bg-emerald-700 text-white hover:bg-emerald-800"
+          >
+            Send Order
+          </button>
+          <button
             id="channel-test-unserializable-answer"
             type="button"
             onClick={testUnserializableAnswer}
             className="px-3 py-1.5 text-sm rounded bg-red-700 text-white hover:bg-red-800"
           >
             Unserializable Ack Answer
+          </button>
+          <button
+            id="channel-test-left-open"
+            type="button"
+            onClick={testLeftOpen}
+            className="px-3 py-1.5 text-sm rounded bg-cyan-800 text-white hover:bg-cyan-900"
+          >
+            Open a Channel, Keep No Reference
           </button>
           <button
             id="channel-test-oversize"
@@ -1748,7 +1918,7 @@ function ChannelDemo() {
             [
               ['unawaited', 32],
               ['unawaited', 200],
-              ['unawaited', 300],
+              ['unawaited', 400],
               ['awaited', 300],
             ] as const
           ).map(([mode, count]) => (
@@ -1762,6 +1932,24 @@ function ChannelDemo() {
               Server Bursts {count} MiB ({mode})
             </button>
           ))}
+          <BroadcastOverflow show={showState} />
+          <BroadcastBehind show={showState} />
+          <LossyKeepsUp show={showState} />
+          <LossySends show={showState} />
+          <LossyFromPage show={showState} />
+          <LossyTicker show={showState} />
+          <BroadcastBehindCloses show={showState} />
+          <ChannelsQueued show={showState} />
+          <AcksWaiting show={showState} />
+          <BroadcastAwayShared show={showState} />
+          <button
+            id="channel-test-across-flip"
+            type="button"
+            onClick={testAcrossFlip}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Broadcast Across The Upgrade's Flip
+          </button>
           <button
             id="channel-test-awaited-from-offline"
             type="button"
@@ -1800,7 +1988,7 @@ function ChannelDemo() {
               onClick={() => testTextBurst(mode, count)}
               className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
             >
-              Server Bursts {count} × {mode === 'acks' ? 1 : 16} KiB ({mode})
+              Server Bursts {count} × {mode === 'acks' ? 64 : 16} KiB ({mode})
             </button>
           ))}
           <button
@@ -1831,6 +2019,18 @@ function ChannelDemo() {
             Test acknowledgement ownership
           </button>
           <output id="channel-ack-ownership-result" />
+          <button
+            id="channel-test-config-checks"
+            onClick={async () => {
+              const checks = await onChannelConfigChecks()
+              const result = document.querySelector('#channel-config-checks-result')
+              if (!result) throw new Error('no #channel-config-checks-result')
+              result.textContent = JSON.stringify(checks)
+            }}
+          >
+            Test what config.channel refuses
+          </button>
+          <output id="channel-config-checks-result" />
           <button id="channel-test-budgets" onClick={testBudgets}>
             Test send budgets
           </button>
@@ -1894,6 +2094,7 @@ function ChannelDemo() {
           >
             Ping Beside a Download
           </button>
+          <PublishesBehind show={showState} />
           <button
             id="channel-test-slow-uplink"
             type="button"

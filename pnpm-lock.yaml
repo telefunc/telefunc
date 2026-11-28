@@ -376,8 +376,8 @@ importers:
         specifier: ^0.7.20
         version: 0.7.20
       crossws:
-        specifier: ^0.4.4
-        version: 0.4.6(srvx@0.11.16)
+        specifier: ^0.4.17
+        version: 0.4.17(srvx@0.11.16)
       es-module-lexer:
         specifier: ^1.7.0
         version: 1.7.0
@@ -400,6 +400,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: ^4.20260305.1
         version: 4.20260615.1
+      '@hono/node-server':
+        specifier: ^1.19.19
+        version: 1.19.19(hono@4.10.4)
       '@nuxt/types':
         specifier: ^2.18.1
         version: 2.18.1
@@ -412,6 +415,9 @@ importers:
       '@types/react':
         specifier: ^19.2.14
         version: 19.2.14
+      hono:
+        specifier: ^4.10.4
+        version: 4.10.4
       next:
         specifier: ^15.3.4
         version: 15.3.4(@babel/core@7.29.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -2352,6 +2358,12 @@ packages:
   '@eslint/plugin-kit@0.3.2':
     resolution: {integrity: sha512-4SaFZCNfJqvk/kenHpI8xvN42DMaoycy4PzKc5otHxRswww1kAt82OlBuwRVLofCACCTZEcla2Ydxv8scMXaTg==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+
+  '@hono/node-server@1.19.19':
+    resolution: {integrity: sha512-Fy9R7PACOzHU9LDpfnuzVyuVYevKQRcEG2mZhmfc+DRdmayEd3RVfa2XOt2IgGcPNgA77Yk63KBszepcMFK5Ng==}
+    engines: {node: '>=18.14.1'}
+    peerDependencies:
+      hono: ^4
 
   '@humanfs/core@0.19.1':
     resolution: {integrity: sha512-5DyQ4+1JEUzejeK1JGICcideyfUbGixgS9jNgex5nqkW+cY7WZhxBigmieN5Qnw9ZosSNVC9KQKyb+GUaGyKUA==}
@@ -4439,8 +4451,8 @@ packages:
     resolution: {integrity: sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA==}
     engines: {node: '>= 8'}
 
-  crossws@0.4.6:
-    resolution: {integrity: sha512-/Wxe9Z007EbJ496j88nToZEvyPZ8PY/wjZJ18Agh/GCA9cYHyLbxtrpdFlFzAw3TV20F0SUYGl0g6PzChbwUrg==}
+  crossws@0.4.17:
+    resolution: {integrity: sha512-YG2kyfafNXKmu7e6k64yrj6whrw7m5sBIsOSXOlJ/72X3TQWRQuw8DhvXFDcBk8HF77PnTSygnm7xpYCTnFpow==}
     peerDependencies:
       srvx: '>=0.11.5'
     peerDependenciesMeta:
@@ -8872,6 +8884,10 @@ snapshots:
       '@eslint/core': 0.15.0
       levn: 0.4.1
 
+  '@hono/node-server@1.19.19(hono@4.10.4)':
+    dependencies:
+      hono: 4.10.4
+
   '@humanfs/core@0.19.1': {}
 
   '@humanfs/node@0.16.6':
@@ -10895,7 +10911,7 @@ snapshots:
       shebang-command: 2.0.0
       which: 2.0.2
 
-  crossws@0.4.6(srvx@0.11.16):
+  crossws@0.4.17(srvx@0.11.16):
     optionalDependencies:
       srvx: 0.11.16
 

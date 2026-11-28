@@ -11,6 +11,7 @@ import { PieceSender, type PieceReceiverOwner, type PieceSenderOptions, type Pie
 import type { Uplink } from './Uplink.js'
 import type { Downlink } from './Downlink.js'
 import type { PiecesAck } from '../../wire/frame.js'
+import { readTag } from '../../wire/header.js'
 import { isSequencedTag } from '../../wire/tags.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 
@@ -33,16 +34,10 @@ class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
   private readonly uplink: Uplink
   private readonly downlink: Downlink
   private readonly owner: ClientHeadroomOwner
-  /** When the newest acknowledged data arrived, in ms on the server's clock, counted from the first data an
-   *  acknowledgement covered. */
-  private arrivedAt = 0
-  /** The shortest time an acknowledgement took to come back, up to that clock's offset: one that waited behind no
-   *  uplink queue. */
-  private leastBack = Number.POSITIVE_INFINITY
   private lateMs = 0
   private lateAt = 0
-  private paceTimer: ReturnType<typeof setTimeout> | null = null
-  private paceDue = 0
+  /** The pacing timer, and when it is due. */
+  private paceWait: { timer: ReturnType<typeof setTimeout>; due: number } | null = null
 
   constructor({ socket, pingInterval, uplink, downlink, owner }: ClientHeadroomOptions) {
     this.uplink = uplink
@@ -59,7 +54,7 @@ class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
 
   /** Sends `frame` through the sender. */
   send(frame: Uint8Array<ArrayBuffer>): void {
-    if (isSequencedTag(frame[0]!)) {
+    if (isSequencedTag(readTag(frame))) {
       this.sender.send(frame, this.sender.dataWaits ? 0 : this.headroom())
       return this.pace()
     }
@@ -103,15 +98,16 @@ class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
 
   /** The socket closed: pacing stops, and nothing more is handed to it. */
   close(): void {
-    if (this.paceTimer !== null) clearTimeout(this.paceTimer)
-    this.paceTimer = null
+    if (this.paceWait !== null) clearTimeout(this.paceWait.timer)
+    this.paceWait = null
     this.sender.close()
   }
 
   /** A message arrived. If the pacing timer is overdue, it looks now: a hidden tab throttles timers, not messages. */
   received(): void {
-    if (this.paceTimer === null || performance.now() < this.paceDue) return
-    clearTimeout(this.paceTimer)
+    const { paceWait } = this
+    if (paceWait === null || performance.now() < paceWait.due) return
+    clearTimeout(paceWait.timer)
     this.lookAgain()
   }
 
@@ -122,11 +118,9 @@ class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
     const acknowledged = this.sender.acknowledgedBytes
     const newly = acknowledged - before
     const spanMs = ack.spanUs / 1000
-    this.arrivedAt += spanMs
     const now = performance.now()
-    const back = now - this.arrivedAt - ack.heldMs
-    if (back < this.leastBack) this.leastBack = back
-    this.lateMs = Math.max(back - this.leastBack, this.lateMs - (now - this.lateAt))
+    const { lastBack, leastBack } = this.sender
+    this.lateMs = Math.max(lastBack - leastBack, this.lateMs - (now - this.lateAt))
     this.lateAt = now
     this.uplink.arrived(newly, spanMs)
     this.uplink.acknowledged(this.sender.transmittedBytes - acknowledged)
@@ -141,7 +135,7 @@ class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
     const waiting = Math.min(unacknowledged, this.uplink.inUplink() + sent - this.sender.transmittedBytes)
     // Unarrived: what neither an ack nor the newest heartbeat says the server took, less what crosses while late.
     const late = Math.max(this.lateMs, this.downlink.peerQueueWait())
-    const untaken = sent - Math.max(this.sender.acknowledgedBytes, this.sender.heartbeatBytes)
+    const untaken = sent - this.sender.confirmedBytes
     const unarrived = untaken - this.uplink.uplinkRate() * late
     return this.allowance - Math.max(waiting, unarrived)
   }
@@ -150,16 +144,16 @@ class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
    *  acknowledges at once (`WIRE_PIECES_ACK_BYTES`), or all it holds. */
   private pace(): void {
     const drainRate = this.uplink.drain.rate
-    if (drainRate === 0 || this.headroomPastSent() > 0 || this.paceTimer !== null) return
+    if (drainRate === 0 || this.headroomPastSent() > 0 || this.paceWait !== null) return
     const queued = this.uplink.inUplink()
     if (queued === 0) return
     const ms = Math.max(1, Math.min(queued, WIRE_PIECES_ACK_BYTES) / drainRate)
-    this.paceDue = performance.now() + ms
-    this.paceTimer = unrefTimer(setTimeout(this.lookAgain, ms))
+    const due = performance.now() + ms
+    this.paceWait = { timer: unrefTimer(setTimeout(this.lookAgain, ms)), due }
   }
 
   private readonly lookAgain = (): void => {
-    this.paceTimer = null
+    this.paceWait = null
     this.owner.onHeadroom(this)
     this.pace()
   }
