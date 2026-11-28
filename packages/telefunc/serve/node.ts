@@ -119,6 +119,9 @@ function installWebSocket(server: HttpServerOrWrapper): void {
     }
     const request = new Request(url, { headers: normalizeHeaders(req.headers) })
     globalObject.sockets.set(request, socket)
+    // crossws prepends the origin to the request target, so it needs origin-form here.
+    // TODO: remove once https://github.com/h3js/crossws/commit/442ba0b23a204e8ce8d1445f3fb3b5fcb9768561 is released.
+    if (req.url && !req.url.startsWith('/')) req.url = `${url.pathname}${url.search}`
     void ws.handleUpgrade(req, socket, head, request)
   }
   httpServer.on('upgrade', onUpgrade)

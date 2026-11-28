@@ -30,7 +30,6 @@ import { toPathKey } from '../../../utils/pathKey.js'
 import type { Telefunction } from '../types.js'
 import { getServerExtensionTypes } from '../serverConfig.js'
 import { holdUploadResponse } from '../../../workarounds/denoUploadResponseHold.js'
-import { node22AbortSignalLag } from '../../../workarounds/node22AbortSignalLag.js'
 
 type RunContext = {
   request: Request
@@ -225,8 +224,6 @@ async function readBody(
     const unwatch = () => clientGone.removeEventListener('abort', leftByClient)
     reader.onEnd = unwatch
     runContext.requestContext.onClose(async () => {
-      // On Node 22.0 the socket's abort listeners run before its combined signal updates.
-      if (!clientGone.aborted) await node22AbortSignalLag()
       try {
         await reader.discardRest(clientGone.aborted ? 'client' : 'server')
       } finally {
@@ -245,6 +242,7 @@ async function readBody(
         `The binary request declares more metadata than the server reads (over ${CALL_METADATA_MAX_BYTES} bytes).`,
         runContext,
       )
+      reader.letGo()
       return { isMalformedRequest: true }
     }
     const envelope = metadata ?? reader.truncation()

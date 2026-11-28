@@ -4,7 +4,6 @@ export type { ChunkSource }
 import type { Readable } from 'node:stream'
 import { assert } from '../../utils/assert.js'
 import { concatAll, decodeU32 } from './envelope.js'
-import { unwatchEarlyReadableError } from '../../utils/nodeReadableToWebRequest.js'
 import { releaseOrCancel } from '../../workarounds/workerdReaderReleaseLock.js'
 
 /** Shared sentinel — avoids zero-length subarray views that pin large ArrayBuffers. */
@@ -251,9 +250,7 @@ class ReadableChunks implements ChunkSource {
     stream.on('readable', this.wake)
     stream.on('end', this.end)
     stream.on('error', this.fail)
-    if (!stream.closed) stream.once('close', this.close)
-    unwatchEarlyReadableError.call(stream)
-    if (stream.closed) stream.off('error', this.fail)
+    stream.once('close', this.close)
   }
 
   next(): Promise<IteratorResult<Uint8Array<ArrayBuffer>>> {

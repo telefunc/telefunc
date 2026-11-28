@@ -52,7 +52,9 @@ class InlineStreamReader {
     if (len === STREAMING_ERROR_FRAME_MARKER) {
       // Error frame: [ERROR_MARKER][u32 payload_len][payload_bytes]
       const errorLen = await this.readU32()
+      if (this.cancelled) return null
       const errorBytes = await this.readExact(errorLen)
+      if (this.cancelled) return null
       const errorPayload: unknown = parse(textDecoder.decode(errorBytes))
       assert(isObject(errorPayload) && 'type' in errorPayload)
       if (errorPayload.type === STREAMING_ERROR_TYPE.ABORT) {

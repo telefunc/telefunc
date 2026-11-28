@@ -1,4 +1,4 @@
-export { nodeReadableToWebRequest, normalizeHeaders, unwatchEarlyReadableError }
+export { nodeReadableToWebRequest, normalizeHeaders }
 
 import type { EventEmitter } from 'node:events'
 import type { Readable, Writable } from 'node:stream'
@@ -16,17 +16,27 @@ async function nodeReadableToWebRequest(
   nativeBody: boolean,
   response?: Writable,
 ): Promise<{ request: Request; unwatch: () => void; clientGone: AbortSignal }> {
-  // Native readers observe `readable.errored` when they take over. Keep errors handled until then or until close.
-  if (!readable.closed) {
-    readable.on('error', ignoreEarlyReadableError)
-    readable.once('close', unwatchEarlyReadableError)
+  // Even a closed readable can still emit its error on the next tick.
+  const unwatchEarlyError = () => {
+    readable.off('error', ignoreEarlyReadableError)
+    readable.off('close', unwatchEarlyError)
+    readable.off('newListener', onNewListener)
   }
+  const onNewListener = (event: string | symbol, listener: (...args: unknown[]) => void) => {
+    if (event === 'error' && listener !== ignoreEarlyReadableError) unwatchEarlyError()
+  }
+  readable.on('error', ignoreEarlyReadableError)
+  readable.once('close', unwatchEarlyError)
+  readable.on('newListener', onNewListener)
   // Wire the readable's close event to an AbortSignal so that
   // request.signal fires when the client disconnects.
   // `close` fires both after normal completion and on premature disconnect —
   // readableAborted is true when the stream was destroyed before emitting 'end'
   // (i.e. client disconnected).
   const abortController = new AbortController()
+  const gone = new AbortController()
+  // Register before Request so its abort listeners see that the client is gone.
+  abortController.signal.addEventListener('abort', () => gone.abort(abortController.signal.reason), { once: true })
   readable.once('close', () => {
     if (readable.readableAborted) abortController.abort(readable.errored ?? undefined)
   })
@@ -35,7 +45,6 @@ async function nodeReadableToWebRequest(
     await loadStreamNodeModuleOnce()
     const { Readable } = getStreamNodeModule()
     body = Readable.toWeb(readable, { strategy: { highWaterMark: 0 } }) as ReadableStream<Uint8Array<ArrayBuffer>>
-    unwatchEarlyReadableError.call(readable)
   }
   const request = new Request(url, {
     method,
@@ -57,29 +66,16 @@ async function nodeReadableToWebRequest(
     socket.once('close', abort)
     unwatch = () => socket.off('close', abort)
   }
-  // The client left: its request was cut short, or once answered, its socket closed before the body's end.
-  const clientGone = AbortSignal.any([abortController.signal, socketClosesBeforeEnd(readable, socket)])
-  return { request, unwatch, clientGone }
-}
-
-/** Aborts once `socket` closes before `readable`'s end: the client left mid-upload. Once the call is answered, Node no
- *  longer ends the request then, and `serve()` no longer has the request's signal watch the socket (`unwatch`). Watched
- *  until the body's end, as keep-alive reuses the socket. */
-function socketClosesBeforeEnd(readable: Readable, socket: EventEmitter | null | undefined): AbortSignal {
-  const gone = new AbortController()
-  if (!socket || readable.readableEnded) return gone.signal
-  const left = () => gone.abort()
-  socket.once('close', left)
-  readable.once('end', () => socket.off('close', left))
-  return gone.signal
+  // Even after unwatch(), a socket that closes before the body's end interrupts its upload.
+  if (socket && !readable.readableEnded) {
+    const left = () => gone.abort()
+    socket.once('close', left)
+    readable.once('end', () => socket.off('close', left))
+  }
+  return { request, unwatch, clientGone: gone.signal }
 }
 
 function ignoreEarlyReadableError(): void {}
-
-function unwatchEarlyReadableError(this: Readable): void {
-  this.off('error', ignoreEarlyReadableError)
-  this.off('close', unwatchEarlyReadableError)
-}
 
 function normalizeHeaders(headers: HeadersInput): [string, string][] {
   // HTTP/2 puts `:method`, `:path`, `:authority`, `:scheme`, `:status` into `req.headers`.
