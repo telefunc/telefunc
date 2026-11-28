@@ -199,8 +199,7 @@ class FrameDemuxer {
   private static readonly MAX_BUFFER_BYTES_PER_INDEX = 1024 * 1024 // 1 MB
   private streamReader: InlineStreamReader
   private telefunctionName: string
-  private pendingFrames = new Map<number, Fifo<Uint8Array<ArrayBuffer>>>()
-  private pendingBytes = new Map<number, number>()
+  private pending = new Map<number, { frames: Fifo<Uint8Array<ArrayBuffer>>; bytes: number }>()
   private indexWaiters = new Map<
     number,
     { resolve: (v: Uint8Array<ArrayBuffer> | null) => void; reject: (e: unknown) => void }
@@ -233,8 +232,7 @@ class FrameDemuxer {
     if (this.cancelledIndices.has(index)) return
     // Drop buffered frames for this index. A finished one isn't counted as cancelled too: counted twice, it would cancel
     // the body under a stream still being read.
-    this.pendingFrames.delete(index)
-    this.pendingBytes.delete(index)
+    this.pending.delete(index)
     if (this.doneIndices.has(index)) return
     this.cancelledIndices.add(index)
     // Resolve any pending waiter with null (stream ended for this consumer)
@@ -261,9 +259,10 @@ class FrameDemuxer {
     if (this.cancelledIndices.has(index)) return null
     if (this.streamError) throw this.streamError
 
-    const buffered = this.pendingFrames.get(index)?.shift()
-    if (buffered) {
-      this.pendingBytes.set(index, (this.pendingBytes.get(index) ?? 0) - buffered.byteLength)
+    const pending = this.pending.get(index)
+    const buffered = pending?.frames.shift()
+    if (pending && buffered) {
+      pending.bytes -= buffered.byteLength
       this.resumeIfUnblocked(index)
       this.ensureReading()
       return buffered
@@ -353,13 +352,12 @@ class FrameDemuxer {
       return false
     }
     // No consumer waiting — buffer it
-    let pending = this.pendingFrames.get(index)
-    if (!pending) this.pendingFrames.set(index, (pending = new Fifo()))
-    pending.push(payload)
-    const newBytes = (this.pendingBytes.get(index) ?? 0) + payload.byteLength
-    this.pendingBytes.set(index, newBytes)
+    let pending = this.pending.get(index)
+    if (!pending) this.pending.set(index, (pending = { frames: new Fifo(), bytes: 0 }))
+    pending.frames.push(payload)
+    pending.bytes += payload.byteLength
     // Per-index backpressure: stop reading when this index's buffer exceeds 1 MB.
-    if (!this.canStopReading || newBytes < FrameDemuxer.MAX_BUFFER_BYTES_PER_INDEX) return false
+    if (!this.canStopReading || pending.bytes < FrameDemuxer.MAX_BUFFER_BYTES_PER_INDEX) return false
     this.pausedByIndex = index
     return true
   }
@@ -368,7 +366,7 @@ class FrameDemuxer {
   private resumeIfUnblocked(index: number): void {
     if (this.pausedByIndex !== index) return
     this.pausedByIndex = null
-    for (const [other, bytes] of this.pendingBytes) {
+    for (const [other, { bytes }] of this.pending) {
       if (bytes < FrameDemuxer.MAX_BUFFER_BYTES_PER_INDEX || this.doneIndices.has(other)) continue
       this.pausedByIndex = other
       return

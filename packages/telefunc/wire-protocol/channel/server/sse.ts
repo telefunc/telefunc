@@ -14,7 +14,7 @@ import {
 } from '../../constants.js'
 import { namesWireVersion } from '../../wire/requestKind.js'
 import { parseSseRequestMetadata, textDecoder, type SseRequestMetadata } from '../../wire/envelope.js'
-import { OversizeFrameError, BodyReader, StreamTruncatedError } from '../../wire/BodyReader.js'
+import { FrameReader, OversizeFrameError, StreamTruncatedError } from '../../wire/FrameReader.js'
 import { getChannelMux } from './ChannelMux.js'
 import { EventStream } from './EventStream.js'
 import type { Fault, ReconcileOutcome, ServerTransport, SessionHold, WireClose } from './ChannelMux.js'
@@ -51,7 +51,7 @@ type SseWire = {
   pendingDispatches: Set<Promise<unknown>>
   /** The bodies of the wire's requests the server reads: once the wire ended, each is read off for one ping deadline at
    *  most, then let go of (`endStream`). */
-  bodies: Set<BodyReader>
+  bodies: Set<FrameReader>
 }
 
 const globalObject = getGlobalObject('wire-protocol/channel/server/sse.ts', {
@@ -92,7 +92,7 @@ class SseServerTransport {
     // and should answer with a Node `Readable` so it pipes straight to the socket. Web
     // adapters get `request.body` (no `readable`) and want a `ReadableStream` back.
     const useNodeStream = readable !== undefined
-    const reader = new BodyReader(source)
+    const reader = new FrameReader(source)
     let metadata: SseRequestMetadata
     try {
       const rawMetadata = await reader.readFrame(SSE_METADATA_MAX_BYTES)
@@ -127,7 +127,7 @@ class SseServerTransport {
    *  (`runStreamResponse`). Returns immediately so the response headers can flush. */
   private async handleStreamResponsePost(
     connId: string,
-    reader: BodyReader,
+    reader: FrameReader,
     useNodeStream: boolean,
     request: Request,
   ): Promise<SseChannelHttpResponse> {
@@ -165,7 +165,7 @@ class SseServerTransport {
 
   /** Long-lived client→server upload POST. The body streams for the wire's lifetime, so every
    *  frame is dispatched fire-and-forget — awaiting one would stall the read loop behind it. */
-  private async handleStreamRequestPost(connId: string, reader: BodyReader): Promise<SseChannelHttpResponse> {
+  private async handleStreamRequestPost(connId: string, reader: FrameReader): Promise<SseChannelHttpResponse> {
     const wire = await this.resolveWire(connId)
     if (!wire) return refuse(REFUSED.noWire)
     reader.onBytes = () => this.mux.onWireBytes(wire)
@@ -181,7 +181,7 @@ class SseServerTransport {
 
   /** Dispatches the upload's frames as they come, to the body's end; after its wire's end, what the page writes is read
    *  off and not run, until the server lets go of the body (`endStream`). */
-  private async readUpload(wire: SseWire, reader: BodyReader): Promise<void> {
+  private async readUpload(wire: SseWire, reader: FrameReader): Promise<void> {
     try {
       while (true) {
         if (wire.closed) return await reader.discardRest('server')
@@ -210,7 +210,7 @@ class SseServerTransport {
   /** Short-lived outbox batch POST. A RECONCILE's RECONCILED goes as it is answered, ahead of what the frames behind it
    *  send: those are what the page carries with it, which it doesn't replay. Tracked in `pendingDispatches` so
    *  `runStreamResponse` won't send its own reconciled mid-batch. */
-  private async handleBatchPost(connId: string, reader: BodyReader): Promise<SseChannelHttpResponse> {
+  private async handleBatchPost(connId: string, reader: FrameReader): Promise<SseChannelHttpResponse> {
     const wire = await this.resolveWire(connId)
     if (!wire) return refuse(REFUSED.noWire)
     reader.onBytes = () => this.mux.onWireBytes(wire)
@@ -234,7 +234,7 @@ class SseServerTransport {
    *  ends, and the rest of the body is read off, as after any end. */
   private async answerAfterBody(
     wire: SseWire,
-    reader: BodyReader,
+    reader: FrameReader,
     read: Promise<void>,
   ): Promise<SseChannelHttpResponse> {
     wire.bodies.add(reader)
@@ -255,7 +255,7 @@ class SseServerTransport {
   /** Stream-response POST lifecycle: consume the initial reconcile batch; once its RECONCILE is answered, drain the
    *  batch POSTs in flight so their `_lastClientSeq` mutations land first and emit `reconciled`, ahead of what the
    *  frames carried behind it send; then release the `ready` gate the other POSTs are parked on. */
-  private async runStreamResponse(wire: SseWire, reader: BodyReader): Promise<void> {
+  private async runStreamResponse(wire: SseWire, reader: FrameReader): Promise<void> {
     try {
       await this.drain(wire, reader, async (outcome) => {
         if (!shouldSendReconciled(outcome, wire)) return
@@ -298,7 +298,7 @@ class SseServerTransport {
    *  `onReconciled` before the next frame is read. After the wire's end, what the page writes is read off and not run. */
   private async drain(
     wire: SseWire,
-    reader: BodyReader,
+    reader: FrameReader,
     onReconciled: (outcome: ReconcileOutcome) => void | Promise<void>,
   ): Promise<void> {
     while (true) {
@@ -313,7 +313,7 @@ class SseServerTransport {
 
   /** The next frame of `reader`, or null at the body's end. A frame the wire's end cut (`endStream`) is read off with the
    *  rest of the body. */
-  private async nextFrame(wire: SseWire, reader: BodyReader): Promise<Uint8Array<ArrayBuffer> | null> {
+  private async nextFrame(wire: SseWire, reader: FrameReader): Promise<Uint8Array<ArrayBuffer> | null> {
     try {
       return await reader.readFrame(WIRE_MAX_RAW_FRAME_BYTES, HEADER)
     } catch (err) {

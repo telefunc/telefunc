@@ -9,7 +9,8 @@ import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/values/server/request/registry.js'
 import { textDecoder } from '../../../wire-protocol/wire/envelope.js'
-import { BodyReader, OversizeFrameError, StreamTruncatedError } from '../../../wire-protocol/wire/BodyReader.js'
+import { UploadBodyReader } from '../../../wire-protocol/values/server/request/UploadBodyReader.js'
+import { OversizeFrameError, StreamTruncatedError } from '../../../wire-protocol/wire/FrameReader.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire-protocol/wire/requestKind.js'
 import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
@@ -213,7 +214,7 @@ async function readBody(
       logParseError('The binary request ends before its envelope is complete.', runContext)
       return { isMalformedRequest: true }
     }
-    const reader = new BodyReader(source)
+    const reader = new UploadBodyReader(source)
     // On Deno, the hold keeps the response open until the upload is over (workarounds/denoUploadResponseHold.ts).
     const hold = holdUploadResponse(request, runContext.clientGone, reader.restRead)
     runContext.requestContext.responseHold = hold
