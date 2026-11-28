@@ -375,7 +375,7 @@ broadcast.subscribe((n) => showToast(n))
 | `publish(data)` | Publish to every subscriber of the key. Returns a receipt. |
 | `subscribe(cb)` | Receive `(data, info)`. Returns an unsubscribe function, whose `opened` promise resolves once the subscription is in effect, or once you remove it while the channel is open. |
 | `publishBinary(data)` | Publish raw binary to every subscriber. Returns a receipt. |
-| `subscribeBinary(cb)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function with the same `opened` promise as `subscribe(cb)`'s. |
+| `subscribeBinary(cb)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function whose `opened` promise follows the same rules. |
 | `messages({ signal })` | Receive text and binary messages, each with its `info`, in a `for await` loop. |
 | `onOpen(cb)` | Called when the channel opens. |
 | `onClose(cb)` | Called when the channel closes. |
