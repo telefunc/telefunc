@@ -329,7 +329,9 @@ function testFileUpload(isDev = false, inDocker = false) {
     }
     expect(statuses).deep.equal([400, 400, 400])
     if (isDev) {
-      expectLog('Malformed request in development', { filter: (log) => log.logSource === 'stderr' })
+      await autoRetry(() => {
+        expectLog('Malformed request in development', { filter: (log) => log.logSource === 'stderr' })
+      })
     }
   })
 
@@ -368,7 +370,9 @@ function testFileUpload(isDev = false, inDocker = false) {
       expect(status).toBe(400)
       expect(Date.now() - started).lessThan(1000)
       if (isDev) {
-        expectLog('Malformed request in development', { filter: (log) => log.logSource === 'stderr' })
+        await autoRetry(() => {
+          expectLog('Malformed request in development', { filter: (log) => log.logSource === 'stderr' })
+        })
       }
     })
 

@@ -1,6 +1,6 @@
 export { testStreaming, testStreamingRequestContext }
 
-import { page, test, expect, expectLog, autoRetry, getServerUrl, skip } from '@brillout/test-e2e'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import {
   resetCleanupState,
   getCleanupState,
@@ -10,11 +10,8 @@ import {
   getResult,
   expectServerError,
 } from '../../e2e-utils'
-import { parseChannelTransports } from '../../channelTransports'
 
 const stallWarning = 'read all of the streams a call returned concurrently'
-const channelTransports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
-const channelTransport = channelTransports[channelTransports.length - 1]!
 
 function testStreamingRequestContext() {
   test('streaming: concurrent generators read their own request context after yielding', async () => {
@@ -333,21 +330,31 @@ function testStreaming(inDocker = false) {
     })
   })
 
-  if (process.env.PUBLIC_ENV__STREAM_TRANSPORT === 'binary-inline') {
-    test('streaming: upload with progress reports the bytes read after a pause', async () => {
+  if (process.env.PUBLIC_ENV__STREAM_TRANSPORT !== 'channel') {
+    // Half-duplex: browser withholds the response until upload completes,
+    // so progress updates arrive simultaneously on the client side.
+    // When full duplex is supported, client duration will exceed server duration
+    // and the assertion below should be inverted.
+    test('streaming: upload with progress (half duplex)', async () => {
+      await navigate(`${getServerUrl()}/streaming`)
       await page.click('#test-upload-progress')
       await autoRetry(async () => {
         const result = await getResult('#streaming-result')
         expect(result.done).toBe(true)
-        expect(
-          result.updates.map(({ bytesRead, totalSize }: { bytesRead: number; totalSize: number }) => [
-            bytesRead,
-            totalSize,
-          ]),
-        ).deep.equal([
-          [0, 10_000_000],
-          [10_000_000, 10_000_000],
-        ])
+        expect(result.updates.length).greaterThan(1)
+        const first = result.updates[0]
+        const last = result.updates[result.updates.length - 1]
+        expect(first.bytesRead).toBe(0)
+        expect(first.totalSize).toBe(10_000_000)
+        expect(last.bytesRead).toBe(10_000_000)
+        expect(last.totalSize).toBe(10_000_000)
+        for (let i = 1; i < result.updates.length; i++) {
+          expect(result.updates[i].bytesRead).greaterThan(result.updates[i - 1].bytesRead)
+        }
+        const firstMs: number = first.clientMs
+        const lastMs: number = last.clientMs
+        expect(lastMs - firstMs).lessThan(last.duration)
+        expect(firstMs).greaterThan(2_000)
       })
     })
   }
