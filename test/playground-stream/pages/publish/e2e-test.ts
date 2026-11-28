@@ -1,4 +1,4 @@
-export { testPublish, testPublishHold, testPublishFailingBackend, testSubscribeOrder }
+export { testPublish, testPublishHold, testPublishFailingBackend, testSubscribeOrder, testPublishStartup }
 
 import type { ConsoleMessage, WebSocket } from 'playwright-chromium'
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
@@ -575,6 +575,51 @@ function testPublish(isDev: boolean, inDocker = false) {
         })
     }
   }
+}
+
+/** Runs in its own server because the public transport override replaces the process's Broadcast plane. */
+function testPublishStartup() {
+  test('a telefunction returns 500 when inspecting its error or reporting to a monitor throws', async () => {
+    const call = (name: string) =>
+      page.request.post(`${getServerUrl()}/_telefunc`, {
+        headers: { 'x-telefunc-request': 'txt' },
+        data: { file: '/pages/publish/StartupBroadcast.telefunc.ts', name, args: [] },
+      })
+    const failed = await call('onThrowWithCauseGetter')
+    expect(failed.status()).toBe(500)
+    expect(await failed.text()).toBe('Internal Server Error')
+    const later = await call('onBugReports')
+    expect(await later.json()).deep.equal({ ret: ['broadcast-listener-bug: telefunction error'] })
+  })
+
+  test('broadcast startup owns the bytes and ordering a broker reuses before acknowledging', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#startup-bytes')
+    await autoRetry(async () => {
+      expect(await getResult('#publish-result')).deep.equal([
+        { bytes: [1, 11], seq: 1, timestamp: 10 },
+        { bytes: [2, 22], seq: 2, timestamp: 20 },
+      ])
+    })
+  })
+
+  test('a synchronous publish from a startup listener follows messages already queued', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#startup-order')
+    await autoRetry(async () => expect(await getResult('#publish-result')).deep.equal([1, 2, 3]))
+  })
+
+  test('a stalled broadcast subscription refuses excess startup bytes and releases its memory', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#startup-overload')
+    await autoRetry(async () => {
+      expect(await getResult('#publish-result')).deep.equal({
+        overloaded: 'ChannelOverflowError',
+        stoppedAfterRefusal: 1,
+        seen: [4, 5],
+      })
+    })
+  })
 }
 
 /** Tests that need the failing backend (failing-backend.ts), which a server without Redis installs. */

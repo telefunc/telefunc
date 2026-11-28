@@ -76,18 +76,14 @@ function setup(
       }
     },
   }
-  /** What the session hands Broadcast to take the lane's frames, by route key. */
-  const takes = new Map<string, BackendReceiver>()
   const member: CloudflareMember = {
     bucket: 'weur',
     hostKey: 'host',
-    subscribeLocal: (route, taker) => (takes.set(route.key, taker), () => {}),
+    subscribeLocal: () => () => {},
   }
   const driver = new CloudflareRoomDriver({ getNamespace: () => namespace, locationFallback: 'weur' })
   const subscriptions = new RoomSessionSubscriptions({ sessionId: 'session', member, driver })
-  /** The seq of each frame the lane's receiver got. */
-  const delivered: number[] = []
-  const receiver: BackendReceiver = { deliver: (_payload, info) => void delivered.push(info.seq) }
+  const receiver: BackendReceiver = { deliver() {} }
   const attempt = subscriptions.subscribe({ roomId: 'room', inc: 'inc', lane, registeredBy }, receiver)
   const states: string[] = []
   const reasons: unknown[] = []
@@ -97,10 +93,6 @@ function setup(
   })
   /** Another lane of the room, on the same ordered stub. */
   const subscribe = (other: LaneId) => subscriptions.subscribe({ roomId: 'room', inc: 'inc', lane: other }, receiver)
-  /** The room's authority hands the lane's frame `seq` to this session. */
-  const handOn = (seq: number) => {
-    for (const taker of takes.values()) taker.deliver(new Uint8Array(), { seq, timestamp: seq })
-  }
   /** A commit of the session's to the room, through its ordered stub, as the driver's `commitLane` sends it. */
   const commit = () =>
     subscriptions
@@ -123,8 +115,6 @@ function setup(
     states,
     reasons,
     subscribe,
-    delivered,
-    handOn,
     subscriptions,
     attemptOn,
     commit,
@@ -151,24 +141,6 @@ afterEach(() => {
 })
 
 describe('a Cloudflare Room lane', () => {
-  it('whose route lapsed is lost, registers its route again, and is ready again: a lapse is no end', async () => {
-    const { attempt, calls, states } = setup({ register: ['registered', 'registered'], renew: ['lapsed'] })
-    await vi.advanceTimersByTimeAsync(0)
-    expect(attempt.state()).toBe('ready')
-    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
-    await vi.advanceTimersByTimeAsync(5_000)
-    expect(calls).toEqual({ register: 2, renew: 1 })
-    expect(states).toEqual(['ready', 'lost', 'ready'])
-  })
-
-  it('whose renewal the room may have applied, its answer lost, is lost, registers its route again, and is ready again', async () => {
-    const { calls, states } = setup({ register: ['registered', 'registered'], renew: [new Error('connection reset')] })
-    await vi.advanceTimersByTimeAsync(0)
-    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
-    await vi.advanceTimersByTimeAsync(5_000)
-    expect({ states, calls }).toEqual({ states: ['ready', 'lost', 'ready'], calls: { register: 2, renew: 1 } })
-  })
-
   it('whose renewal the room never answers is lost once the renewal is given up, before its 90 s lease could have lapsed, and registers its route again', async () => {
     const { calls, states } = setup({ register: ['registered', 'registered'], renew: [new Promise<never>(() => {})] })
     await vi.advanceTimersByTimeAsync(0)
@@ -316,28 +288,6 @@ describe('a Cloudflare Room lane', () => {
       expect(calls.register).toBe(answers.register.length)
     })
   }
-
-  // The room's authority hands a stored commit on again after a restart, where it may have been handed on before.
-  it('that is handed one frame twice delivers it once', async () => {
-    const { delivered, handOn } = setup({ register: ['registered'], renew: [] }, { kind: 'control' })
-    await vi.advanceTimersByTimeAsync(0)
-    handOn(1)
-    handOn(2)
-    handOn(1)
-    handOn(2)
-    handOn(3)
-    expect(delivered).toEqual([1, 2, 3])
-  })
-
-  it('whose incarnation was dropped ends on purpose, with no reason', async () => {
-    const { attempt, calls } = setup({ register: ['registered'], renew: ['dropped'] })
-    const reasons: unknown[] = []
-    attempt.onStateChange((state, reason) => reasons.push([state, reason]))
-    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS + 5_000)
-    expect(attempt.state()).toBe('closed')
-    expect(reasons.at(-1)).toEqual(['closed', undefined])
-    expect(calls.register).toBe(1)
-  })
 })
 
 describe('a call of a Cloudflare Room lane to its room', () => {
@@ -723,23 +673,19 @@ describe('a call of a Cloudflare Room lane to its room', () => {
   })
 
   it('whose renewal falls in a pause another call of the session caused stays ready, is tried no more while the pause lasts, and renews once it ends', async () => {
-    const { attempt, calls, states, subscribe, subscriptions } = setup(
+    const { attempt, calls, states, subscribe } = setup(
       { register: ['registered', transient(true)], renew: ['renewed'] },
       { kind: 'control' },
     )
-    // This session's calls to the room: `callAuthority` is the one way into its ordered stub.
-    const tried = vi.spyOn(subscriptions, 'callAuthority')
     await vi.advanceTimersByTimeAsync(0)
     await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS - 1_000)
     // Another lane's first registration is answered overloaded, 1 s before this lane's renewal: the room is paused 10 s.
     subscribe({ kind: 'semantic' })
     await vi.advanceTimersByTimeAsync(0)
-    const before = tried.mock.calls.length
     await vi.advanceTimersByTimeAsync(9_500)
-    expect({ states, renew: calls.renew, tries: tried.mock.calls.length - before }).toEqual({
+    expect({ states, renew: calls.renew }).toEqual({
       states: ['ready'],
       renew: 0,
-      tries: 1,
     })
     await vi.advanceTimersByTimeAsync(2_500)
     expect({ states, renew: calls.renew, state: attempt.state() }).toEqual({

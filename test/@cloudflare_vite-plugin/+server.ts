@@ -2,12 +2,20 @@ import { Hono } from 'hono'
 import vike from '@vikejs/hono'
 import { Broadcast, config } from 'telefunc'
 import { Telefunc } from 'telefunc/cloudflare'
-import type { LeaseRegistered } from 'telefunc/__internal'
+import type { DurableStorage, LeaseRegistered } from 'telefunc/__internal'
 import { authorityCalls, authorityClocks } from './pages/room/authorityCalls'
 import { LAPSED_PRESENCE_REFUSED_FOR_MS, lapsedPresences } from './pages/lapsed-presence/presenceRecords'
 import { present, textAt } from '../checked'
 
-const tf = new Telefunc({ scale: 5 })
+const tf = new Telefunc({
+  scale: 5,
+  context(request) {
+    const user = request.headers.get('x-test-user')
+    return user === null ? {} : { user }
+  },
+})
+
+export type WorkerStorage<T extends DurableStorage = DurableObjectState['storage']> = T
 
 // The Cloudflare page's Hibernation snippet, assigned after the adapter.
 config.channel = {

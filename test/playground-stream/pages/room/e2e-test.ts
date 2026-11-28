@@ -12,6 +12,7 @@ export {
   testRoomRedisOrderStartsOver,
   testRoomRedisPublishLimit,
   testRoomStaleRead,
+  testRoomListenerContext,
 }
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Response, WebSocket } from 'playwright-chromium'
@@ -30,6 +31,8 @@ import {
 import { newCDPSession } from '../../../utils'
 import { fieldOf, listOf, numberOf, present } from '../../../checked'
 import type { NamedDemand } from './demandNames'
+import { parseChannelTransports } from '../../channelTransports'
+import { TAG } from '../../../../packages/telefunc/wire-protocol/wire/tags'
 
 /** On SSE the server waits out the 60 s reconnectTimeout for a closed tab. */
 const CLOSED_TAB_WAIT = { timeout: 90_000 }
@@ -229,6 +232,8 @@ async function openChat(chatId: string, name: string, how: 'join' | 'sign-in' | 
 }
 
 function testRoom() {
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)[0] === 'ws') testRoomMalformedAnswer()
+
   testRoomScenario<{ first: string; outcomes: string[]; got: string[] }>(
     'dm-overflow',
     'room: DMs to a page before its first listen() are held within 2 MiB and delivered on listen(); past it the oldest is dropped and its acknowledged send rejects',
@@ -453,11 +458,7 @@ function testRoom() {
     "room: bytes in a room's and a member's meta stay bytes, on the server and on the page",
     (r) => {
       expect(r.onServer.isBytes).deep.equal([true, true])
-      expect(r.onPage).deep.equal([
-        [1, 2, 3],
-        [4, 5, 6],
-        [7, 8],
-      ])
+      expect(r.onPage).deep.equal([[1, 2, 3], [4, 5, 6], [7, 8], [9], [10]])
     },
   )
   testRoomScenario<{
@@ -541,6 +542,7 @@ function testRoom() {
     fromPageUnsendable: unknown
     fromServer: unknown
     fromHeld: unknown
+    fromHeldBytes: number[] | null
     fromHeldUnsendable: unknown
     fromObserved: unknown
     fromCompeting: unknown
@@ -554,6 +556,7 @@ function testRoom() {
       expect(r.fromPageUnsendable).toBe("Internal client room error — see the recipient's client logs")
       expect(r.fromServer).deep.equal({ echo: 'hi' })
       expect(r.fromHeld).toBe('pong')
+      expect(r.fromHeldBytes).deep.equal([11, 22])
       expect(r.fromHeldUnsendable).toBe("Internal client room error — see the recipient's client logs")
       expect(r.fromObserved).toBe('ok')
       expect(r.fromCompeting).toBe('Only one listen() callback may return a reply')
@@ -1657,6 +1660,29 @@ function testRoom() {
       )
     },
   )
+  test('room: a join completed while its page is away applies before the reply, and the member publishes immediately', async () => {
+    if (!canCutWire()) return
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-join-across-reconnect')
+    const { roomId } = await autoRetry(() => getResult<{ roomId: string }>('#room-result'))
+    const action = `finishJoin_${roomId}`
+    await autoRetry(async () => expect((await getCleanupState())[action]).toBe('waiting'))
+    await page.context().setOffline(true)
+    try {
+      await cutWire()
+      await runServerAction(action)
+    } finally {
+      await page.context().setOffline(false)
+    }
+    await autoRetry(async () => {
+      expect(await getResult('#room-result')).deep.equal({
+        roomId,
+        path: ['join:Ada', 'answer:Ada'],
+        bytes: [7, 8],
+      })
+    })
+  })
+
   test('room: a page that reconnects while its join is pending gets the leave, with its cause, of a member removed while it was away', async () => {
     if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)
@@ -1829,8 +1855,87 @@ function testRoomDemand() {
   )
 }
 
+function testRoomMalformedAnswer() {
+  test('room: a malformed meta reply rejects its write and later valid notices still apply', async () => {
+    const context = await present(page.context().browser(), 'the browser').newContext()
+    try {
+      const target = await context.newPage()
+      let changed = 0
+      await target.routeWebSocket(/\/_telefunc/, (socket) => {
+        const server = socket.connectToServer()
+        server.onMessage((message) => {
+          if (typeof message === 'string' || message[0] !== TAG.ACK_RES || !message.includes('malformed-meta-marker')) {
+            return socket.send(message)
+          }
+          const frame = Buffer.from(message)
+          const seq = frame.indexOf('"seq":')
+          if (seq === -1) throw new Error('The Room meta acknowledgement had no sequence')
+          frame.write('"bad":', seq)
+          changed++
+          socket.send(frame)
+        })
+      })
+      await navigate(`${getServerUrl()}/room`, undefined, target)
+      await target.click('#test-room-malformed-answer')
+      await autoRetry(async () => {
+        const raw = await target.textContent('#room-result')
+        expect(JSON.parse(present(raw, 'the Room result'))).deep.equal({
+          rejected: true,
+          meta: 'Recovered',
+          subsequentJoin: 'After',
+        })
+      })
+      expect(changed).toBe(1)
+    } finally {
+      await context.close()
+    }
+  })
+}
+
+function testRoomListenerContext(asyncContext: boolean) {
+  test(`Room and Broadcast listeners withhold both requests' context (${asyncContext ? 'async' : 'sync'})`, async () => {
+    const call = async (name: string, user: string, args: unknown[] = []) => {
+      const response = await page.request.post(`${getServerUrl()}/_telefunc`, {
+        headers: { 'x-telefunc-request': 'txt', 'x-test-user': user },
+        data: { file: '/pages/room/Room.telefunc.ts', name, args },
+      })
+      expect(response.status()).toBe(200)
+      return (await response.json()).ret
+    }
+    const id = await call('onListenAsUser', 'Alice')
+    const result = await call('onPublishAsOtherUser', 'Bob', [id])
+    expect(result).deep.include({
+      subscriber: 'Alice',
+      publisher: 'Bob',
+      roomMessages: ['withheld'],
+      dm: 'withheld',
+      broadcastMessages: [
+        ['withheld', 'withheld'],
+        ['withheld', 'withheld'],
+      ],
+      publisherMark: null,
+    })
+    if (asyncContext)
+      expect(result.scopedMarks).deep.equal([
+        [null, 1],
+        [null, 2],
+      ])
+  })
+}
+
 /** Tests that need the failing backend (failing-backend.ts), which a server without Redis installs. */
 function testRoomFailingBackend() {
+  testRoomListenerContext(false)
+
+  test('room: a memory-backed join retains metadata larger than a Redis row', async () => {
+    const response = await page.request.post(`${getServerUrl()}/_telefunc`, {
+      headers: { 'x-telefunc-request': 'txt' },
+      data: { file: '/pages/room/Room.telefunc.ts', name: 'onLargeMemoryJoin', args: [] },
+    })
+    expect(response.status()).toBe(200)
+    expect(await response.json()).deep.equal({ ret: { joined: true, keptMeta: true } })
+  })
+
   test("room: a store write that fails once heals: a failed leave can be retried, a failed join leaves no member, a leave whose event and reply are lost ends once with 'left', a DM whose handoff is lost rejects its send, and a lane the store drops delivers again", async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-hiccups')

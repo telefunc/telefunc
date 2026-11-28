@@ -46,7 +46,7 @@ type SmallPendingState = {
     attached: { receipts: number; last: string }
     reconnected: { receipts: number; last: string }
   } | null
-  broadcastAwayShared: { received: number[][]; closed: string[] } | null
+  broadcastAwayShared: { received: number[][]; firstBytes: number[][]; closed: string[] } | null
   broadcastBehindCloses: {
     seqsAhead: number[]
     closeErr: string | null
@@ -326,9 +326,16 @@ function testSmallPending() {
     await page.click('#channel-test-broadcast-away-shared')
     await autoRetry(
       async () => {
-        const { received, closed } = defined((await stateOf()).broadcastAwayShared, 'broadcastAwayShared')
+        const { received, firstBytes, closed } = defined((await stateOf()).broadcastAwayShared, 'broadcastAwayShared')
         expect(closed).deep.equal(['open', 'open'])
-        expect(received).deep.equal([[18], [18]])
+        expect(received).deep.equal([
+          [1, 19, 20],
+          [1, 19, 20],
+        ])
+        expect(firstBytes).deep.equal([
+          [0, 0, 0],
+          [0, 0, 0],
+        ])
       },
       { timeout: 30_000 },
     )

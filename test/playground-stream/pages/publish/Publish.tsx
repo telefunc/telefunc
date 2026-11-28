@@ -50,6 +50,7 @@ import {
   onRedisAllowsEveryKey,
   onPublishTo,
 } from './Publish.telefunc'
+import { onStartupBytes, onStartupOrder, onStartupOverload } from './StartupBroadcast.telefunc'
 import { parseChannelTransports } from '../../channelTransports'
 
 type ShieldState = {
@@ -606,6 +607,18 @@ function Publish() {
       >
         Broadcast Shield
       </button>
+
+      {(
+        [
+          ['startup-bytes', 'Reused broker bytes before open', onStartupBytes],
+          ['startup-order', 'Publish during broker startup', onStartupOrder],
+          ['startup-overload', 'Broker startup memory limit', onStartupOverload],
+        ] as const
+      ).map(([id, label, run]) => (
+        <button key={id} id={id} onClick={async () => setResult(JSON.stringify(await run()))}>
+          {label}
+        </button>
+      ))}
 
       <h2>Subscribe the store refuses</h2>
 

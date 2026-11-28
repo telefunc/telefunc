@@ -31,10 +31,11 @@ function ChannelDemo() {
     if (channelRef.current && !channelRef.current.isClosed) return
     addLog('system', 'Calling onChannelInit()...')
 
-    const { channel, serverTime } = await onChannelInit()
+    const { channel, serverTime, openingUser } = await onChannelInit()
     channelRef.current = channel
 
     addLog('system', `Connected! Server time: ${new Date(serverTime).toISOString()}`)
+    if (openingUser !== undefined) addLog('system', `Opened by ${openingUser}`)
     setConnected(true)
 
     channel.listen((msg) => {
@@ -64,6 +65,13 @@ function ChannelDemo() {
     addLog('out', JSON.stringify(msg))
     setEchoInput('')
   }, [echoInput, addLog])
+
+  const readContext = useCallback(async () => {
+    const channel = channelRef.current
+    if (channel === null) return
+    const user = await channel.send({ type: 'context' }, { ack: true })
+    addLog('in', `Channel request: ${user}`)
+  }, [addLog])
 
   const sendOversized = useCallback(() => {
     if (channelRef.current?.isClosed !== false) return
@@ -125,6 +133,9 @@ function ChannelDemo() {
           />
           <button type="button" id="send-echo-btn" onClick={sendEcho} style={{ padding: '4px 12px' }}>
             Send Echo
+          </button>
+          <button type="button" id="channel-context-btn" onClick={readContext}>
+            Read channel context
           </button>
           <button type="button" id="send-oversized-btn" onClick={sendOversized} style={{ padding: '4px 12px' }}>
             Send 32 MiB

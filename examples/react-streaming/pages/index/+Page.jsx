@@ -1,14 +1,15 @@
 import React, { Suspense, useState, useEffect } from 'react'
-import { TodoList } from './TodoList'
+import { Profile, TodoList } from './TodoList'
 
 export { Page }
 
-function Page() {
+function Page({ showProfile }) {
   return (
     <>
       <h1>To-do List</h1>
       <Timer />
       <Suspense fallback={<div>Loading...</div>}>
+        {showProfile && <Profile />}
         <TodoList />
       </Suspense>
       <Counter />

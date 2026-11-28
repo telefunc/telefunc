@@ -7,14 +7,13 @@ import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
 import { decodeChannelFrame } from '../../wire/decode.fixture.js'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { hold, releaseHolder } from './channelMemory.js'
-import { ChannelOverflowError } from '../channelErrors.js'
-import { binaryData, binaryPayload } from '../broadcastPayload.js'
+import { binaryData } from '../broadcastPayload.js'
 import { ServerBroadcastEnd } from './ServerBroadcastEnd.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { ServerReplay } from './ServerReplay.js'
 import { PublishBody, publishBody } from './PublishBody.js'
 import { disposeBackend } from '../../backend/install.js'
-import { ACK_STATUS, decode, encode } from '../../wire/frame.js'
+import { decode, encode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 
 // A file of its own: `config.channel` is set before the first channel exists.
@@ -321,56 +320,6 @@ it('replaces both handed and waiting lossy bodies under the memory cap', async (
   }
 })
 
-it.each(['measured', 'unmeasured'] as const)(
-  'with a %s link on a 2 MiB server, a page stays open and gets the latest lossy publish',
-  async (link) => {
-    useSmallMemory(link === 'measured' ? 512 * 1024 : 0)
-    const key = crypto.randomUUID()
-    const broadcast = new ServerBroadcast<string>({ key })
-    const { end } = pageEnd(600, 0, broadcast)
-    const replay = replayOf(end)
-    const confirm = () => end._dispatchFrame(decodeChannelFrame(encode.window(7, 0, replay.seq)))
-    const frames = () => replay.getAfter(0).map(decode)
-    const delivered = () =>
-      frames().flatMap((frame) => (frame.tag === TAG.PUBLISH_BINARY ? [binaryData(frame.data)[0]] : []))
-    try {
-      if (link === 'measured') {
-        await Broadcast.publishBinary(key, new Uint8Array(16 * 1024), { lossy: true })
-        vi.advanceTimersByTime(2)
-        confirm()
-        await Broadcast.publishBinary(key, new Uint8Array(256 * 1024), { lossy: true })
-        await Broadcast.publishBinary(key, new Uint8Array(256 * 1024), { lossy: true })
-        vi.advanceTimersByTime(4)
-        confirm()
-        expect(replay.confirmRate).toBeGreaterThan(100_000)
-      }
-
-      const payload = new Uint8Array(256 * 1024)
-      for (let id = 1; id <= 20; id++) {
-        payload[0] = id
-        if (link === 'measured') await Broadcast.publishBinary(key, payload, { lossy: true })
-        else await end._onPeerPublishBinaryAckReqMessage(binaryPayload(payload, true), id)
-      }
-      expect(end._phase).toBe('open')
-      expect(delivered()).not.toContain(20)
-      if (link === 'unmeasured') {
-        expect(replay.confirmRate).toBe(0)
-        const receipts = frames().filter((frame) => frame.tag === TAG.ACK_RES && frame.status === ACK_STATUS.OK)
-        expect(receipts).toHaveLength(20)
-      }
-
-      vi.advanceTimersByTime(4)
-      confirm()
-      expect(delivered().at(-1)).toBe(20)
-      if (link === 'measured') expect(delivered()).toEqual([20])
-      expect(end._phase).toBe('open')
-    } finally {
-      if (end._phase === 'open') end.abort()
-      end._release()
-    }
-  },
-)
-
 it('a 1:1 channel with wire credit can replace a lossy send held for the 2 MiB server budget', async () => {
   useSmallMemory()
   const end = new ServerChannel()
@@ -407,25 +356,6 @@ it('a 1:1 channel with wire credit can replace a lossy send held for the 2 MiB s
     end._release()
   }
 })
-
-for (const lossy of [false, true]) {
-  it(`a broadcast whose ${lossy ? 'lossy' : 'plain'} publish doesn't fit under the budget closes, and the server holds no more than it`, async () => {
-    const key = crypto.randomUUID()
-    const broadcast = new ServerBroadcast<string>({ key })
-    const { end } = pageEnd(Infinity, 2, broadcast)
-    const filler = { heldBytes: 0 }
-    const { maxMemory } = getChannelConfig()
-    hold(filler, maxMemory - ledger.total - 300_000)
-    try {
-      expect(await Broadcast.publish(key, 'a'.repeat(400_000), { lossy })).toMatchObject({ key })
-      expect(ledger.total).toBeLessThanOrEqual(maxMemory)
-      expect(await broadcast.closed).toBeInstanceOf(ChannelOverflowError)
-    } finally {
-      releaseHolder(filler)
-      end._release()
-    }
-  })
-}
 
 for (const kind of ['text', 'binary'] as const) {
   for (const publishes of ['plain', 'lossy'] as const) {

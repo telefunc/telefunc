@@ -1,21 +1,52 @@
-export { pageRoom, loneMember }
+export { pageRoom }
 
 import type { ChannelPublishInfo } from 'telefunc/__internal'
 import { ClientRoom } from '../client/room.js'
-import { LoneMember } from '../client/LoneMember.js'
-import type { ClientRoomEvent } from '../client/ClientRoomHandle.js'
+import type { ClientRoomEvent, ClientRoomHandleOptions } from '../client/ClientRoomHandle.js'
 import type { PageRequest } from '../client/stubChannel.js'
-import type { ParticipantStubNotice } from '../shared/protocol.js'
 
-/** What a stub's channel answers in place of the server's answer: a join's, a meta write's, a publish's. */
-type Answers = { join?: unknown; metaWrite?: unknown; publish?: unknown }
-
-/** A page's room of `members`, each with its join time, on `stubChannel()`; the requests it was sent; what ends the
- *  channel's wire; and what hands the room an event as the server sends one. */
-function pageRoom(members: Record<string, number> = {}, answers: Answers = {}) {
-  const { end, requests, endWire, deliver } = stubChannel<ClientRoomEvent>(answers)
+/** A page's room of `members`, with a channel that answers joins and metadata writes, and takes injected events. */
+function pageRoom(members: Record<string, number> = {}) {
+  const closes: Array<(err: Error | null) => void> = []
+  let onText: ((notice: ClientRoomEvent, info: ChannelPublishInfo) => void) | null = null
+  let seq = 0
+  let metaSeq = 0
+  const end = {
+    isClosed: false,
+    isConnected: true,
+    _sendRequest: async (req: PageRequest) => {
+      if (req.__r === 'req-join') return { ok: true, value: { id: 'me', joinedAt: 0 } }
+      if (req.__r === 'req-set-meta') return { ok: true, value: { seq: ++metaSeq, meta: req.meta } }
+      if (req.__r === 'req-update-meta') return { ok: true, value: { seq: ++metaSeq, attrs: req.attrs } }
+      throw new Error(`Unexpected request ${req.__r}`)
+    },
+    // It takes core's callback of any kind, and keeps the text one, which takes any notice, for `deliver()`.
+    _subscribeLocal: (kind: string, callback: (notice: unknown, info: ChannelPublishInfo) => void) => {
+      if (kind === 'text') onText = callback
+      return () => {}
+    },
+    _sendReply: () => {
+      throw new Error('Unexpected DM reply')
+    },
+    _publishUnreported: unexpectedPublish,
+    _publishBinaryUnreported: unexpectedPublish,
+    _confirmSoon: () => {},
+    _setSubscribed: () => {},
+    _setWantParts: () => {},
+    onOpen: () => () => {},
+    onClose: (callback: (err: Error | null) => void) => {
+      closes.push(callback)
+      return () => {}
+    },
+    onDisconnect: () => () => {},
+    onReconnect: () => () => {},
+    close: async () => null,
+  }
+  async function unexpectedPublish() {
+    throw new Error('Unexpected publish')
+  }
   const room = new ClientRoom({
-    end,
+    end: end as unknown as ClientRoomHandleOptions['end'],
     snapshot: {
       channelId: 'channel',
       roomId: crypto.randomUUID(),
@@ -31,72 +62,6 @@ function pageRoom(members: Record<string, number> = {}, answers: Answers = {}) {
       })),
     },
   })
-  return { room, requests, endWire, deliver }
-}
-
-/** A participant a telefunction returned alone, on `stubChannel()` to its stub, and what hands it a notice as the stub
- *  sends one. */
-function loneMember(answers: Answers = {}) {
-  const { end, deliver } = stubChannel<ParticipantStubNotice>(answers)
-  const metadata = {
-    channelId: 'channel',
-    roomId: crypto.randomUUID(),
-    id: crypto.randomUUID(),
-    meta: {},
-    selfDelivery: false,
-    identity: null,
-  }
-  return { me: new LoneMember({ end, metadata }).participant, deliver }
-}
-
-/** A channel to a Room stub, relaying `Notice`, that answers a join as `me` and each meta write as the server does, at the next seq,
- *  and sends nothing else. `answers` puts a value of its own in the place of a join's or a meta write's answer, and
- *  answers a publish with one. */
-function stubChannel<Notice>(answers: Answers) {
-  const closes: Array<(err: Error | null) => void> = []
-  let onText: ((notice: Notice, info: ChannelPublishInfo) => void) | null = null
-  let seq = 0
-  const requests: PageRequest[] = []
-  let metaSeq = 0
-  const end = {
-    isClosed: false,
-    isConnected: true,
-    _sendRequest: async (req: PageRequest) => {
-      requests.push(req)
-      if (req.__r === 'req-join')
-        return { ok: true, value: 'join' in answers ? answers.join : { id: 'me', joinedAt: 0 } }
-      if ('metaWrite' in answers && (req.__r === 'req-set-meta' || req.__r === 'req-update-meta'))
-        return { ok: true, value: answers.metaWrite }
-      if (req.__r === 'req-set-meta') return { ok: true, value: { seq: ++metaSeq, meta: req.meta } }
-      if (req.__r === 'req-update-meta') return { ok: true, value: { seq: ++metaSeq, attrs: req.attrs } }
-      throw new Error(`Unexpected request ${req.__r}`)
-    },
-    // It takes core's callback of any kind, and keeps the text one, which takes any notice, for `deliver()`.
-    _subscribeLocal: (kind: string, callback: (notice: unknown, info: ChannelPublishInfo) => void) => {
-      if (kind === 'text') onText = callback
-      return () => {}
-    },
-    _sendReply: () => {
-      throw new Error('Unexpected DM reply')
-    },
-    _publishUnreported: () => publish(),
-    _publishBinaryUnreported: () => publish(),
-    _confirmSoon: () => {},
-    _setSubscribed: () => {},
-    _setWantParts: () => {},
-    onOpen: () => () => {},
-    onClose: (callback: (err: Error | null) => void) => {
-      closes.push(callback)
-      return () => {}
-    },
-    onDisconnect: () => () => {},
-    onReconnect: () => () => {},
-    close: async () => null,
-  }
-  async function publish() {
-    if (!('publish' in answers)) throw new Error('Unexpected publish')
-    return { ok: true, value: answers.publish }
-  }
-  const deliver = (notice: Notice) => onText?.(notice, { key: 'room', seq: ++seq, timestamp: 0 })
-  return { end, requests, endWire: () => closes.forEach((close) => close(null)), deliver }
+  const deliver = (notice: ClientRoomEvent) => onText?.(notice, { key: 'room', seq: ++seq, timestamp: 0 })
+  return { room, endWire: () => closes.forEach((close) => close(null)), deliver }
 }

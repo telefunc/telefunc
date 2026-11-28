@@ -198,17 +198,20 @@ function testRedisOutages() {
 }
 
 function testRedisAcrossServers() {
-  test("broadcast: a key's binary frames reach another server at once after a text publish on it", async () => {
+  test("broadcast: UTF-8 text and binary frames reach another server in order, with the publisher's receipts", async () => {
     const key = newId('redis-kinds')
     try {
       await broadcastRequest('b', '/api/broadcast-cross-instance/subscribe', key, 'POST')
       const start = performance.now()
-      await broadcastRequest('a', '/api/broadcast-cross-instance/publish', key, 'POST', 'text')
+      const text = 'Zażółć 😀'
+      const receipts = [await broadcastRequest('a', '/api/broadcast-cross-instance/publish', key, 'POST', text)]
       for (const n of [1, 2, 3, 4, 5]) {
-        await broadcastRequest('a', '/api/broadcast-cross-instance/publish?kind=binary', key, 'POST', n)
+        receipts.push(await broadcastRequest('a', '/api/broadcast-cross-instance/publish?kind=binary', key, 'POST', n))
       }
       await retry(10_000, async () => {
-        expect(await broadcastReceived('b', key)).deep.equal(['text', ...[1, 2, 3, 4, 5].map((n) => `binary:${n}`)])
+        const result = await broadcastRequest('b', '/api/broadcast-cross-instance/received', key)
+        expect(result.received).deep.equal([text, ...[1, 2, 3, 4, 5].map((n) => `binary:${n}`)])
+        expect(result.ordering).deep.equal(receipts.map(({ seq, timestamp }) => ({ seq, timestamp })))
       })
       // A frame held for a missing predecessor waits one second.
       expect(performance.now() - start).lessThan(800)

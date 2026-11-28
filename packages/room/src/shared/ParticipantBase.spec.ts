@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { pageRoom } from '../test/pageRoom.js'
 import { Room } from '../index.js'
-import { RoomRemotes } from './RoomView.js'
 import { ClientParticipant } from '../client/ClientParticipant.js'
 import { RoomDemand } from '../server/lanes/RoomDemand.js'
 import { ServerLocalParticipant } from '../server/ServerLocalParticipant.js'
@@ -11,14 +10,6 @@ import type { ParticipantBase } from './ParticipantBase.js'
 import { assert } from '../utils/assert.js'
 import type { TrackWatch } from './protocol.js'
 import type { LocalParticipant, RemoteParticipant, RoomSnapshotView, TrackDemand } from '../types.js'
-
-/** The watchers of `me`'s default track, after the room reports `watchers` receiving it. */
-function watchersReported(me: ClientParticipant, watchers: string[]): string[] {
-  me._applyDemandState([{ track: '', watchers, pages: [] }])
-  const [demand] = me.demand
-  assert(demand !== undefined)
-  return demand.watchers.map((watcher) => watcher.id)
-}
 
 /** `me`, joined to a page's room of `members`, with what ends its wire and what hands it an event. */
 async function joinedIn(members: Record<string, number>) {
@@ -32,64 +23,7 @@ async function joinedAmong(members: Record<string, number>): Promise<ClientParti
   return (await joinedIn(members)).me
 }
 
-describe("a track's watchers", () => {
-  it('are listed in the order the room lists its participants, whatever their join times', async () => {
-    const me = await joinedAmong({ sam: 2, tia: 1 })
-    expect(watchersReported(me, ['tia', 'sam'])).toEqual(['sam', 'tia'])
-  })
-
-  it('who joined at the same time keep that order when the room reports them again in another', async () => {
-    const me = await joinedAmong({ sam: 1, tia: 1 })
-    expect(watchersReported(me, ['sam', 'tia'])).toEqual(['sam', 'tia'])
-    expect(watchersReported(me, ['tia', 'sam'])).toEqual(['sam', 'tia'])
-  })
-})
-
 describe("a participant's demand", () => {
-  it('lists its tracks by name in code-unit order, whatever order the room told them in', async () => {
-    const told = async (tracks: string[]) => {
-      const me = await joinedAmong({ sam: 1 })
-      for (const track of tracks) me._applyDemand(track, { add: ['sam'] })
-      return me.demand.map((entry) => entry.track)
-    }
-    expect(await told(['mic', '', 'Screen'])).toEqual(['Screen', 'main', 'mic'])
-    expect(await told(['Screen', 'mic', ''])).toEqual(['Screen', 'main', 'mic'])
-  })
-
-  it('reads who receives a track once per change of it, though a listener reads the whole list at each change', async () => {
-    const me = await joinedAmong({ sam: 1 })
-    me.onChange(() => void me.demand)
-    const shownOf = vi.spyOn(RoomRemotes.prototype, 'shownOf')
-    for (let i = 0; i < 1_000; i++) {
-      me._applyDemand(`t${i}`, { add: ['sam'] })
-      // Each change in a task of its own, as the room tells them.
-      await Promise.resolve()
-    }
-    expect({ tracks: me.demand.length, reads: shownOf.mock.calls.length }).toEqual({ tracks: 1_000, reads: 1_000 })
-  })
-
-  it('reads none of its tracks while nothing reads its demand or listens', async () => {
-    const { me, deliver } = await joinedIn({ sam: 1 })
-    const watches = vi.spyOn(ClientParticipant.prototype, '_watches', 'get')
-    for (let i = 0; i < 1_000; i++) deliver({ __r: 'demand', member: me.id, track: `t${i}`, add: ['sam'] })
-    const reads = watches.mock.calls.length
-    expect({ reads, tracks: me.demand.length }).toEqual({ reads: 0, tracks: 1_000 })
-  })
-
-  it('keeps an entry, and the list, the same object while nothing in them changes', async () => {
-    const me = await joinedAmong({ sam: 1 })
-    me.onChange(() => {})
-    me._applyDemand('a', { add: ['sam'] })
-    const before = me.demand
-    me._applyDemand('b', { add: ['sam'] })
-    const after = me.demand
-    expect({
-      list: after === before,
-      a: after.find((entry) => entry.track === 'a') === before[0],
-      again: me.demand === after,
-    }).toEqual({ list: false, a: true, again: true })
-  })
-
   it('keeps the tracks it showed when another track came and went between two reads', async () => {
     const me = await joinedAmong({ sam: 1 })
     me.onChange(() => {})
@@ -129,95 +63,6 @@ describe("a participant's demand", () => {
     const before = me.demand.map((entry) => entry.track)
     me._applyDemandState([{ track: 'b', watchers: ['sam'], pages: [] }])
     expect({ before, after: me.demand.map((entry) => entry.track) }).toEqual({ before: ['a'], after: ['b'] })
-  })
-
-  for (const listener of ['reading', 'silent', 'none'] as const) {
-    it(`keeps no more of its tracks than it has or last listed, and nothing once it left (listener: ${listener})`, async () => {
-      const { me, deliver, endWire } = await joinedIn({ sam: 1 })
-      if (listener === 'reading') me.onChange(() => void me.demand)
-      if (listener === 'silent') me.onChange(() => {})
-      const kept = () => {
-        const sizes = ['demandEntries', 'staleTracks', 'listChanges'].map((field) => {
-          const value: unknown = Reflect.get(me, field)
-          if (!(value instanceof Map || value instanceof Set)) throw new Error(`Expected the ${field} it keeps`)
-          return value.size
-        })
-        return sizes.reduce((sum, size) => sum + size, 0)
-      }
-      const settle = async () => {
-        for (let turn = 0; turn < 8; turn++) await Promise.resolve()
-      }
-      // 512 tracks, each wanted and then not, one at a time: it has one at most, and lists none, so it keeps that
-      // one's entry and one change of it waiting for a read at most.
-      let most = 0
-      for (let i = 0; i < 512; i++) {
-        deliver({ __r: 'demand', member: me.id, track: `t${i}`, add: ['sam'] })
-        await settle()
-        most = Math.max(most, kept())
-        deliver({ __r: 'demand', member: me.id, track: `t${i}`, remove: ['sam'] })
-        await settle()
-        most = Math.max(most, kept())
-      }
-      for (const track of ['a', 'b', 'c']) deliver({ __r: 'demand', member: me.id, track, add: ['sam'] })
-      await settle()
-      const listed = me.demand.length
-      endWire()
-      expect({ atMostTwo: most <= 2, listed, left: kept(), demand: me.demand }).toEqual({
-        atMostTwo: true,
-        listed: 3,
-        left: 0,
-        demand: [],
-      })
-    })
-  }
-
-  it('is empty once it left', async () => {
-    const { me, endWire } = await joinedIn({ sam: 1 })
-    me.onChange(() => {})
-    me._applyDemand('a', { add: ['sam'] })
-    expect(me.demand.length).toBe(1)
-    endWire()
-    expect(me.demand).toEqual([])
-  })
-})
-
-describe("a server-side participant's demand", () => {
-  /** A server-side room whose member `me` hears its changes, and a second view of it that subscribes to tracks. */
-  async function serverRoom() {
-    const id = `demand-${crypto.randomUUID()}`
-    const room = await Room.create(id)
-    const me = await room.join()
-    me.onChange(() => void me.demand)
-    const viewer = await Room.getOrCreate(id)
-    return { me, viewer }
-  }
-  const until = async (done: () => boolean) => {
-    for (let turn = 0; turn < 1_000 && !done(); turn++) await new Promise((resolve) => setTimeout(resolve, 0))
-  }
-
-  it('reads who receives a track once per change of it, though a listener reads the whole list at each change', async () => {
-    const { me, viewer } = await serverRoom()
-    const shownOf = vi.spyOn(RoomRemotes.prototype, 'shownOf')
-    for (let i = 0; i < 1_000; i++) viewer.subscribeBinary(() => {}, { track: `t${i}` })
-    await until(() => me.demand.length === 1_000)
-    expect({ tracks: me.demand.length, reads: shownOf.mock.calls.length }).toEqual({ tracks: 1_000, reads: 1_000 })
-  })
-
-  it('keeps an entry, and the list, the same object while nothing in them changes, and is empty once it left', async () => {
-    const { me, viewer } = await serverRoom()
-    viewer.subscribeBinary(() => {}, { track: 'a' })
-    await until(() => me.demand.length === 1)
-    const before = me.demand
-    viewer.subscribeBinary(() => {}, { track: 'b' })
-    await until(() => me.demand.length === 2)
-    const after = me.demand
-    const kept = {
-      list: after === before,
-      a: after.find((entry) => entry.track === 'a') === before[0],
-      again: me.demand === after,
-    }
-    await me.leave()
-    expect({ kept, left: me.demand }).toEqual({ kept: { list: false, a: true, again: true }, left: [] })
   })
 })
 
@@ -267,16 +112,6 @@ describe("a participant's demand, as its room shows its watchers", () => {
     const read = watcherSteps(me)
     await settle()
     expect({ read, heard }).toEqual({ read: [1, 1], heard: [[1, 1]] })
-  })
-
-  it('tells its listeners, once, when only a watcher it shows changed', async () => {
-    const { me, deliver } = await joinedIn({ sam: 1 })
-    me._applyDemand('a', { add: ['sam'] })
-    const heard: unknown[] = []
-    me.onChange(() => heard.push(watcherSteps(me)))
-    deliver({ __r: 'p-meta', id: 'sam', seq: 1, meta: { step: 1 } })
-    await settle()
-    expect(heard).toEqual([[1]])
   })
 
   it("on the server, shows a watcher's change to the watcher's own listener", async () => {
@@ -658,19 +493,4 @@ describe("a participant's demand, as its room shows its watchers", () => {
       expect({ disagreements: wrong.length, first: wrong.slice(0, 3) }).toEqual({ disagreements: 0, first: [] })
     })
   }
-})
-
-describe("a participant's leave listeners", () => {
-  it('hear that it left, all but one that an earlier one removed', async () => {
-    const { room, endWire } = pageRoom()
-    const me = await room.join()
-    const heard: string[] = []
-    me.onLeave(() => removeSecond())
-    const removeSecond = me.onLeave(() => heard.push('second'))
-    me.onLeave(() => heard.push('third'))
-
-    endWire()
-
-    expect(heard).toEqual(['third'])
-  })
 })

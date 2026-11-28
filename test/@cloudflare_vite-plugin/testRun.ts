@@ -156,6 +156,26 @@ function testTodolist() {
 // that streams server-pushed ticks, replies to a ping with a welcome message,
 // and echoes messages back to the client.
 function testChannel() {
+  test('Channel: the opening telefunction reads its request context and a later SSE acknowledgement has its own scope', async () => {
+    const browser = present(page.context().browser(), 'the browser')
+    const context = await browser.newContext({ extraHTTPHeaders: { 'x-test-user': 'Alice' } })
+    try {
+      const target = await context.newPage()
+      await target.routeWebSocket(/\/_telefunc/, (socket) => socket.close())
+      await target.goto(getServerUrl() + '/channel')
+      await target.locator('#hydrated').waitFor()
+      await target.click('#connect-btn')
+      await target.click('#channel-context-btn')
+      await autoRetry(async () => {
+        const log = await target.textContent('#log')
+        expect(log).toContain('Opened by Alice')
+        expect(log).toContain('Channel request: unscoped')
+      })
+    } finally {
+      await context.close()
+    }
+  })
+
   test('Channel (stream)', async () => {
     await page.goto(getServerUrl() + '/channel')
     await autoRetry(
@@ -185,6 +205,8 @@ function testChannel() {
       },
       { timeout: 10000 },
     )
+    await page.click('#channel-context-btn')
+    await autoRetry(async () => expect(await page.textContent('#log')).toContain('Channel request: unscoped'))
     page.off('websocket', onWebSocket)
     // The page's own origin opened it; a page of another site may not. The Worker answers it 403, and the dev and
     // preview server of @cloudflare/vite-plugin, which hands upgrades to the Worker, ends the connection without

@@ -110,6 +110,7 @@ import {
   onOpenRecordingGuardRoom,
   onGetGuardCalls,
   onOpenSlowJoinRoom,
+  onRoomForDeferredJoin,
   onGetSlowJoins,
   onGetSlowJoinRoom,
   onCloseWhenEmpty,
@@ -1150,12 +1151,29 @@ function Room() {
         const { room, memberId, onServer } = await onCreateRoomWithBytes(`e2e-meta-bytes:${crypto.randomUUID()}`)
         const member = await getParticipantWhenJoined(room, memberId)
         const me = await room.join({ meta: { avatar: new Uint8Array([7, 8]) } })
-        const read = [room.meta.thumbnail, member.meta.avatar, me.meta.avatar]
+        const before = me.meta
+        await me.updateMeta({ avatar: new Uint8Array([9]) })
+        const changed = me.meta
+        await me.updateMeta({ avatar: new Uint8Array([10]) })
+        const read = [room.meta.thumbnail, member.meta.avatar, before.avatar, changed.avatar, me.meta.avatar]
         setResult(
           JSON.stringify({
             onServer,
             onPage: read.map((value) => (value instanceof Uint8Array ? Array.from(value) : value)),
           }),
+        )
+      })}
+
+      {scenario('malformed-answer', null, 'Keep taking events after an invalid meta reply', async () => {
+        const [, room] = await createRoom('malformed-answer')
+        const me = await room.join({ meta: { name: 'Before' } })
+        const rejected = await me.updateMeta({ name: 'malformed-meta-marker' }).then(
+          () => false,
+          (error: unknown) => error instanceof Error,
+        )
+        const [next] = await Promise.all([room.join({ meta: { name: 'After' } }), me.updateMeta({ name: 'Recovered' })])
+        setResult(
+          JSON.stringify({ rejected, meta: me.meta.name, subsequentJoin: room.getParticipant(next.id)?.meta.name }),
         )
       })}
 
@@ -1239,6 +1257,25 @@ function Room() {
             done: settledAt !== null && performance.now() - settledAt > 1000 && room.count === 0 && serverCount === 0,
           }
         }, CLOSED_TAB_POLLS)
+      })}
+
+      {scenario('join-across-reconnect', null, 'Join and publish when the wire reconnects', async () => {
+        const roomId = `join-across-reconnect:${crypto.randomUUID()}`
+        const room = await onRoomForDeferredJoin(roomId)
+        const path: string[] = []
+        room.onJoin((member) => path.push(`join:${member.meta.name}`))
+        let received: unknown
+        room.subscribe((value) => {
+          received = value
+        })
+        setResult(JSON.stringify({ roomId }))
+        const me = await room.join({ meta: { name: 'Ada' } })
+        path.push(`answer:${room.getParticipant(me.id)?.meta.name}`)
+        await me.publish(Uint8Array.of(7, 8))
+        await pollUntil(() => ({
+          result: { roomId, path, bytes: received instanceof Uint8Array ? [...received] : null },
+          done: received !== undefined,
+        }))
       })}
 
       {scenario('join-slowly', null, 'Join the room named in the URL, slowly', async () => {
@@ -1382,7 +1419,7 @@ function Room() {
         threaded.listen(threadedReply)
         const serverMember = await onJoinAnswering(roomId)
         const held = await onJoinAsServer(roomId, 'Held')
-        held.listen(() => 'pong')
+        held.listen((value) => (value instanceof Uint8Array ? value : 'pong'))
         const heldThreaded = await onJoinAsServer(roomId, 'Held threaded')
         heldThreaded.listen(threadedReply)
         const observed = await room.join({ meta: { name: 'Observed' } })
@@ -1396,8 +1433,10 @@ function Room() {
         const recordUnhandled = (event: PromiseRejectionEvent) => unhandled.push(String(event.reason))
         window.addEventListener('unhandledrejection', recordUnhandled)
         try {
+          const reply = await me.send(held.id, Uint8Array.of(11, 22), { ack: true })
           setResult(
             JSON.stringify({
+              fromHeldBytes: reply instanceof Uint8Array ? [...reply] : null,
               fromPage: await replyOf(me.send(peer.id, 'hi', { ack: true })),
               fromPageUnsendable: await replyOf(me.send(threaded.id, 'where?', { ack: true })),
               fromServer: await replyOf(me.send(serverMember, 'hi', { ack: true })),

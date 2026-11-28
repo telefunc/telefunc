@@ -47,9 +47,15 @@ async function onBroadcastSubscriberDropped() {
   const binary = { published: 0, publishedWhileDown: 0, received: 0, reported: 0 }
   const unsubscribeText = Broadcast.subscribe(key, () => text.received++)
   const unsubscribeBinary = Broadcast.subscribeBinary(key, () => binary.received++)
-  config.broadcast.onDeliveryLost = ({ reason }) => {
+  const before = reported.length
+  const monitorBug = `broadcast-listener-bug: delivery loss monitor ${key}`
+  config.broadcast.onDeliveryLost = ({ key: lostKey, reason }) => {
+    if (lostKey !== key) return
     const kind = reason.includes('binary') ? binary : text
     kind.reported += Number.parseInt(reason)
+    const error = new Error(`${monitorBug}:${kind === text ? 'text' : 'binary'}`)
+    if (kind === text) throw error
+    return Promise.reject(error)
   }
   const publish = async (count: number, whileDown: boolean) => {
     const published: unknown[] = []
@@ -61,19 +67,27 @@ async function onBroadcastSubscriberDropped() {
     }
     await Promise.all(published)
   }
-  await publish(200, false)
-  await whileRedisSubscribersDown(() => publish(200, true))
-  await publish(200, false)
-  // Until each publish arrived or was reported: the subscription is back and has read where the key starts.
-  const settled = () => [text, binary].every(({ published, received, reported }) => received + reported >= published)
-  for (let tries = 1; !settled() && tries <= 200; tries++) await sleep(50)
-  for (const [name, kind] of Object.entries({ text, binary })) {
-    if (kind.reported === 0) console.log(`subscriber-dropped: ${name} reported nothing lost: ${JSON.stringify(kind)}`)
+  try {
+    await publish(200, false)
+    await whileRedisSubscribersDown(() => publish(200, true))
+    await publish(200, false)
+    // The subscription has read its new start once every publish has arrived or been reported.
+    const settled = () => [text, binary].every(({ published, received, reported }) => received + reported >= published)
+    for (let tries = 1; !settled() && tries <= 200; tries++) await sleep(50)
+    const bugs = [
+      ...new Set(
+        reported
+          .slice(before)
+          .filter((msg) => msg.startsWith(monitorBug))
+          .map((msg) => msg.slice(monitorBug.length + 1)),
+      ),
+    ].sort()
+    return { text, binary, bugs }
+  } finally {
+    config.broadcast = {}
+    unsubscribeText()
+    unsubscribeBinary()
   }
-  config.broadcast.onDeliveryLost = ({ key, reason }) => console.error(`Broadcast delivery of '${key}' lost: ${reason}`)
-  unsubscribeText()
-  unsubscribeBinary()
-  return { text, binary }
 }
 
 /** Redis's replies stop reaching a subscriber connection, as in a partition, which closes no socket: the server notices,

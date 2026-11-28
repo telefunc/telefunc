@@ -87,9 +87,13 @@ export {
   onReadMetaAcrossWrite,
   onReadSplitMetaAcrossMerge,
   onCreateRoomWithBytes,
+  onLargeMemoryJoin,
+  onListenAsUser,
+  onPublishAsOtherUser,
   onOpenRecordingGuardRoom,
   onGetGuardCalls,
   onOpenSlowJoinRoom,
+  onRoomForDeferredJoin,
   onGetSlowJoins,
   onGetSlowJoinRoom,
   onCloseWhenEmpty,
@@ -124,7 +128,7 @@ export {
 }
 
 import { Buffer } from 'node:buffer'
-import { Abort, Broadcast, config, onBug } from 'telefunc'
+import { Abort, Broadcast, BroadcastChannel, config, getContext, getRawContext, onBug } from 'telefunc'
 import { createDeferred, handleCallbackBug } from 'telefunc/__internal'
 import { Room, type LeaveCause, type LocalParticipant } from '@telefunc/room'
 import { sendPrivate } from '@telefunc/room/__internal'
@@ -154,6 +158,98 @@ async function onCreateRoomWithBytes(roomId: string) {
   const member = await room.join({ meta: { avatar: new Uint8Array([4, 5, 6]) } })
   const onServer = { isBytes: [room.meta.thumbnail, member.meta.avatar].map((value) => value instanceof Uint8Array) }
   return { room, memberId: member.id, onServer }
+}
+
+async function onLargeMemoryJoin() {
+  const roomId = `large-meta:${crypto.randomUUID()}`
+  const room = await Room.create(roomId)
+  try {
+    const large = 'g'.repeat(29 * 1024 * 1024)
+    const member = await room.join({ meta: { large } })
+    const [listed] = await Room.getParticipants(roomId)
+    return { joined: member.id === listed?.id, keptMeta: listed?.meta.large === large }
+  } finally {
+    await Room.close(roomId)
+  }
+}
+
+function requestUser(): string {
+  try {
+    return getContext<{ user: string }>().user
+  } catch {
+    return 'withheld'
+  }
+}
+
+const listeners = new Map<string, (publisher: string) => Promise<unknown>>()
+const PUBLISH_MARK = Symbol('test-publish-mark')
+
+async function onListenAsUser() {
+  const subscriber = requestUser()
+  const id = `context:${crypto.randomUUID()}`
+  const room = await Room.create(id)
+  const alice = await room.join()
+  const bob = await room.join()
+  const broadcast = new BroadcastChannel<string>({ key: id })
+  const roomMessages: string[] = []
+  const broadcastMessages: string[][] = []
+  const scopedMarks: unknown[][] = []
+  const roomReceived = createDeferred<void>()
+  const broadcastsReceived = createDeferred<void>()
+  room.subscribe(() => {
+    roomMessages.push(requestUser())
+    roomReceived.resolve()
+  })
+  alice.listen(async () => {
+    await Promise.resolve()
+    return requestUser()
+  })
+  const offText = broadcast.subscribe(() => {
+    const raw = getRawContext()
+    scopedMarks.push([raw?.[PUBLISH_MARK] ?? null])
+    if (raw !== null) raw[PUBLISH_MARK] = scopedMarks.length
+  })
+  const offTextAgain = broadcast.subscribe(() => {
+    scopedMarks.at(-1)?.push(getRawContext()?.[PUBLISH_MARK] ?? null)
+  })
+  const offStatic = Broadcast.subscribe<string>(id, async () => {
+    const before = requestUser()
+    await Promise.resolve()
+    broadcastMessages.push([before, requestUser()])
+    if (broadcastMessages.length === 2) broadcastsReceived.resolve()
+  })
+  await Promise.all([offText.opened, offTextAgain.opened, offStatic.opened])
+
+  listeners.set(id, async (publisher) => {
+    try {
+      await bob.publish('room', { lossy: false })
+      const dm = await bob.send(alice.id, 'private', { ack: true })
+      await Broadcast.publish(id, 'first')
+      await Broadcast.publish(id, 'second')
+      await Promise.all([roomReceived.promise, broadcastsReceived.promise])
+      return {
+        subscriber,
+        publisher,
+        roomMessages,
+        dm,
+        broadcastMessages,
+        scopedMarks,
+        publisherMark: getRawContext()?.[PUBLISH_MARK] ?? null,
+      }
+    } finally {
+      offText()
+      offTextAgain()
+      offStatic()
+      await Promise.all([broadcast.close(), Room.close(id)])
+    }
+  })
+  return id
+}
+
+async function onPublishAsOtherUser(id: string) {
+  const publish = present(listeners.get(id), 'the listening user')
+  listeners.delete(id)
+  return await publish(requestUser())
 }
 
 async function onGetRoom(roomId: string) {
@@ -1172,6 +1268,21 @@ async function onOpenSlowJoinRoom(roomId: string) {
 }
 
 /** The view `onOpenSlowJoinRoom()` guarded: a guard applies to the joins made through it. */
+async function onRoomForDeferredJoin(id: string) {
+  const room = await Room.create(id)
+  const action = `finishJoin_${id}`
+  Room.guard(room, {
+    async onBeforeJoin() {
+      const joining = createDeferred<void>()
+      onServerAction(action, async () => joining.resolve())
+      cleanupState[action] = 'waiting'
+      await joining.promise
+    },
+  })
+  room.onClose(() => forgetServerAction(action))
+  return room
+}
+
 async function onGetSlowJoinRoom(roomId: string) {
   return entryOf(slowJoinRooms, roomId)
 }

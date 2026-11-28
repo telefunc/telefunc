@@ -52,8 +52,10 @@ function runPlayground(
         log.logText.includes('Error: server-listener-bug') ||
         log.logText.includes('room-listener-bug') ||
         log.logText.includes('broadcast-listener-bug') ||
+        log.logText.includes('A Telefunc onBug listener failed, and its error could not be logged') ||
         // The failing backend's failures, which the server reports (failing-backend.ts).
         log.logText.includes('failing-backend:') ||
+        log.logText.includes('startup messages exceeded the channel memory limit') ||
         (log.logText.includes('Backend subscription closed:') && log.logText.includes('hiccup')) ||
         log.logText.includes('TypeError: Converting circular structure to JSON') ||
         // Bun's wording of the same error.

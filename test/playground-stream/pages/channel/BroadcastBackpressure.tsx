@@ -44,7 +44,7 @@ type BroadcastBackpressureState = {
     pastMemory: { seqsAhead: number[]; closeErr: string }
     across: { publish: string; received: number; closeErr: string }
   } | null
-  broadcastAwayShared: { received: number[][]; closed: string[] } | null
+  broadcastAwayShared: { received: number[][]; firstBytes: number[][]; closed: string[] } | null
   broadcastKeys: { publish: string; firstClosed: string; secondReceived: string[]; secondClosed: boolean } | null
 }
 
@@ -441,28 +441,44 @@ function BroadcastAwayShared({ show }: { show: Show }) {
     const [{ broadcast, control }] = pages
     const { seq: before } = await broadcast.publish('before the disconnect')
     const closed = ['open', 'open']
-    // Its publish (1) is outstanding as its connection drops, and 17 bodies follow while it is away: each receives the
-    // newest (18), or closes.
+    // One shared body while attached, another while resuming and one follow-up once both pages read.
     const watched = pages.map(({ broadcast }, i) => {
       const got: number[] = []
-      const newest = new Promise<void>((resolve) => {
-        broadcast.subscribeBinary((_, info) => {
-          got.push(info.seq - before)
-          if (info.seq === before + 18) resolve()
-        })
-        broadcast.onClose((err) => {
-          closed[i] = err?.name ?? 'none'
-          resolve()
-        })
+      const firstBytes: number[] = []
+      const attached = Promise.withResolvers<void>()
+      const newest = Promise.withResolvers<void>()
+      const followUp = Promise.withResolvers<void>()
+      broadcast.subscribeBinary((bytes, info) => {
+        const ordinal = info.seq - before
+        got.push(ordinal)
+        firstBytes.push(bytes[0]!)
+        if (i === 0) bytes[0] = 0xff
+        if (ordinal === 1) attached.resolve()
+        if (ordinal === 19) newest.resolve()
+        if (ordinal === 20) followUp.resolve()
       })
-      return { got, newest }
+      broadcast.onClose((err) => {
+        closed[i] = err?.name ?? 'none'
+        attached.resolve()
+        newest.resolve()
+        followUp.resolve()
+      })
+      return { got, firstBytes, attached: attached.promise, newest: newest.promise, followUp: followUp.promise }
     })
-    const received = watched.map(({ got }) => got)
-    const newest = watched.map(({ newest }) => newest)
+    await control.send(1, { ack: true })
+    await Promise.all(watched.map(({ attached }) => attached))
     await control.send('away', { ack: true })
     void broadcast.publish('across the disconnect').catch(() => {})
-    await Promise.all(newest)
-    show({ broadcastAwayShared: { received, closed } })
+    await Promise.all(watched.map(({ newest }) => newest))
+    await control.send(1, { ack: true })
+    await Promise.all(watched.map(({ followUp }) => followUp))
+    show({
+      broadcastAwayShared: {
+        received: watched.map(({ got }) => got),
+        firstBytes: watched.map(({ firstBytes }) => firstBytes),
+        closed,
+      },
+    })
     for (const { control } of pages) control.close()
   }
 

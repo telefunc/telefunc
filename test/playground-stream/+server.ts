@@ -18,6 +18,8 @@ import { installFailingBackend, addBackendFault } from './failing-backend'
 import { StallClock } from './stalls'
 import { fieldOf, listOf, numberAt, optionalFieldOf, present, textAt, textListOf } from '../checked'
 
+if (process.env.TEST_ASYNC_CONTEXT === '1') await import('telefunc/async_hooks')
+
 config.channel.pingInterval = 1000
 config.shield = true
 // A lane reaching a channel limit sets it low, e.g. `{"maxMemory":2097152}`.
@@ -224,6 +226,7 @@ const crossInstanceRooms = new Map<string, CrossInstanceRoomFixture>()
 type CrossInstanceBroadcastFixture = {
   channel: BroadcastChannel<unknown>
   received: unknown[]
+  ordering: { seq: number; timestamp: number }[]
   unsubscribe(): void
 }
 const crossInstanceBroadcasts = new Map<string, CrossInstanceBroadcastFixture>()
@@ -424,18 +427,24 @@ app.post('/api/broadcast-cross-instance/subscribe', async (c) => {
 
   const channel = new BroadcastChannel<unknown>({ key })
   const received: unknown[] = []
+  const ordering: CrossInstanceBroadcastFixture['ordering'] = []
   const readiness = crypto.randomUUID()
-  const unsubscribeText = channel.subscribe((data) => {
-    if (data !== readiness) received.push(data)
+  const unsubscribeText = channel.subscribe((data, { seq, timestamp }) => {
+    if (data === readiness) return
+    received.push(data)
+    ordering.push({ seq, timestamp })
   })
-  const unsubscribeBinary = channel.subscribeBinary((data) => received.push(`binary:${data[0]}`))
+  const unsubscribeBinary = channel.subscribeBinary((data, { seq, timestamp }) => {
+    received.push(`binary:${data[0]}`)
+    ordering.push({ seq, timestamp })
+  })
   const unsubscribe = () => {
     unsubscribeText()
     unsubscribeBinary()
   }
   // A publish right after a subscribe waits until the subscription is set up, so other instances' publishes reach it.
   await channel.publish(readiness)
-  crossInstanceBroadcasts.set(key, { channel, received, unsubscribe })
+  crossInstanceBroadcasts.set(key, { channel, received, ordering, unsubscribe })
   return c.json({ ok: true, instance: INST })
 })
 
@@ -448,14 +457,14 @@ app.post('/api/broadcast-cross-instance/publish', async (c) => {
     c.req.query('kind') === 'binary'
       ? await Broadcast.publishBinary(key, new Uint8Array([body]))
       : await Broadcast.publish(key, body)
-  return c.json({ ok: true, instance: INST, seq: receipt.seq })
+  return c.json({ ok: true, instance: INST, seq: receipt.seq, timestamp: receipt.timestamp })
 })
 
 app.get('/api/broadcast-cross-instance/received', (c) => {
   const key = c.req.query('key')
   const fixture = key ? crossInstanceBroadcasts.get(key) : undefined
   if (!fixture) return c.json({ ok: false, reason: 'broadcast fixture not subscribed on this instance' }, 404)
-  return c.json({ ok: true, instance: INST, received: fixture.received })
+  return c.json({ ok: true, instance: INST, received: fixture.received, ordering: fixture.ordering })
 })
 
 app.delete('/api/broadcast-cross-instance/unsubscribe', async (c) => {

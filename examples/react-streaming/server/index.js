@@ -1,6 +1,7 @@
 const express = require('express')
 const { renderPage, createDevMiddleware } = require('vike/server')
 const { serve } = require('telefunc')
+if (process.env.TEST_SSR_CONTEXT === '1') require('telefunc/async_hooks')
 
 const isProduction = process.env.NODE_ENV === 'production'
 const root = `${__dirname}/..`

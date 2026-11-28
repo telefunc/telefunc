@@ -110,12 +110,12 @@ function testBroadcastRedisSubscriberDropped() {
     await page.click('#test-redis-subscriber-dropped')
     await autoRetry(
       async () => {
-        const result = await getResult<Record<
-          'text' | 'binary',
-          { published: number; publishedWhileDown: number; received: number; reported: number }
-        > | null>('#redis-subscriber-dropped-result')
-        if (result === null) throw new Error('No result yet')
-        for (const [kind, { published, publishedWhileDown, received, reported }] of Object.entries(result)) {
+        type Counts = { published: number; publishedWhileDown: number; received: number; reported: number }
+        const { text, binary, bugs } = await getResult<{ text: Counts; binary: Counts; bugs: string[] }>(
+          '#redis-subscriber-dropped-result',
+        )
+        expect(bugs).deep.equal(['binary', 'text'])
+        for (const [kind, { published, publishedWhileDown, received, reported }] of Object.entries({ text, binary })) {
           expect({ kind, published, publishedWhileDown }).deep.equal({ kind, published: 300, publishedWhileDown: 100 })
           // What was published while the connection was down can't have arrived: the row can't pass with nothing lost.
           expect({ kind, reportedWhileDown: reported >= publishedWhileDown }).deep.equal({

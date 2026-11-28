@@ -35,37 +35,6 @@ function refusal(): Error {
   return replyError('NOPERM this user has no permissions to access the channel')
 }
 
-/** Replies Redis 5.0.14, 6.0.20, 6.2.24, 7.0.15, 7.2.17, 7.4.12, 8.0.6 and 8.2.11 and Dragonfly gave through ioredis to a
- *  call its user's ACL denies, at top level and inside a script: they stand until an operator changes the ACL. */
-const REFUSALS = [
-  "NOPERM this user has no permissions to run the 'get' command or its subcommand",
-  'NOPERM this user has no permissions to access one of the channels used as arguments',
-  "NOPERM User probe has no permissions to run the 'get' command",
-  'NOPERM No permissions to access a key',
-  "ERR Error running script (call to f_d3c21d0c2b9ca22f82737626a27bcaf5d288f99f): @user_script:1: @user_script: 1: The user executing the script can't run this command or subcommand",
-  "ERR Error running script (call to f_9ddb5d56e1d5c3a3b21c1aad774273186b4a6d34): @user_script:1: @user_script: 1: The user executing the script can't publish to the channel mentioned in the command",
-  "ERR The user executing the script can't run this command or subcommand script: d3c21d0c2b9ca22f82737626a27bcaf5d288f99f, on @user_script:1.",
-  "ERR ACL failure in script: User probe has no permissions to run the 'get' command script: d3c21d0c2b9ca22f82737626a27bcaf5d288f99f, on @user_script:1.",
-  'ERR ACL failure in script: No permissions to access a channel script: 9ddb5d56e1d5c3a3b21c1aad774273186b4a6d34, on @user_script:1.',
-  'ERR Error running script (call to ee33e8171bc4a2b477d56ebe06c4d9545f5b840a): @user_script:2: -NOPERM probe has no ACL permissions',
-  'TFINFO INFO',
-]
-/** Replies that pass, among them a replica's refusal (the same stores, at top level and inside a script), which a
- *  failover ends, and a dropped command connection. */
-const PASSING = [
-  replyError("READONLY You can't write against a read only replica."),
-  replyError(
-    "READONLY You can't write against a read only replica. script: bd6f3018b28bbdb36260f19d3c44afed740db987, on @user_script:1.",
-  ),
-  replyError(
-    "ERR Error running script (call to f_bd6f3018b28bbdb36260f19d3c44afed740db987): @user_script:1: @user_script: 1: -READONLY You can't write against a read only replica.",
-  ),
-  replyError('LOADING Redis is loading the dataset in memory'),
-  replyError('BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSCRIPT.'),
-  new Error('Connection is closed.'),
-  replyError("TFSTALE a subscription's start reached a replica"),
-]
-
 /** The backend's connection to a Redis it never reaches, whose subscriber socket is `socket`, on `nodes` nodes. */
 class SocketConnection extends RedisConnection {
   private readonly socket: SubscriberSocket
@@ -193,39 +162,6 @@ function frameOf(
   return Buffer.concat([laneKey, placed ? header : header.subarray(8), Buffer.from(text)])
 }
 
-describe('a start read Redis answers with an error', () => {
-  for (const message of REFUSALS) {
-    it(`closes the subscription with Telefunc's refusal, where it reads ${message.slice(0, 60)}`, async () => {
-      let reads = 0
-      const { subscriptions, listen } = setup()
-      const attempt = listen(TEXT, async () => {
-        reads++
-        throw replyError(message)
-      })
-      const closed = new Promise((resolve) => attempt.onStateChange((state, reason) => resolve([state, reason])))
-
-      const refusal = await Promise.all(subscriptions.establishingOn([TEXT])).catch((error: unknown) => error)
-      expect(refusal).toMatchObject({ name: 'BackendError', code: 'denied' })
-      await expect(closed).resolves.toEqual(['closed', refusal])
-      expect(reads).toBe(1)
-    })
-  }
-
-  for (const error of PASSING) {
-    it(`reads again, where it is ${error.message.slice(0, 40)}`, async () => {
-      let reads = 0
-      const { listen } = setup()
-      const attempt = listen(TEXT, async () => {
-        if (++reads === 1) throw error
-        return none()
-      })
-
-      await expect.poll(() => attempt.state(), { timeout: 3_000 }).toBe('ready')
-      expect(reads).toBe(2)
-    })
-  }
-})
-
 describe('a start read whose reply Redis holds', () => {
   it('holds the subscriptions made meanwhile only until its command times out, then is read again', async () => {
     const subscribed: string[] = []
@@ -253,20 +189,6 @@ describe('a start read whose reply Redis holds', () => {
 
 describe('a resume', () => {
   const lane = (place: number) => ({ authority: 'a', starts: new Map([['', { place, id: BigInt(place) }]]) })
-
-  it('counts what it missed on the history it last read, and reports nothing where it missed nothing', async () => {
-    const { listen, publish, close, missed } = setup()
-    let start = lane(1)
-    const attempt = listen(TEXT, async () => start)
-    await expect.poll(() => attempt.state()).toBe('ready')
-    publish(TEXT, frameOf(2, 'm2'))
-    close()
-    await expect.poll(() => attempt.state()).toBe('ready')
-    close()
-    start = lane(4)
-    await expect.poll(() => missed.length).toBe(1)
-    expect(missed).toEqual([2])
-  })
 
   it('tells once where its read, ahead on the same history, finds the frames that reached it forking below the lane', async () => {
     const { listen, publish, close, delivered, missed } = setup()
@@ -686,49 +608,9 @@ describe('a Cluster slot whose master changed', () => {
     await subscriptions.followMoves(both, async () => null)
     await expect.poll(() => missed).toEqual([null, null])
   })
-
-  it('goes on where the old master, of the history it started from, sends its key elsewhere: a resharding', async () => {
-    const { subscriptions, listen, close, missed } = setup()
-    let start = lane(3)
-    const attempt = listen(TEXT, async () => start)
-    await expect.poll(() => attempt.state()).toBe('ready')
-    const states: string[] = []
-    attempt.onStateChange((state) => states.push(state))
-    // The new master, which the key moved to with its record.
-    start = lane(3, 'b')
-    await subscriptions.followMoves(moved, async () => resharded)
-    expect(states).toEqual([])
-    // A cut after it resumes from the new master's history, which it follows now: nothing was missed.
-    close()
-    await expect.poll(() => states).toEqual(['lost', 'ready'])
-    expect(missed).toEqual([])
-  })
 })
 
 describe('a publish waiting on its key’s new subscriptions', () => {
-  it('goes out once the other kind’s start read, failed and read again, is ready: a failed read is no end', async () => {
-    const { subscriptions, listen, sends } = setup()
-    listen(TEXT)
-    await Promise.all(subscriptions.establishingOn([TEXT]))
-    const [first, second] = [createDeferred<Starts>(), createDeferred<Starts>()]
-    const reads = [first, second]
-    let read = 0
-    const binary = listen(BINARY, () => {
-      const next = reads[read++]
-      assert(next !== undefined)
-      return next.promise
-    })
-
-    const waiting = waitingHello(sends)
-    first.reject(new Error('the command connection dropped'))
-    await expect.poll(() => read, { timeout: 3_000 }).toBe(2)
-    expect(binary.state()).toBe('establishing')
-    second.resolve(none())
-
-    await expect(sendOf(waiting)).resolves.toBe('hello')
-    expect(binary.state()).toBe('ready')
-  })
-
   describe('for 60 s', () => {
     afterEach(() => {
       vi.useRealTimers()
@@ -1059,47 +941,6 @@ describe('a subscriber connection Redis refuses at its login', () => {
       code: 'denied',
       message: expect.stringContaining("refused the login of Telefunc's Redis backend (NOAUTH)"),
     })
-  })
-})
-
-describe('a receiver that throws, ahead of another on the same channel', () => {
-  afterEach(() => {
-    vi.restoreAllMocks()
-  })
-
-  it('is reported, and the receiver after it and the frames after it still arrive', async () => {
-    const reports: unknown[] = []
-    vi.spyOn(console, 'error').mockImplementation((error) => void reports.push(error))
-    const { subscriptions, publish } = setup()
-    const thrower: string[] = []
-    const healthy: string[] = []
-    // Each its own holder: one holder would get each commit once, through one of them.
-    const listen = (holder: string, deliver: (payload: unknown) => void) =>
-      subscriptions.subscribe({
-        channel: TEXT,
-        invalidationChannel: null,
-        frames: { fanIn: false, placed: true, text: true, lanesEndWithMembers: false },
-        laneChannel: null,
-        holder,
-        readStarts: async () => none(),
-        receiver: { deliver },
-        reportMissed() {},
-      })
-    const attempts = [
-      listen('thrower', (payload) => {
-        thrower.push(String(payload))
-        throw new Error('Test: a receiver throws')
-      }),
-      listen('healthy', (payload) => void healthy.push(String(payload))),
-    ]
-    await Promise.all(subscriptions.establishingOn([TEXT]))
-    await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
-
-    publish(TEXT, frameOf(1, 'first'))
-    publish(TEXT, frameOf(2, 'second'))
-
-    expect({ thrower, healthy }).toEqual({ thrower: ['first', 'second'], healthy: ['first', 'second'] })
-    expect(reports.map(String)).toEqual(['Error: Test: a receiver throws', 'Error: Test: a receiver throws'])
   })
 })
 

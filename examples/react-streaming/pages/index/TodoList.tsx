@@ -1,7 +1,7 @@
-export { TodoList }
+export { TodoList, Profile }
 
 import React, { useState } from 'react'
-import { onNewTodo, onLoad } from './TodoList.telefunc.js'
+import { onNewTodo, onLoad, onProfile } from './TodoList.telefunc.js'
 import { useData } from 'telefunc/react-streaming'
 
 function TodoList() {
@@ -30,4 +30,8 @@ function TodoList() {
       </ul>
     </>
   )
+}
+
+function Profile() {
+  return <p id="profile">{useData(onProfile)}</p>
 }
