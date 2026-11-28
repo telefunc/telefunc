@@ -3,6 +3,16 @@ export type { BackendSubscription, SourceRules }
 
 import { assert } from '../../utils/assert.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
+import { Fifo } from '../../utils/Fifo.js'
+import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
+import { ChannelOverflowError } from '../channel/channelErrors.js'
+import {
+  HELD_SEND_OVERHEAD_BYTES,
+  letGo,
+  releaseHolder,
+  tryHold,
+  type MemoryHolder,
+} from '../channel/server/channelMemory.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'
 import { handleCallbackBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import { BackendError } from './BackendError.js'
@@ -96,6 +106,7 @@ type EarlyMessage<Kind extends BroadcastKind> = {
   payload: BroadcastPayload<Kind>
   ordering: OrderingInfo
   targets: readonly Consumer<Kind>[]
+  bytes: number
 }
 
 type SubscriptionSlotOptions<Source, Kind extends BroadcastKind> = {
@@ -125,10 +136,9 @@ class SubscriptionSlot<Source, Kind extends BroadcastKind> implements BackendRec
   private latestReadiness: Deferred<void> = createReadiness()
   private attempt: DriverAttempt | null = null
   private unobserve: (() => void) | null = null
-  /** What the attempt delivered before its first `ready`, as a consumer sees `ready` before any message, so a driver
-   *  needn't order its acknowledgment before what it delivers. Null from then on: a message after a loss goes out as it
-   *  arrives. */
-  private early: EarlyMessage<Kind>[] | null = []
+  /** Allocated on the first early message. Null once startup ends, including the drain of messages listeners add. */
+  private early: { messages: Fifo<EarlyMessage<Kind>>; memory: MemoryHolder } | null | undefined
+  private drainingStartup = false
   /** It stopped or closed: what the attempt says from here on is ignored. */
   private finished = false
 
@@ -180,13 +190,38 @@ class SubscriptionSlot<Source, Kind extends BroadcastKind> implements BackendRec
     if (this.finished) return
     const payload = this.checked(delivered, ordering)
     if (payload === null) return
-    if (this.early !== null) {
-      this.early.push({ payload, ordering, targets: this.targets() })
-      return
+    const targets = this.targets()
+    if (this.early === null) return this.dispatch(payload, ordering, targets)
+    const early = (this.early ??= { messages: new Fifo(), memory: { heldBytes: 0 } })
+
+    // Account for the payload, queue entry and the references in its snapshot before copying the driver's bytes.
+    const bytes =
+      (typeof payload === 'string' ? utf8ByteLength(payload) : payload.byteLength) +
+      HELD_SEND_OVERHEAD_BYTES +
+      targets.length * 8
+    if (!tryHold(early.memory, bytes)) {
+      return this.failStartup(
+        new ChannelOverflowError('Backend subscription closed: its startup messages exceeded the channel memory limit'),
+      )
     }
-    // The listener is called here, not through a method of the consumer: one call less on every message.
-    for (const consumer of this.targets()) {
-      // A consumer may leave on an earlier one's listener.
+    try {
+      const owned = typeof payload === 'string' ? payload : new Uint8Array(payload)
+      const { seq, timestamp, rewound } = ordering
+      early.messages.push({
+        payload: owned as BroadcastPayload<Kind>,
+        ordering: { seq, timestamp, rewound },
+        targets,
+        bytes,
+      })
+    } catch (error) {
+      this.failStartup(error)
+    }
+  }
+
+  private dispatch(payload: BroadcastPayload<Kind>, ordering: OrderingInfo, targets: readonly Consumer<Kind>[]): void {
+    for (const consumer of targets) {
+      // A consumer or the slot itself may stop in an earlier listener.
+      if (this.finished) return
       if (!consumer.attached) continue
       // Consumers are isolated from each other: one that throws is reported.
       try {
@@ -202,7 +237,13 @@ class SubscriptionSlot<Source, Kind extends BroadcastKind> implements BackendRec
     try {
       attempt = this.owner.driver.subscribe(this.source, this, this.holder)
     } catch (error) {
-      return this.close(error)
+      if (!this.finished) this.close(error)
+      return
+    }
+    // A driver can deliver synchronously inside subscribe(), before there is an attempt to stop.
+    if (this.finished) {
+      if (attempt.state() !== 'closed') stopLogged(() => attempt.unsubscribe())
+      return
     }
     this.attempt = attempt
     this.unobserve = attempt.onStateChange((state, reason) => this.attemptChanged(state, reason))
@@ -220,22 +261,34 @@ class SubscriptionSlot<Source, Kind extends BroadcastKind> implements BackendRec
 
   private becameReady(): void {
     if (this.current === 'ready') return
+    const drain = this.early !== null && !this.drainingStartup
+    if (drain) this.drainingStartup = true
     this.latestReadiness.resolve()
     this.enter('ready')
+    if (!drain) return
     const early = this.early
-    if (early === null) return
-    this.early = null
-    for (const { payload, ordering, targets } of early) {
-      for (const consumer of targets) {
-        // A consumer may leave, or stop the subscription, on one of them.
-        if (this.finished || !consumer.attached) continue
-        try {
-          consumer.listener(payload, ordering)
-        } catch (error) {
-          console.error(error)
-        }
-      }
+    while (early && !this.finished) {
+      const message = early.messages.shift()
+      if (message === undefined) break
+      const { payload, ordering, targets, bytes } = message
+      letGo(early.memory, bytes)
+      this.dispatch(payload, ordering, targets)
     }
+    this.clearEarly()
+  }
+
+  private failStartup(error: unknown): void {
+    const attempt = this.attempt
+    try {
+      this.close(error)
+    } finally {
+      if (attempt !== null) stopLogged(() => attempt.unsubscribe())
+    }
+  }
+
+  private clearEarly(): void {
+    if (this.early) releaseHolder(this.early.memory)
+    this.early = null
   }
 
   private lost(): void {
@@ -272,7 +325,7 @@ class SubscriptionSlot<Source, Kind extends BroadcastKind> implements BackendRec
   /** Stops listening first: the attempt's own `closed` on its unsubscribe is no end. */
   private finish(): void {
     this.finished = true
-    this.early = null
+    this.clearEarly()
     this.unobserve?.()
     this.unobserve = null
     this.attempt = null
