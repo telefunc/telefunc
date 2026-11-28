@@ -17,8 +17,8 @@ interface LossyHost<U> {
   /** `unit` waits: what it holds for its page, until `letGo`. */
   hold(unit: U): void
   letGo(unit: U): void
-  /** Its sends of `stream` that a newer one replaces go, of those no wire has taken: where the hosts' rules differ. */
-  dropUnhanded(stream: string): void
+  /** Drops the replay entries a newer send of `stream` replaces and cancels those still waiting on the wire. */
+  dropSuperseded(stream: string): void
   /** Its page granted no more credit for what it sends. */
   outOfCredit(): boolean
   /** The bytes `unit` holds. */
@@ -29,7 +29,6 @@ interface LossyHost<U> {
 interface Waiting<U> {
   stream: string
   unit: U
-  held: number
 }
 
 /** A page that keeps up gets every send. One that is behind gets each stream's newest once it catches up, so that older
@@ -57,46 +56,42 @@ class LossyDelivery<U> {
 
   /** A page that is behind, out of credit, or short of memory keeps only the newest send of this stream waiting. */
   send(stream: string, unit: U, held = this.host.bytes(unit)): void {
-    if (!this.host.peer() || this.replaces(held)) this.letWaitingGo(stream)
-    if (this.waiting.length > 0 || this.holdsBack() || this.memoryFull(held, held)) {
+    if (!this.host.peer() || this.replaces(held)) this.replace(stream)
+    if (this.waiting.length > 0 || this.holdsBack() || this.memoryFull(held)) {
       this.host.hold(unit)
-      this.waiting.push({ stream, unit, held })
+      this.waiting.push({ stream, unit })
       return
     }
     this.host.hand(unit)
   }
 
   /** Those waiting of `stream` go now; all of them without `stream`; oldest first. Behind, as a send then does, only
-   *  each stream's newest goes, in the place of those of its stream that no wire has taken. */
+   *  each stream's newest goes, replacing superseded replay entries. */
   flush(stream?: string): void {
     let waiting = this.takeWaiting(stream)
     if (waiting.length > 0 && this.replaces()) {
       waiting = this.newestOfEach(waiting)
-      for (const each of waiting) this.host.dropUnhanded(each.stream)
+      for (const each of waiting) this.host.dropSuperseded(each.stream)
     }
     for (const { unit } of waiting) {
-      this.host.hand(unit)
       this.host.letGo(unit)
+      this.host.hand(unit)
     }
   }
 
   /** Its page confirmed more, or granted more: those waiting go, or, behind with them, only each stream's newest. */
   mayGo(): void {
     if (this.waiting.length > 1 && this.isBehind(this.waitingBytes)) this.waiting = this.newestOfEach(this.waiting)
-    if (this.waiting.length === 0 || this.holdsBack()) return
-    let sent = 0
-    for (const { unit, held } of this.waiting) {
-      if (this.memoryFull(held)) break
-      this.host.hand(unit)
+    if (this.waiting.length === 0 || this.holdsBack() || this.memoryFull(0)) return
+    for (const { unit } of this.takeWaiting(undefined)) {
       this.host.letGo(unit)
-      sent++
+      this.host.hand(unit)
     }
-    if (sent > 0) this.waiting = this.waiting.slice(sent)
   }
 
   /** The sends of `stream` that a newer one replaces go, and those of it that wait, as the newer one takes their place. */
-  letWaitingGo(stream: string): void {
-    this.host.dropUnhanded(stream)
+  replace(stream: string): void {
+    this.host.dropSuperseded(stream)
     this.dispose(stream)
   }
 
@@ -105,16 +100,16 @@ class LossyDelivery<U> {
     for (const { unit } of this.takeWaiting(stream)) this.host.letGo(unit)
   }
 
-  /** Whether a newer send takes the place of those no wire has taken. */
+  /** Whether a newer send takes the place of superseded sends. */
   replaces(held?: number): boolean {
-    return this.isBehind() || this.host.outOfCredit() || (held !== undefined && this.memoryFull(held, held))
+    return this.isBehind() || this.host.outOfCredit() || (held !== undefined && this.memoryFull(held))
   }
 
-  /** Reserve room for a successor only while a lossy publish is due for prompt confirmation. */
-  private memoryFull(held: number, successor = 0): boolean {
-    if (!nearBudget(held + successor) || this.host.peer() === null) return false
+  /** Includes superseded bytes the wire may still be sending, even after replay freed their payloads. */
+  private memoryFull(held: number): boolean {
+    if (this.host.peer() === null) return false
     const replay = this.host.replay()
-    return replay?.unconfirmedSince !== undefined && (successor === 0 || replay.hasUnconfirmedLossy || nearBudget(held))
+    return replay?.unconfirmedSince !== undefined && nearBudget(held + replay.supersededPublishBytes)
   }
 
   /** Takes out those waiting of `stream`, all of them without `stream`, oldest first. */

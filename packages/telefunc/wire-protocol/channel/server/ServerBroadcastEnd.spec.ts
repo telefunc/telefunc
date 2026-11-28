@@ -287,6 +287,40 @@ it('sends a lossy publish that fits while a small reliable publish is unconfirme
   }
 })
 
+it('replaces both handed and waiting lossy bodies under the memory cap', async () => {
+  useSmallMemory()
+  const key = crypto.randomUUID()
+  const broadcast = new ServerBroadcast<string>({ key })
+  const { end, peer } = pageEnd(600, 0, broadcast)
+  const replay = replayOf(end)
+  try {
+    await Broadcast.publishBinary(key, new Uint8Array(10))
+    await Broadcast.publishBinary(key, new Uint8Array(1152 * 1024).fill(1), { lossy: true })
+    const handed = replay.seq
+    for (const value of [2, 3, 4, 5])
+      await Broadcast.publishBinary(key, new Uint8Array(1152 * 1024).fill(value), { lossy: true })
+    expect(end.isClosed).toBe(false)
+    expect(end.heldBytes).toBeLessThan(2 * 1024 * 1024)
+    const dropped = replay
+      .getAfter(0)
+      .map(decode)
+      .filter((frame) => frame.tag === TAG.PUBLISH_BINARY)
+    expect(dropped.map((frame) => binaryData(frame.data)[0])).toEqual([0])
+
+    end._dispatchFrame(decodeChannelFrame(encode.window(peer.index, 0, handed)))
+    const remaining = replay
+      .getAfter(0)
+      .map(decode)
+      .filter((frame) => frame.tag === TAG.PUBLISH_BINARY)
+    expect(remaining.map((frame) => binaryData(frame.data)[0])).toEqual([5])
+    end._dispatchFrame(decodeChannelFrame(encode.window(peer.index, 0, replay.seq)))
+    expect(end.heldBytes).toBe(0)
+  } finally {
+    end.abort()
+    end._release()
+  }
+})
+
 it.each(['measured', 'unmeasured'] as const)(
   'with a %s link on a 2 MiB server, a page stays open and gets the latest lossy publish',
   async (link) => {

@@ -384,8 +384,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // Detached bytes read as empty: copying them throws before they take the place of the send that waits.
     if (typeof data !== 'string' && data.byteLength === 0) new Uint8Array(data)
     const delivery = this.lossyDelivery()
-    // Reclaiming other channels can ease pressure after admission counted the bytes this send replaces.
-    if (replaceable > 0 && !delivery.replaces(held)) delivery.letWaitingGo(OWN_STREAM)
+    if (replaceable > 0 && !delivery.replaces(held)) delivery.replace(OWN_STREAM)
     delivery.send(OWN_STREAM, { data, held })
   }
 
@@ -400,15 +399,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       return Promise.reject<void>(this.refuseSend(lossy.held - wait.behindBytes, false))
   }
 
-  /** What its next lossy send takes the place of, by what that holds: with no page attached, the offline buffer's lossy
-   *  last entry; attached, what waits and the sends still in the wire's queue since its last frame, if they need
-   *  replacing. */
+  /** What the next lossy send can replace, if it needs room or the page is behind. */
   private replaceableHeld(held: number): number {
     if (!this.peer) return this.offlineBuffer.replaceableHeld
-    // Made before the first attached lossy send is measured: the attach may have handed lossy sends that still wait.
     const sends = this.lossyDelivery()
     if (!sends.replaces(held)) return 0
-    return sends.waitingBytes + this.peer.replaceableHeld()
+    const replay = this._replayBuffer
+    assert(replay)
+    return sends.waitingBytes + replay.replaceableHeld(OWN_STREAM, this.peer.unhanded())
   }
 
   private lossyDelivery(): LossyDelivery<LossySend> {
@@ -430,7 +428,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._holdOffline(send.held)
       },
       letGo: ({ held }) => this._letGoOffline(held),
-      dropUnhanded: () => this.dropReplaceable(),
+      dropSuperseded: (stream) => {
+        assert(this.peer)
+        const { seqs, bytes } = this.peer.dropSuperseded(stream)
+        this.sendCredit.refund(bytes, seqs.length)
+      },
       outOfCredit: () => this.sendCredit.isOutOfCredit(),
       bytes: ({ held }) => held,
     }
@@ -458,14 +460,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     this.offlineBuffer.dropLossy()
     this._replayBuffer?.dropUnhanded(Number.POSITIVE_INFINITY)
-  }
-
-  /** A newer lossy send takes the place of its lossy sends still in the wire's queue, back to its last frame: a plain send
-   *  keeps the lossy sends before it. The credit they counted comes back. */
-  private dropReplaceable(): void {
-    assert(this.peer)
-    const { seqs, bytes } = this.peer.dropReplaceable()
-    this.sendCredit.refund(bytes, seqs.length)
   }
 
   /** Sends a lossy send's `data` to `peer`, where a newer one may take its place while it waits on the wire. It counts
@@ -674,10 +668,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  an open one applies the RECONCILE's broadcast want before `onOpen` fires. */
   _attachPeer(peer: IndexedPeer, state?: AttachState): void {
     const live = this._phase !== 'ended'
+    this._replayBuffer?.attached()
     if (live) {
       this.stopPageWait()
       this.peer = peer
-      this._replayBuffer?.moving()
       this.receiveCredit.attach(peer.sender.sendWait())
       if (state?.want) this.onPeerWant(state.want)
     }

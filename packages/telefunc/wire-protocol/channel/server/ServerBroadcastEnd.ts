@@ -127,11 +127,11 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   }
 
   /** @internal A publish of `bytes` its page doesn't get: it doesn't read `stream`, or began to close. Near the budget,
-   *  a lossy one leaves a closing end of the stream only its newest (`replaceWaiting`). One that another object cut ends
+   *  a lossy one leaves a closing end of the stream only its newest (`replaceSuperseded`). One that another object cut ends
    *  now. */
   _passOver(stream: string, lossy: boolean, bytes: number): void {
     this.endOverflowed()
-    if (lossy && nearBudget(bytes)) this.replaceWaiting(stream)
+    if (lossy && nearBudget(bytes)) this.replaceSuperseded(stream)
   }
 
   /** @internal What it ended with, as its `closed` rejects. */
@@ -206,7 +206,7 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
       hold: (body) => hold(this, body),
       letGo: (body) => letGo(this, body),
       // A plain publish of a stream ends the place of the stream's lossy ones before it: those stay.
-      dropUnhanded: (stream) => this.dropLossyOf(stream),
+      dropSuperseded: (stream) => this.dropSuperseded(stream),
       // A publish counts against no credit.
       outOfCredit: () => false,
       bytes: (body) => body.frame.byteLength,
@@ -260,19 +260,19 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
 
   /** The lossy publishes of `stream` that a newer one replaces go, unless it ended: its replay is then what its page
    *  reads. */
-  private dropLossyOf(stream: string): void {
+  private dropSuperseded(stream: string): void {
     if (this._phase === 'ended') return
-    if (this.peer) this.peer.dropUnhanded(stream)
-    else this._replayBuffer?.dropLossyOf(stream, Number.POSITIVE_INFINITY)
+    if (this.peer) this.peer.dropSuperseded(stream)
+    else this._replayBuffer?.dropSuperseded(stream)
   }
 
   /** `MemoryHolder`: near the budget, a newer lossy publish of `stream` is about to reach this object's pages. An open
    *  end on that object whose page reads the stream lets go of what the publish replaces. A closing one gets no newer
    *  publish, so of that stream it keeps only its newest, and what its page is owed. */
-  replaceWaiting(stream: string): void {
+  replaceSuperseded(stream: string): void {
     if (this._phase === 'ended' || !this.onOwnObject()) return
     if (this.owner?._pageReads?.(stream) === false) return
-    if (this._phase === 'open') return this.lossyPublishes?.letWaitingGo(stream)
+    if (this._phase === 'open') return this.lossyPublishes?.replace(stream)
     if (this.peer) this.peer.dropStaleLossy(stream)
     else this._replayBuffer?.dropStaleLossy(Number.POSITIVE_INFINITY, stream)
   }

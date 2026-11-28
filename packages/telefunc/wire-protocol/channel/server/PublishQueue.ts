@@ -3,9 +3,9 @@ export { PublishQueue }
 import { assert } from '../../../utils/assert.js'
 import type { PublishBody } from './PublishBody.js'
 
-/** A replay's publish records, kept in seq order and dropped from either end. */
+/** Publish records in seq order, with a byte count in place of a superseded body that the wire already took. */
 class PublishQueue {
-  private readonly bodies: (PublishBody | undefined)[] = []
+  private readonly bodies: (PublishBody | number | undefined)[] = []
   private readonly seqs: number[] = []
   private readonly indexes: number[] = []
   private readonly sentAt: number[] = []
@@ -23,10 +23,24 @@ class PublishQueue {
     return seq
   }
 
-  bodyAt(i: number): PublishBody {
+  bodyAt(i: number): PublishBody | number {
     const body = this.bodies[this.head + i]
     assert(body !== undefined)
     return body
+  }
+
+  /** Keeps only the byte count of a superseded publish until its wire confirms it. */
+  forgetBody(i: number, bytes: number): void {
+    this.bodies[this.head + i] = bytes
+  }
+
+  discardForgotten(release: (bytes: number) => void): void {
+    for (let i = this.length - 1; i >= 0; i--) {
+      const body = this.bodyAt(i)
+      if (typeof body !== 'number') continue
+      this.removeAt(i)
+      release(body)
+    }
   }
 
   indexAt(i: number): number {
@@ -86,7 +100,7 @@ class PublishQueue {
     this.head = head
   }
 
-  pop(): PublishBody {
+  pop(): PublishBody | number {
     const body = this.bodies.pop()
     assert(body !== undefined)
     if (this.head >= this.bodies.length) this.clear()
@@ -101,7 +115,7 @@ class PublishQueue {
   }
 
   /** Takes out the record at `i`, from among the newest. */
-  removeAt(i: number): PublishBody {
+  removeAt(i: number): PublishBody | number {
     const body = this.bodyAt(i)
     const at = this.head + i
     this.bodies.splice(at, 1)

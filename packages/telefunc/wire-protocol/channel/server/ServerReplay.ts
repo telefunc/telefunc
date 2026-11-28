@@ -3,6 +3,7 @@ export type { Dropped }
 
 import { assert } from '../../../utils/assert.js'
 import {
+  HELD_PUBLISH_OVERHEAD_BYTES,
   HELD_SEND_OVERHEAD_BYTES,
   hasRoomFor,
   heldPublishBytes,
@@ -16,16 +17,15 @@ import type { PublishBody } from './PublishBody.js'
 import { PublishQueue } from './PublishQueue.js'
 import { SeqQueue } from '../SeqQueue.js'
 import { DrainRate } from '../../flowControl/DrainRate.js'
-import { EVERY_STREAM } from '../ownStream.js'
+import { EVERY_STREAM, OWN_STREAM } from '../ownStream.js'
 
 /** When a channel's unconfirmed data was dated, at a loss of its page's wire. */
 type Stall = { since: number }
 /** The publishes that went, by seq, oldest first, and their bodies' bytes. */
 type Dropped = { seqs: number[]; bytes: number }
 
-/** What a channel sent and its page hasn't confirmed, for a reconnect to send again: its own frames, and its publishes,
- *  each a channel index and a reference to the body its subscribers share. Each queue is in seq order: acknowledged
- *  entries leave from its oldest end, publishes past a gap from its newest, and skipped ones from among the newest. */
+/** A channel's replay and confirmation records in seq order. Once a handed publish is superseded, only its
+ *  confirmation record stays until the wire confirms it or is replaced. */
 class ServerReplay {
   private readonly frames = new SeqQueue<Uint8Array<ArrayBuffer>>()
   private readonly publishes = new PublishQueue()
@@ -37,9 +37,10 @@ class ServerReplay {
   /** When its page last began moving to a wire: what it hadn't confirmed then is confirmed over that wire. */
   private movedAt = 0
   private stallDate: Stall | null = null
-  /** The bytes its page confirmed, frames and publishes, and the publish bytes it holds unconfirmed. */
+  /** Bytes the page confirmed and publish bytes awaiting confirmation, including superseded ones. */
   private confirmedBytes = 0
-  private heldPublishBytes = 0
+  private unconfirmedPublishBytes = 0
+  private supersededBytes = 0
   /** The rate its page confirms at: a publish that went behind others measures what crossed ahead of it, over what its
    *  confirmation took past the least. */
   private readonly confirms = new DrainRate()
@@ -82,7 +83,7 @@ class ServerReplay {
     this.pushed(seq)
     const alone = this.publishes.length === 0 && this.frames.length === 0
     this.publishes.push(seq, index, body, performance.now(), alone, this.confirmedBytes)
-    this.heldPublishBytes += body.frame.byteLength
+    this.unconfirmedPublishBytes += body.frame.byteLength
     hold(this.holder, body)
     const { stream } = body
     if (body.lossy && stream !== null) {
@@ -110,11 +111,7 @@ class ServerReplay {
 
   /** Whether it holds something its page hasn't confirmed. */
   get unconfirmed(): boolean {
-    return this.frames.length > 0 || this.publishes.length > 0
-  }
-
-  get hasUnconfirmedLossy(): boolean {
-    return (this.lossyHeld?.size ?? 0) > 0
+    return this.frames.length > 0 || this.unconfirmedPublishBytes > this.supersededBytes
   }
 
   /** Its page's wire went at `at`: what the page hasn't confirmed is dated from then, unless it is already. */
@@ -142,7 +139,7 @@ class ServerReplay {
     const hold = heldMs > 0 && this.publishes.seqAt(newest) === lastSeq ? heldMs : 0
     for (let i = 0; i < publishes; i++) {
       const body = this.publishes.bodyAt(i)
-      this.confirmedBytes += body.frame.byteLength
+      this.confirmedBytes += publishBytes(body)
       this.letPublishGo(body)
     }
     this.publishes.dropOldest(publishes)
@@ -165,9 +162,7 @@ class ServerReplay {
     }
   }
 
-  /** The frames after `afterSeq` in seq order, each publish's head and then its body. A channel's are all there, as
-   *  nothing enters unadmitted and nothing leaves unacknowledged; what a public subscriber sheds its page sees in
-   *  `info.seq`. */
+  /** The frames after `afterSeq` in seq order, including each retained publish's head and body. */
   getAfter(afterSeq: number): Uint8Array<ArrayBuffer>[] {
     const out: Uint8Array<ArrayBuffer>[] = []
     let f = this.frames.indexAfter(afterSeq)
@@ -177,40 +172,34 @@ class ServerReplay {
         out.push(this.frames.at(f++))
         continue
       }
-      out.push(encode.publishTo(this.publishes.indexAt(p), this.publishes.seqAt(p)), this.publishes.bodyAt(p).frame)
+      const body = this.publishes.bodyAt(p)
+      if (typeof body !== 'number')
+        out.push(encode.publishTo(this.publishes.indexAt(p), this.publishes.seqAt(p)), body.frame)
       p++
     }
     return out
   }
 
-  /** It holds nothing: its page confirmed all it sent, or what it didn't went unsent. */
+  /** Nothing is owed to a reconnect, including an end it couldn't keep. */
   get isEmpty(): boolean {
-    return this.frames.length === 0 && this.publishes.length === 0 && this.unkeptEnd === 0
+    return this.frames.length === 0 && this.unconfirmedPublishBytes === this.supersededBytes && this.unkeptEnd === 0
   }
 
   /** Whether all it holds is frames `test` passes, no publish among them. */
   holdsOnly(test: (frame: Uint8Array<ArrayBuffer>) => boolean): boolean {
-    if (this.publishes.length > 0) return false
+    if (this.unconfirmedPublishBytes > this.supersededBytes) return false
     for (let i = 0; i < this.frames.length; i++) if (!test(this.frames.at(i))) return false
     return true
   }
 
-  /** What its newest `count` publishes hold. */
-  heldByNewestPublishes(count: number): number {
+  /** The bytes a newer lossy publish of this stream can replace. */
+  replaceableHeld(stream: string, unhanded: number): number {
     let held = 0
-    for (let i = Math.max(0, this.publishes.length - count); i < this.publishes.length; i++)
-      held += heldPublishBytes(this.publishes.bodyAt(i))
+    const firstUnhanded = this.publishes.length - unhanded
+    this.walkReplaceable(stream, (index, body) => {
+      held += index >= firstUnhanded ? heldPublishBytes(body) : body.frame.byteLength
+    })
     return held
-  }
-
-  /** How many of its newest `count` publishes came after its newest frame. A frame its page confirmed is gone, and so is
-   *  every publish before it. */
-  sinceFrame(count: number): number {
-    const frame = this.frames.length > 0 ? this.frames.seqAt(this.frames.length - 1) : 0
-    const publishes = this.publishes
-    let since = 0
-    while (since < count && since < publishes.length && publishes.seqAt(publishes.length - 1 - since) > frame) since++
-    return since
   }
 
   /** Its newest `droppable` publishes go, for a newer one to take their place: the page's `info.seq` shows what it
@@ -220,26 +209,26 @@ class ServerReplay {
     for (let i = Math.min(this.publishes.length, droppable); i > 0; i--) {
       dropped.seqs.push(this.publishes.seqAt(this.publishes.length - 1))
       const body = this.publishes.pop()
-      dropped.bytes += body.frame.byteLength
+      dropped.bytes += publishBytes(body)
       this.letPublishGo(body)
     }
     dropped.seqs.reverse()
     return dropped
   }
 
-  /** Replacement. Of its newest `droppable`, the lossy publishes of `stream` that no plain one of the stream followed go:
-   *  its page's `info.seq` shows what it skipped. */
-  dropLossyOf(stream: string, droppable: number): Dropped {
-    // Nothing of the stream older than its oldest lossy publish can go, so the walk ends there.
-    let lossyLeft = this.lossyHeld?.get(stream) ?? 0
-    if (lossyLeft === 0) return { seqs: [], bytes: 0 }
+  /** A handed publish no longer needs its payload for replay, but its wire can still confirm its bytes. */
+  dropSuperseded(stream: string, unhanded = Number.POSITIVE_INFINITY): Dropped {
     const goes: number[] = []
-    this.walkNewest(droppable, (index, body, owed) => {
-      if (body.stream !== stream) return
-      // A plain publish of the stream, or a lossy one before it: every older one of the stream is owed too.
-      if (owed) return false
-      goes.push(index)
-      return --lossyLeft > 0
+    const firstUnhanded = this.publishes.length - unhanded
+    this.walkReplaceable(stream, (index, body) => {
+      if (index >= firstUnhanded) goes.push(index)
+      else {
+        this.publishes.forgetBody(index, body.frame.byteLength)
+        this.letPublishGo(body)
+        this.supersededBytes += body.frame.byteLength
+        this.unconfirmedPublishBytes += body.frame.byteLength
+        hold(this.holder, HELD_PUBLISH_OVERHEAD_BYTES)
+      }
     })
     return this.take(goes)
   }
@@ -286,6 +275,12 @@ class ServerReplay {
     this.movedAt = performance.now()
   }
 
+  /** A new wire cannot confirm the old wire's superseded publishes. */
+  attached(): void {
+    this.moving()
+    if (this.supersededBytes > 0) this.publishes.discardForgotten((bytes) => this.letPublishGo(bytes))
+  }
+
   /** Since when the oldest publish its page hasn't confirmed waits for that: since it was sent, or since its page began
    *  moving to the wire that confirms it. `undefined` with none. */
   get unconfirmedSince(): number | undefined {
@@ -294,7 +289,12 @@ class ServerReplay {
 
   /** The publish bytes its page hasn't confirmed behind the oldest, which it may be taking now. */
   get publishBytesBehindOldest(): number {
-    return this.publishes.length > 0 ? this.heldPublishBytes - this.publishes.bodyAt(0).frame.byteLength : 0
+    return this.publishes.length > 0 ? this.unconfirmedPublishBytes - publishBytes(this.publishes.bodyAt(0)) : 0
+  }
+
+  /** Unconfirmed bytes that only the wire can still be holding, after their replay payloads went. */
+  get supersededPublishBytes(): number {
+    return this.supersededBytes
   }
 
   /** The rate its page confirms publishes at, in bytes per ms: 0 before a confirmation measured it. */
@@ -304,13 +304,28 @@ class ServerReplay {
 
   /** The body of the newest publish it holds. */
   newestPublish(): PublishBody | undefined {
-    return this.publishes.length > 0 ? this.publishes.bodyAt(this.publishes.length - 1) : undefined
+    const newest = this.publishes.length > 0 ? this.publishes.bodyAt(this.publishes.length - 1) : undefined
+    return typeof newest === 'number' ? undefined : newest
   }
 
   dispose(): void {
     this.stallDate = null
     while (this.frames.length > 0) this.letFrameGo(this.frames.pop())
     while (this.publishes.length > 0) this.letPublishGo(this.publishes.pop())
+  }
+
+  private walkReplaceable(stream: string, visit: (index: number, body: PublishBody) => void): void {
+    let lossyLeft = this.lossyHeld?.get(stream) ?? 0
+    if (lossyLeft === 0) return
+    // A channel's last reliable frame also protects the lossy sends before it.
+    const lastFrame = stream === OWN_STREAM && this.frames.length > 0 ? this.frames.seqAt(this.frames.length - 1) : 0
+    this.walkNewest(Number.POSITIVE_INFINITY, (index, body, owed) => {
+      if (lastFrame > 0 && this.publishes.seqAt(index) <= lastFrame) return false
+      if (body.stream !== stream) return
+      if (owed) return false
+      visit(index, body)
+      return --lossyLeft > 0
+    })
   }
 
   /** Walks its newest `count` publishes from the newest. `owed`: its page must get it, as a plain one, or as a lossy one
@@ -320,6 +335,7 @@ class ServerReplay {
     const oldest = Math.max(0, this.publishes.length - count)
     for (let i = this.publishes.length - 1; i >= oldest; i--) {
       const body = this.publishes.bodyAt(i)
+      if (typeof body === 'number') continue
       const { stream, lossy } = body
       const owed =
         !lossy || stream === null || (followed !== null && (followed.has(stream) || followed.has(EVERY_STREAM)))
@@ -347,7 +363,7 @@ class ServerReplay {
     for (const index of indices) {
       dropped.seqs.push(this.publishes.seqAt(index))
       const body = this.publishes.removeAt(index)
-      dropped.bytes += body.frame.byteLength
+      dropped.bytes += publishBytes(body)
       this.letPublishGo(body)
     }
     dropped.seqs.reverse()
@@ -363,8 +379,13 @@ class ServerReplay {
     letGo(this.holder, frame.byteLength + HELD_SEND_OVERHEAD_BYTES)
   }
 
-  private letPublishGo(body: PublishBody): void {
-    this.heldPublishBytes -= body.frame.byteLength
+  private letPublishGo(body: PublishBody | number): void {
+    this.unconfirmedPublishBytes -= publishBytes(body)
+    if (typeof body === 'number') {
+      this.supersededBytes -= body
+      letGo(this.holder, HELD_PUBLISH_OVERHEAD_BYTES)
+      return
+    }
     letGo(this.holder, body)
     const { stream } = body
     if (!body.lossy || stream === null || this.lossyHeld === null) return
@@ -372,4 +393,8 @@ class ServerReplay {
     if (held > 1) this.lossyHeld.set(stream, held - 1)
     else this.lossyHeld.delete(stream)
   }
+}
+
+function publishBytes(body: PublishBody | number): number {
+  return typeof body === 'number' ? body : body.frame.byteLength
 }

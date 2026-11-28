@@ -14,7 +14,7 @@ class PublishBody {
   /** The stream it is ordered in with the other publishes of its source, such as a member's track; null for one that has
    *  none. */
   readonly stream: string | null
-  /** Whether a newer lossy body of its `stream` takes this one's place while no wire has it. */
+  /** Whether a newer lossy body of its `stream` may take its place. */
   readonly lossy: boolean
   /** The holders of this body, which the ledger counts once. */
   refs = 0

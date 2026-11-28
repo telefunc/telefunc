@@ -127,25 +127,14 @@ class IndexedPeer {
     this.replay.dropUnhanded(this.sender.dropUngiven(this.index))
   }
 
-  /** What those of them hold that a newer send of the channel's own takes the place of: the ones sent after the
-   *  channel's last frame. */
-  replaceableHeld(): number {
-    return this.replay.heldByNewestPublishes(this.replay.sinceFrame(this.unhanded()))
+  /** Takes back from the replay and the wire's queue its publishes that no wire has taken. */
+  dropUnhanded(): Dropped {
+    return this.offWire(this.replay.dropUnhanded(this.unhanded()))
   }
 
-  /** Takes back from the replay and the wire's queue its publishes that no wire has taken: all of them, or with `stream`
-   *  the lossy ones of it that a newer one replaces. */
-  dropUnhanded(stream?: string): Dropped {
-    const droppable = this.unhanded()
-    return this.offWire(
-      stream === undefined ? this.replay.dropUnhanded(droppable) : this.replay.dropLossyOf(stream, droppable),
-    )
-  }
-
-  /** As `dropUnhanded`, of those only the ones sent after the channel's last frame: a channel's own sends, of which a
-   *  plain one is a frame that keeps the lossy ones before it. */
-  dropReplaceable(): Dropped {
-    return this.offWire(this.replay.dropUnhanded(this.replay.sinceFrame(this.unhanded())))
+  /** Drops superseded replay entries. Only the wire's waiting suffix can be cancelled. */
+  dropSuperseded(stream: string): Dropped {
+    return this.offWire(this.replay.dropSuperseded(stream, this.unhanded()))
   }
 
   /** Takes back those of its lossy publishes, of every stream or only of `stream`, that no wire has taken and a newer

@@ -1,4 +1,5 @@
 export {
+  HELD_PUBLISH_OVERHEAD_BYTES,
   HELD_SEND_OVERHEAD_BYTES,
   addWireCopies,
   admit,
@@ -51,7 +52,7 @@ interface MemoryHolder {
   released?: boolean
   shed?(toBytes: number): void
   /** A newer publish of lossy `stream` reaches its pages: what of that stream it replaces goes. */
-  replaceWaiting?(stream: string): void
+  replaceSuperseded?(stream: string): void
   /** Lets go of all it holds where that is only the outcome of a close its page is in, having confirmed the server's
    *  CLOSE: reclaiming asks it before anything sheds. */
   letGoKept?(): void
@@ -272,8 +273,8 @@ function fits(holder: MemoryHolder, bytes: number): boolean {
   )
 }
 
-/** Makes room for a delivery, which nobody can refuse. Near the budget, each page whose waiting publishes of a lossy
- *  one's stream it replaces lets go of them first (`replaceWaiting`), so what's measured is what stays. Past that, it
+/** Makes room for a delivery, which nobody can refuse. Near the budget, each page releases the bodies the new lossy
+ *  publish replaces before admission measures what stays. Past that, it
  *  ends the pages whose newest no wire has, fewest sharers first, until the body fits or none is left: where ending them
  *  can't make room, they end all the same, and so do its own pages (`fitsPublish`). */
 function admitPublish(body: PublishBody): void {
@@ -285,7 +286,7 @@ function admitPublish(body: PublishBody): void {
   const most = heldAtMost(maxMemory, memory.reserved)
   if (nearBudget(bytes)) {
     const { stream } = body
-    if (body.lossy && stream !== null) for (const holder of [...memory.holders]) holder.replaceWaiting?.(stream)
+    if (body.lossy && stream !== null) for (const holder of [...memory.holders]) holder.replaceSuperseded?.(stream)
     if (memory.total + bytes > target) reclaim(bytes, target)
   }
   if (memory.total + bytes <= most) return

@@ -38,7 +38,7 @@ function lossyPage() {
     },
     hold: (body) => hold(holder, body),
     letGo: (body) => letGo(holder, body),
-    dropUnhanded() {},
+    dropSuperseded() {},
     outOfCredit: () => false,
     bytes: (body) => body.frame.byteLength,
   })
