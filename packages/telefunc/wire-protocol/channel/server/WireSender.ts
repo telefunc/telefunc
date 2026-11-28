@@ -59,7 +59,8 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   /** Null on a wire that doesn't take pieces (SSE). */
   readonly pieces: WirePieces | null
   /** What the transport holds back for the page; what the sender holds for a RECONCILED is newer. */
-  private readonly wireQueue: WireQueue | BufferedWireQueue
+  private readonly wireQueue: WireQueue
+  private readonly bufferedQueue: BufferedWireQueue | null
   private readonly sseFlushThrottle: number
   /** How long the frames that go at once wait behind what the socket holds. */
   private readonly wait = new SocketWait({ owner: this })
@@ -105,9 +106,11 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
       const headroom = new ServerHeadroom({ socket: new TransportSocket({ transport, wire }), pingInterval })
       this.pieces = { headroom, receiver: new ServerPieceReceiver({ owner: this }) }
       this.wireQueue = headroom
+      this.bufferedQueue = null
     } else {
       this.pieces = null
-      this.wireQueue = transport.queueOf(wire)
+      this.bufferedQueue = transport.queueOf(wire)
+      this.wireQueue = this.bufferedQueue
     }
     this.sseFlushThrottle = sseFlushThrottle
     this.deliveries = deliveries
@@ -143,9 +146,9 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
           headroom.sender.gatherPublish(index, seq, body, room)
           return
         }
-      } else if ('canGatherPublish' in this.wireQueue && this.wireQueue.canGatherPublish(bytes)) {
+      } else if (this.bufferedQueue?.canGatherPublish(bytes)) {
         this.handGatheredPublish(body.byteLength, bytes)
-        this.wireQueue.gatherPublish(index, seq, body)
+        this.bufferedQueue.gatherPublish(index, seq, body)
         return
       }
     }
@@ -310,11 +313,11 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   /** What the wire held for its page goes from the ledger once nothing holds it: at once, but for the events its stream
    *  still holds, which stay in it till the stream lets go of them (`whenLetGo`). */
   private releaseMemory(): void {
-    if (!('whenLetGo' in this.wireQueue)) return releaseHolder(this.memory)
-    const more = this.wireQueue.copiedBytes - this.memory.heldBytes
+    if (!this.bufferedQueue) return releaseHolder(this.memory)
+    const more = this.bufferedQueue.copiedBytes - this.memory.heldBytes
     if (more > 0) hold(this.memory, more)
     else letGo(this.memory, -more)
-    this.wireQueue.whenLetGo(() => releaseHolder(this.memory))
+    this.bufferedQueue.whenLetGo(() => releaseHolder(this.memory))
   }
 
   /** Gives the transport the channels' ends `close('first')` kept, as they would have gone on the wire. */
@@ -366,7 +369,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
     let allowed = this.largestSent
     for (const channel of this.channels()) allowed += channel.heldBytes
     // What the wire's events take as copies of their frames: SSE's base64.
-    const copied = 'copiedBytes' in this.wireQueue ? this.wireQueue.copiedBytes : 0
+    const copied = this.bufferedQueue?.copiedBytes ?? 0
     const holds = (socket ?? 0) + this.heldBytes + copied
     this.holdForWire(holds - allowed)
     return socket === undefined && !this.owed ? Infinity : this.memory.heldBytes + allowed - holds

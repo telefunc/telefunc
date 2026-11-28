@@ -25,6 +25,12 @@ function createHarness() {
         dropUngiven: () => 0,
         dropWaitingPublishes() {},
         dropWaitingFrom() {},
+        copiedBytes: 0,
+        whenLetGo: (onLetGo) => onLetGo(),
+        canGatherPublish: () => false,
+        gatherPublish() {
+          throw new Error('The test wire cannot gather publishes')
+        },
       }),
       close: () => (terminated = true),
     }

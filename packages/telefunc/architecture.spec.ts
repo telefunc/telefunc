@@ -10,9 +10,11 @@ const forbiddenImports = [
   [/^utils\//, /^(wire-protocol|node|client|serve)\//],
   [/^workarounds\//, /^(node|client|serve|wire-protocol)\//],
   [/^wire-protocol\/wire\//, /^(wire-protocol\/(channel|values|broadcast|adapter)|node|client|serve)\//],
+  [/^wire-protocol\/wire\//, /^utils\/nodeReadableToWebRequest\.ts$/],
   [/^wire-protocol\/values\//, /^node\/server\/serverConfig\.ts$/],
   [/^wire-protocol\/broadcast\//, /^(wire-protocol\/channel\/server|node\/server)\//],
   [/^node\/server\/(context\/|runTelefunc\.ts$)/, /^workarounds\//],
+  [/^node\/server\/runTelefunc\//, /^workarounds\/(?!denoUploadResponseHold\.ts$)/],
   [
     /^node\/server\/runTelefunc\/carryChannel\.ts$/,
     /^wire-protocol\/(adapter\/|channel\/server\/ServerBroadcast\.ts$)/,

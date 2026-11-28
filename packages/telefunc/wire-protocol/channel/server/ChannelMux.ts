@@ -36,7 +36,7 @@ import type {
   ReconcilePayload,
 } from '../../wire/payloads.js'
 import { IndexedPeer } from './IndexedPeer.js'
-import type { BufferedWireQueue, WireQueue } from '../../flowControl/server/waitingPublishes.js'
+import type { BufferedWireQueue } from '../../flowControl/server/waitingPublishes.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
 import { creditWindowOf } from '../../flowControl/credit.js'
 import { WireSender } from './WireSender.js'
@@ -75,7 +75,7 @@ type ServerTransport<TWire> = {
   | {
       wholeMessages: false
       /** What the wire holds back for its page. */
-      queueOf(wire: TWire): WireQueue | BufferedWireQueue
+      queueOf(wire: TWire): BufferedWireQueue
     }
 )
 
