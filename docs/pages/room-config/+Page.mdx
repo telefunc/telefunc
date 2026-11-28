@@ -13,8 +13,8 @@ Set how long a <Link href="/room">room</Link> stays open once nobody uses it.
 
 import { roomConfig } from '@telefunc/room'
 
-roomConfig.emptyTimeout = 300_000    // Close a room that nobody joined yet, once no page has it open (ms)
-roomConfig.departureTimeout = 20_000 // Close a room after the last participant leaves and no page has it open (ms)
+roomConfig.emptyTimeout = 300_000    // Close an unjoined room once no page has it open (default: 300_000 ms)
+roomConfig.departureTimeout = 20_000 // Close after the last participant leaves and no page has it open (default: 20_000 ms)
 ```
 
 Set these defaults in your server entry. Override either timeout when you call `Room.create()` or `Room.getOrCreate()` to create a room.

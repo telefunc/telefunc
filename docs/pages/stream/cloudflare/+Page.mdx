@@ -66,7 +66,7 @@ Bind its Durable Object in Wrangler:
 
 {/* spellcheck-ignore:off */}
 
-> Run `wrangler types` to generate `Env`. Keep `enable_request_signal` to detect disconnects in <Link href="/onClose#context-signal">`context.signal` and `onClose()`</Link>.
+> Run `npx wrangler types` to generate `Env`. Keep `enable_request_signal` to detect disconnects in <Link href="/onClose#context-signal">`context.signal` and `onClose()`</Link>.
 
 Build the Worker with <Link href="/vite-plugin">Telefunc's Vite plugin</Link> and Cloudflare's [Vite plugin](https://developers.cloudflare.com/workers/vite-plugin/):
 
@@ -95,7 +95,7 @@ Add your page as `index.html`, next to `vite.config.ts`:
 </html>
 ```
 
-Run `vite dev` to develop, and `vite build` followed by `wrangler deploy` to deploy. Try the <Link href="/channel#new-channel">clock example</Link> with the browser code in `main.ts` and the telefunction in `Clock.telefunc.ts`.
+Add the <Link href="/channel#new-channel">clock example</Link> with the browser code in `main.ts` and the telefunction in `Clock.telefunc.ts`. Run `npx vite dev` to develop, and `npx vite build` followed by `npx wrangler deploy` to deploy.
 
 > For rooms, also install <Link href="/room#install">`@telefunc/room`</Link>. For apps that use regular telefunctions and streams, see <Link href="/serve" />.
 
@@ -173,7 +173,7 @@ See also: <Link href="/Telefunc" />.
 
 ## Workers Free
 
-Workers Free allows 10 ms of [CPU time](https://developers.cloudflare.com/workers/platform/limits/#cpu-time) per HTTP request. A Worker that keeps running over it is stopped, and the client gets Error 1102.
+Workers Free allows 10 ms of [CPU time](https://developers.cloudflare.com/workers/platform/limits/#cpu-time) per HTTP request. A Worker that exceeds that CPU limit is stopped, and the client gets Error 1102.
 
 
 ## See also
@@ -181,4 +181,3 @@ Workers Free allows 10 ms of [CPU time](https://developers.cloudflare.com/worker
 - <Link href="/stream/scale" />
 - <Link href="/Telefunc" />
 - <Link href="/channel" />
-- <Link href="/stream" />

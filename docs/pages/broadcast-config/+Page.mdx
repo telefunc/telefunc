@@ -8,17 +8,17 @@ import { ConfigWhereServer, TelefuncStreamBeta } from '../../components'
 Set how <Link href="/channel#broadcast">Broadcast</Link> reaches subscribers on your other servers.
 
 ```ts
+// /server/index.ts
 // Environment: server
 
 import { config } from 'telefunc'
 
 config.broadcast = {
-  transport: myTransport, // A BroadcastTransport that carries Broadcast across servers
-  onDeliveryLost: ({ key, reason }) => monitor.report(key, reason), // Messages of `key` a subscribed server never got; by default logged
+  onDeliveryLost: ({ key, reason }) => console.warn(`Missed messages for ${key}: ${reason}`),
 }
 ```
 
-Broadcast uses your installed backend, such as <Link href="/redis" />, and works on one server by default. Set `transport` to use your own broker.
+Broadcast uses your installed backend, such as <Link href="/redis" />, and works on one server by default. Set the optional `transport` to a <Link href="#custom-transports">`BroadcastTransport`</Link> for your own broker.
 
 > `onDeliveryLost` runs on a server that missed messages with Redis or Cloudflare. The default logs the loss. Use the callback to refresh state when needed.
 

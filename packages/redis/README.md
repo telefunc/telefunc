@@ -8,6 +8,8 @@ Share Telefunc broadcasts and rooms across servers with Redis.
 npm install @telefunc/redis ioredis
 ```
 
+Set `REDIS_URL` on every server. Point every Telefunc server at the same Redis 5 or later.
+
 Requires Redis 5 or later.
 
 ## Setup
@@ -16,7 +18,7 @@ Requires Redis 5 or later.
 import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 
-const redis = new IORedis('redis://localhost:6379')
+const redis = new IORedis(process.env.REDIS_URL!)
 installRedis(redis)
 ```
 

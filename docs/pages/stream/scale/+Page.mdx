@@ -1,14 +1,16 @@
 import { Link } from '@brillout/docpress'
 import { TelefuncStreamBeta } from '../../../components'
 
+**Environment**: server.
+
 <TelefuncStreamBeta />
 
-To run <Link href="/stream">Telefunc Stream</Link> on multiple servers:
+For Cloudflare Workers, follow the <Link href="/stream/cloudflare" /> guide.
+
+To run <Link href="/stream">Telefunc Stream</Link> behind a load balancer:
 
 - Use <Link href="#sticky-sessions">sticky sessions</Link> for browser channels, rooms, and callbacks.
 - Install <Link href="/redis">`@telefunc/redis`</Link> to share broadcasts and rooms across servers.
-
-For Cloudflare Workers, follow the <Link href="/stream/cloudflare">Workers setup</Link>.
 
 ## Sticky sessions
 
@@ -98,4 +100,3 @@ The <Link href="/stream/cloudflare">Cloudflare adapter</Link> handles session ro
 - <Link href="/stream" />
 - <Link href="/redis" />
 - <Link href="/stream/cloudflare" />
-- <Link href="/channel#broadcast" />

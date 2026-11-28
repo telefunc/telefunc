@@ -25,7 +25,7 @@ const redis = new IORedis('redis://localhost:6379')
 installRedis(redis)
 ```
 
-Call `installRedis()` in your server entry before using Broadcast or Room. Pass your existing [ioredis](https://github.com/redis/ioredis) client to reuse its TLS or authentication settings. To rotate credentials, call it again with the new credentials for the same Redis deployment.
+Call `installRedis()` in your server entry before using Broadcast or Room. Pass your existing [ioredis](https://github.com/redis/ioredis) client to reuse its TLS or authentication settings. To rotate credentials, call `installRedis()` again with a new client for the same Redis deployment.
 
 > Use `maxmemory-policy noeviction` when running rooms, whose state is stored in Redis.
 
@@ -41,6 +41,20 @@ import { installRedis } from '@telefunc/redis'
 
 installRedis(new Cluster([{ host: '127.0.0.1', port: 7000 }]))
 ```
+
+### Redis Sentinel
+
+```ts
+// /server/index.ts
+// Environment: server
+
+import IORedis from 'ioredis'
+import { installRedis } from '@telefunc/redis'
+
+installRedis(new IORedis({ sentinels: [{ host: '127.0.0.1', port: 26379 }], name: 'mymaster' }))
+```
+
+> Set `name` to the primary group Sentinel monitors. Set `password` for Redis authentication and `sentinelPassword` for Sentinel authentication.
 
 ### A Redis user of its own
 
@@ -72,7 +86,7 @@ When Redis can't run a publish or Room operation, use <Link href="/error-handlin
 import { Broadcast, BackendError } from 'telefunc'
 
 try {
-  await Broadcast.publish('chat', message)
+  await Broadcast.publish('chat', { text: 'hello' })
 } catch (err) {
   if (!(err instanceof BackendError)) throw err
   console.error(err.code, err.outcome, err.message)

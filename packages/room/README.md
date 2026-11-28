@@ -1,6 +1,6 @@
 # `@telefunc/room`
 
-Rooms for Telefunc: members, presence, meta, messages and media tracks, on one server or across many.
+Add presence, messages, and media tracks to your Telefunc app. Run rooms across servers with [Redis](https://telefunc.com/redis) or [Cloudflare Workers](https://telefunc.com/stream/cloudflare).
 
 ## Install
 
