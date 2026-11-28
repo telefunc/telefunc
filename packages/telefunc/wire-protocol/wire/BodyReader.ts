@@ -394,8 +394,8 @@ class BodyReader {
           length += chunk.length
         }
         // One part is the one chunk read, with nothing buffered before it.
-        const [only, ...more] = this.collected
-        this.buffer = only !== undefined && more.length === 0 ? only : concatAll(this.collected)
+        const only = this.collected[0]
+        this.buffer = this.collected.length === 1 && only !== undefined ? only : concatAll(this.collected)
       } finally {
         this.collected = []
       }
