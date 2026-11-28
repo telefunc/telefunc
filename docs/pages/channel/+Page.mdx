@@ -239,7 +239,7 @@ for (const frame of frames) {
 }
 ```
 
-For an occasional update, you can call `channel.send(data)` without waiting. See <Link href="/channel-config">the channel configuration</Link> for the memory budget and <Link href="#errors" /> for what happens when a backlog fills it.
+For an occasional update, you can call `channel.send(data)` without waiting. See <Link href="/channel-config">the channel configuration</Link> for the memory limit and <Link href="#errors" /> for what happens when a backlog fills it.
 
 ### Skip to the newest
 
@@ -352,7 +352,7 @@ chat.publish({ user: 'Alice', text: 'Hello!' })
 
 > A telefunction called after `subscribe()` runs once the subscription is in effect. For a plain HTTP request such as fetching a snapshot, await `unsubscribe.opened` first.
 
-To receive messages in a loop, use `for await (const { type, data, info } of chat.messages({ signal }))`. Breaking out of the loop leaves the broadcast open. The loop holds up to 2 MiB of pending messages and frees them as you read.
+To receive messages in a loop, use `for await (const { type, data, info } of chat.messages({ signal }))`. Breaking out of the loop leaves the broadcast open. The loop holds up to 2 MiB of pending messages past its next message and frees them as you read.
 
 ### Notifications
 
