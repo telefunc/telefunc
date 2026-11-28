@@ -200,7 +200,7 @@ export async function onUpload(file: File) => void) {
 
 ## Limitations
 
-Read file arguments in order to stream the upload. Files you keep past the call's return share the server's queue budget (<Link href="/channel-config"><code>config.channel.maxMemory</code></Link>) until you read them or drop them.
+Read file arguments in order to stream the upload. Unread files kept past a call's return share the server's queue budget (<Link href="/channel-config"><code>config.channel.maxMemory</code></Link>) while the client finishes uploading (a plain reply can stop a streaming upload early).
 
 ### One-shot reads
 
