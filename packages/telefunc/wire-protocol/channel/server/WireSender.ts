@@ -20,14 +20,13 @@ import {
   droppingFrom,
   droppingLossy,
   droppingPublishes,
+  type BufferedWireQueue,
   type WireQueue,
 } from '../../flowControl/server/waitingPublishes.js'
 import { SocketWait, type SocketWaitOwner } from '../../flowControl/server/SocketWait.js'
 import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
 import { ServerPieceReceiver } from '../../flowControl/server/ServerPieceReceiver.js'
-import type { PieceReceiverOwner } from '../../flowControl/pieces.js'
-import { TransportSocket } from './TransportSocket.js'
-import { EventStream } from './EventStream.js'
+import type { PieceReceiverOwner, PieceSocket } from '../../flowControl/pieces.js'
 import { fits, hold, letGo, releaseHolder, tryHold, type MemoryHolder } from './channelMemory.js'
 
 type WireSenderOptions = {
@@ -60,7 +59,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   /** Null on a wire that doesn't take pieces (SSE). */
   readonly pieces: WirePieces | null
   /** What the transport holds back for the page; what the sender holds for a RECONCILED is newer. */
-  private readonly wireQueue: WireQueue
+  private readonly wireQueue: WireQueue | BufferedWireQueue
   private readonly sseFlushThrottle: number
   /** How long the frames that go at once wait behind what the socket holds. */
   private readonly wait = new SocketWait({ owner: this })
@@ -115,7 +114,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
     this.heldChannels = heldChannels
     this.attaching = attaching
     this.onPastBacklog = onPastBacklog
-    if (this.wireQueue instanceof EventStream) this.wireQueue.whenTaken(this.rebalanceMemory)
+    this.wireQueue.whenTaken?.(this.rebalanceMemory)
   }
 
   /** A WebSocket page's confirmation waits behind its wire's queues; an SSE page's waits for its POST's turn: the
@@ -144,7 +143,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
           headroom.sender.gatherPublish(index, seq, body, room)
           return
         }
-      } else if (this.wireQueue instanceof EventStream && this.wireQueue.canGatherPublish(bytes)) {
+      } else if ('canGatherPublish' in this.wireQueue && this.wireQueue.canGatherPublish(bytes)) {
         this.handGatheredPublish(body.byteLength, bytes)
         this.wireQueue.gatherPublish(index, seq, body)
         return
@@ -309,9 +308,9 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   }
 
   /** What the wire held for its page goes from the ledger once nothing holds it: at once, but for the events its stream
-   *  still holds, which stay in it till the stream lets go of them (`EventStream.whenLetGo`). */
+   *  still holds, which stay in it till the stream lets go of them (`whenLetGo`). */
   private releaseMemory(): void {
-    if (!(this.wireQueue instanceof EventStream)) return releaseHolder(this.memory)
+    if (!('whenLetGo' in this.wireQueue)) return releaseHolder(this.memory)
     const more = this.wireQueue.copiedBytes - this.memory.heldBytes
     if (more > 0) hold(this.memory, more)
     else letGo(this.memory, -more)
@@ -367,7 +366,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
     let allowed = this.largestSent
     for (const channel of this.channels()) allowed += channel.heldBytes
     // What the wire's events take as copies of their frames: SSE's base64.
-    const copied = this.wireQueue instanceof EventStream ? this.wireQueue.copiedBytes : 0
+    const copied = 'copiedBytes' in this.wireQueue ? this.wireQueue.copiedBytes : 0
     const holds = (socket ?? 0) + this.heldBytes + copied
     this.holdForWire(holds - allowed)
     return socket === undefined && !this.owed ? Infinity : this.memory.heldBytes + allowed - holds
@@ -390,5 +389,28 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
     const channels = new Set(this.attaching)
     for (const { channel } of this.heldChannels()?.values() ?? []) channels.add(channel)
     return channels
+  }
+}
+
+/** A server wire's socket, as its piece sender hands it messages. */
+class TransportSocket implements PieceSocket {
+  private readonly transport: ServerTransport<unknown>
+  private readonly wire: Wire
+
+  constructor({ transport, wire }: { transport: ServerTransport<unknown>; wire: Wire }) {
+    this.transport = transport
+    this.wire = wire
+  }
+
+  send(message: Uint8Array<ArrayBuffer>): void {
+    this.transport.sendNow(this.wire, message)
+  }
+
+  get bufferedAmount(): number {
+    return this.transport.bufferedAmount(this.wire) ?? 0
+  }
+
+  get copiesOnSend(): boolean {
+    return this.transport.copiesOnSend === true
   }
 }

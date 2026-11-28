@@ -36,15 +36,14 @@ import type {
   ReconcilePayload,
 } from '../../wire/payloads.js'
 import { IndexedPeer } from './IndexedPeer.js'
-import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
+import type { BufferedWireQueue, WireQueue } from '../../flowControl/server/waitingPublishes.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
 import { creditWindowOf } from '../../flowControl/credit.js'
 import { WireSender } from './WireSender.js'
 import { EndedChannels } from './EndedChannels.js'
 import { UpgradeStages, type UpgradeStagesOwner } from './UpgradeStages.js'
 import { SessionRegistry, type ChannelHandle, type Session } from './SessionRegistry.js'
-import { AwaitedChannels, expireAwaited, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
-import { RegistrationWaits } from './RegistrationWaits.js'
+import { AwaitedChannels, RegistrationWaits, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
 import type { ServerChannel } from './ServerChannel.js'
 
 /** A transport-owned wire handle. The mux never looks inside one — it only compares them by
@@ -76,7 +75,7 @@ type ServerTransport<TWire> = {
   | {
       wholeMessages: false
       /** What the wire holds back for its page. */
-      queueOf(wire: TWire): WireQueue
+      queueOf(wire: TWire): WireQueue | BufferedWireQueue
     }
 )
 
@@ -1057,7 +1056,7 @@ class ChannelMux implements UpgradeStagesOwner {
     const handle = this.attachChannel(channel, awaited.open, entry, false)
     entry.state.attaching.delete(channel)
     if (!handle) {
-      expireAwaited(awaited)
+      entry.state.awaited.expire(awaited)
       return
     }
     this.sessions.add(session, handle)

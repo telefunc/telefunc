@@ -13,7 +13,7 @@ import {
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../../constants.js'
 import { namesWireVersion } from '../../wire/requestKind.js'
-import { parseSseRequestMetadata, type SseRequestMetadata } from '../../wire/envelope.js'
+import { parseSseRequestMetadata, textDecoder, type SseRequestMetadata } from '../../wire/envelope.js'
 import { OversizeFrameError, BodyReader, StreamTruncatedError } from '../../wire/BodyReader.js'
 import { getChannelMux } from './ChannelMux.js'
 import { EventStream } from './EventStream.js'
@@ -97,7 +97,7 @@ class SseServerTransport {
     try {
       const rawMetadata = await reader.readFrame(SSE_METADATA_MAX_BYTES)
       if (rawMetadata === null) return refuse(REFUSED.noBody)
-      metadata = parseMetadata(new TextDecoder().decode(rawMetadata))
+      metadata = parseMetadata(textDecoder.decode(rawMetadata))
     } catch (err) {
       if (err instanceof StreamTruncatedError) return refuse(REFUSED.truncated)
       if (err instanceof ProtocolViolationError || err instanceof OversizeFrameError) return refuse(REFUSED.metadata)

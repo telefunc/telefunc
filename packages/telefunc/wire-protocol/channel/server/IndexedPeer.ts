@@ -3,7 +3,7 @@ export type { PeerSender }
 
 import { ACK_STATUS, encode } from '../../wire/frame.js'
 import type { AckResultStatus, SequencedEncoder } from '../../wire/frame.js'
-import { PublishBody } from './PublishBody.js'
+import { PublishBody } from './channelMemory.js'
 import type { ServerReplay } from './ServerReplay.js'
 import type { SendWait } from '../../flowControl/SendWaits.js'
 import type { Urgency } from '../../flowControl/credit.js'

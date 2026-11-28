@@ -1,11 +1,10 @@
-export { AwaitedChannels, expireAwaited }
+export { AwaitedChannels, RegistrationWaits }
 export type { AwaitedChannel, RecvBacklog }
 
 import { encode, type ChannelFrame } from '../../wire/frame.js'
 import type { ReconcileOpenEntry } from '../../wire/payloads.js'
 import type { RefusalCause } from '../endCause.js'
 import type { WireEntry } from './ChannelMux.js'
-import type { RegistrationWaits } from './RegistrationWaits.js'
 
 /** What a wire received and hasn't handled yet. */
 type RecvBacklog = { bytes: number; frames: number }
@@ -27,13 +26,6 @@ type AwaitedChannel = {
   /** Why the server ended it while it was awaited, a frame its page sent it or the end of its session: its channel ends
    *  with it as it registers. */
   refused: RefusalCause | null
-}
-
-/** The awaited channel didn't register within `connectTtl`, or shut down as it registered: its wire gets an
- *  ATTACH_RESULT null. A refused one's wire closed with its refusal, and sends it nothing. */
-function expireAwaited(awaited: AwaitedChannel): void {
-  awaited.entry.state.awaited.expire(awaited)
-  awaited.entry.sender.send(encode.attachResult(awaited.open.ix, null))
 }
 
 type AwaitedChannelsOptions = {
@@ -76,10 +68,11 @@ class AwaitedChannels {
     this.attachedCount++
   }
 
-  /** Awaited no more: it holds nothing, and stays while a RECONCILE names it. */
+  /** Its registration timed out or its channel shut down before attaching; it stays while a RECONCILE names it. */
   expire(awaited: AwaitedChannel): void {
     awaited.phase = 'expired'
     this.drop(awaited)
+    awaited.entry.sender.send(encode.attachResult(awaited.open.ix, null))
   }
 
   hold(awaited: AwaitedChannel, frame: ChannelFrame, bytes: number): void {
@@ -156,3 +149,45 @@ class AwaitedChannels {
 }
 
 const NOTHING_HELD: AwaitedChannel['held'] = []
+
+/** The awaited channels on a mux's wires that wait for their channel's registration, by id, in the order they began;
+ *  one that waits `connectTtl` in vain expires. */
+class RegistrationWaits {
+  private readonly byId = new Map<string, Set<AwaitedChannel>>()
+
+  /** `awaited` waits for its channel's registration, `ttlMs` at most. */
+  wait(awaited: AwaitedChannel, ttlMs: number): void {
+    let waiting = this.byId.get(awaited.channelId)
+    if (waiting === undefined) this.byId.set(awaited.channelId, (waiting = new Set()))
+    waiting.add(awaited)
+    awaited.ttl = setTimeout(() => {
+      if (this.stop(awaited)) awaited.entry.state.awaited.expire(awaited)
+    }, ttlMs)
+  }
+
+  /** Whether a wait for channel `id` ends it as it registers. */
+  refuses(id: string): boolean {
+    for (const awaited of this.byId.get(id) ?? NONE) if (awaited.refused !== null) return true
+    return false
+  }
+
+  /** Those that wait for channel `id`, in the order they began: each still waits until `stop`. */
+  take(id: string): Iterable<AwaitedChannel> {
+    const waiting = this.byId.get(id)
+    if (waiting === undefined) return NONE
+    this.byId.delete(id)
+    return waiting
+  }
+
+  /** `awaited` waits no more; false where it didn't. */
+  stop(awaited: AwaitedChannel): boolean {
+    if (awaited.ttl === null) return false
+    clearTimeout(awaited.ttl)
+    awaited.ttl = null
+    const waiting = this.byId.get(awaited.channelId)
+    if (waiting?.delete(awaited) && waiting.size === 0) this.byId.delete(awaited.channelId)
+    return true
+  }
+}
+
+const NONE: readonly AwaitedChannel[] = []

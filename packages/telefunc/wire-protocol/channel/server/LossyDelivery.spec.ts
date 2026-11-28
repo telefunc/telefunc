@@ -1,9 +1,8 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
-import { hold, letGo, releaseHolder, type MemoryHolder } from './channelMemory.js'
+import { hold, letGo, PublishBody, releaseHolder, type MemoryHolder } from './channelMemory.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { LossyDelivery } from './LossyDelivery.js'
-import { PublishBody } from './PublishBody.js'
 import { ServerReplay } from './ServerReplay.js'
 
 beforeEach(() => vi.useFakeTimers({ toFake: ['performance'] }))

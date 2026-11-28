@@ -32,6 +32,7 @@ import {
   hold,
   letGo,
   maxPendingBytesOf,
+  PublishBody,
   queueMemory,
   type MemoryHolder,
 } from './channelMemory.js'
@@ -44,7 +45,6 @@ import { ACK_STATUS, encode, type AckResultStatus } from '../../wire/frame.js'
 import { TAG, WIRE_ERROR_CODE, type WireErrorCode } from '../../wire/tags.js'
 import type { ChannelDataFrame } from '../../wire/frame.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
-import { PublishBody } from './PublishBody.js'
 import { LossyDelivery } from './LossyDelivery.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import type { AttachState, Want } from '../../wire/payloads.js'

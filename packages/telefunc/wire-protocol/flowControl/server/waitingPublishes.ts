@@ -1,5 +1,5 @@
 export { countWaitingPublishes, droppingLossy, droppingPublishes, droppingFrom }
-export type { WireQueue }
+export type { BufferedWireQueue, WireQueue }
 
 import { readTag, readU16 } from '../../wire/header.js'
 import { TAG, isPublishBody, isSequencedTag } from '../../wire/tags.js'
@@ -16,6 +16,15 @@ interface WireQueue {
   /** For an aborted channel: drops channel `ix`'s lossy sends and publishes of which the socket has been given no byte,
    *  frames gathered for it included. A body whose head the socket has stays. Returns how many went. */
   dropUngiven(ix: number): number
+  whenTaken?(onTaken: () => void): void
+}
+
+/** A wire queue that can hand off a publish in one write and track the bytes copied by the transport. */
+interface BufferedWireQueue extends WireQueue {
+  readonly copiedBytes: number
+  whenLetGo(onLetGo: () => void): void
+  canGatherPublish(bytes: number): boolean
+  gatherPublish(index: number, seq: number, body: Uint8Array<ArrayBuffer>): void
 }
 
 function isHeadOf(frame: Uint8Array, ix: number): boolean {

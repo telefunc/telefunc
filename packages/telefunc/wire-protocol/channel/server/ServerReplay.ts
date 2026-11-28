@@ -1,11 +1,10 @@
 export { ServerReplay }
 
 import { assert } from '../../../utils/assert.js'
-import { hasRoomFor, heldPublishBytes, hold, letGo, type MemoryHolder } from './channelMemory.js'
+import { hasRoomFor, heldPublishBytes, hold, letGo, type MemoryHolder, type PublishBody } from './channelMemory.js'
 import { HELD_SEND_OVERHEAD_BYTES } from '../../constants.js'
 import { encode } from '../../wire/frame.js'
 import { isClosingTag } from '../../wire/tags.js'
-import type { PublishBody } from './PublishBody.js'
 import { PublishQueue } from './PublishQueue.js'
 import { SeqQueue } from '../SeqQueue.js'
 import { DrainRate } from '../../flowControl/DrainRate.js'

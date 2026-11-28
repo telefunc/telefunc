@@ -15,7 +15,7 @@ import {
   droppingFrom,
   droppingLossy,
   droppingPublishes,
-  type WireQueue,
+  type BufferedWireQueue,
 } from '../../flowControl/server/waitingPublishes.js'
 
 type EventStreamOptions = {
@@ -27,7 +27,7 @@ type BeforeLetGo = { onLetGo: (() => void) | null; timer: ReturnType<typeof setT
 
 /** The event stream to the page: data waits for it to ask for more, and the frames that go at once pass that data. An
  *  event goes in chunks, as the stream asks, and nothing passes it once it started. */
-class EventStream implements WireQueue {
+class EventStream implements BufferedWireQueue {
   readonly stream: PushReadable | PushReadableStream<Uint8Array<ArrayBuffer>>
   private waiting = new Fifo<Uint8Array<ArrayBuffer>>()
   /** The frames that go at once, waiting for the event going to the stream to end. */

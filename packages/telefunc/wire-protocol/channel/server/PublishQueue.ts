@@ -1,7 +1,7 @@
 export { PublishQueue }
 
 import { assert } from '../../../utils/assert.js'
-import type { PublishBody } from './PublishBody.js'
+import type { PublishBody } from './channelMemory.js'
 
 /** A replay's publish records, kept in seq order and dropped from either end. */
 class PublishQueue {
