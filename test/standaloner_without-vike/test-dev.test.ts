@@ -1,6 +1,5 @@
 import { expect, fetch, getServerUrl, run, test } from '@brillout/test-e2e'
 
-process.env.TELEFUNC_URL = '/api/_telefunc'
 run('pnpm run dev', { serverIsReadyMessage: (log) => log.includes('Local:') && log.includes('http://localhost:3000') })
 
 const call = { file: '/hello.telefunc.ts', name: 'onHello', args: ['world'] }

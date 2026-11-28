@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "dev": "vite --port 3000 --strictPort",
+    "dev": "cross-env TELEFUNC_URL=/api/_telefunc vite --port 3000 --strictPort",
     "build": "vite build",
     "preview": "vite build && cd dist/server && cross-env NODE_ENV=production node index.js"
   },
