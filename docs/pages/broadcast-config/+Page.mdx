@@ -18,9 +18,9 @@ config.broadcast = {
 }
 ```
 
-> Broadcast uses your installed backend (such as <Link href="/redis"><code>@telefunc/redis</code></Link>), or reaches subscribers on the same server by default. Set `transport` to use a broker of your own.
+Broadcast uses your installed backend, such as <Link href="/redis" />, and works on one server by default. Set `transport` to use your own broker.
 
-> `onDeliveryLost` is called on the server that missed the messages, and they aren't sent again. Use it to report missed messages with Redis or Cloudflare: `reason` is a string saying how many it missed, when that's known (see <Link href="/channel#delivery">Delivery</Link>). With a custom transport, report loss from the transport.
+> `onDeliveryLost` runs on a server that missed messages with Redis or Cloudflare. The default logs the loss. Use the callback to refresh state when needed.
 
 <ConfigWhereServer />
 
@@ -38,44 +38,10 @@ type BroadcastTransport = {
 type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; opened: Promise<void> }
 ```
 
-> `send()` and `sendBinary()` return the `{ seq, timestamp }` they assigned, and `onMessage` gets the same pair, which <Link href="/channel#broadcast">`Broadcast.subscribe()`</Link> subscribers receive as `info`. A key's `seq` increases with each message, across all servers and for text and binary together; `timestamp` is like `Date.now()`.
-
-> Forward each `payload` to `onMessage` unchanged.
-
-> `listen()` and `listenBinary()` return a function that stops listening. A message sent right after `listen()` returned must reach that listener. When a key's last subscriber on a server leaves, Telefunc stops its listener there, and calls `listen()` again for the key's next subscriber.
-
-> If your broker confirms a subscription only after `listen()` returns, return `{ unsubscribe, opened }`. Resolve `opened` when the broker confirms the subscription; from then on, a message any server sends must reach that listener. Reject it with the broker's error if the subscription fails: the subscribers' <Link href="/channel#chat-example">`opened`</Link> then rejects too.
-
-```ts
-// server/broadcastTransport.ts
-// Environment: server
-
-import { config, type BroadcastTransport } from 'telefunc'
-import { broker } from './broker' // Your broker's client
-
-const listen: BroadcastTransport['listen'] = (key, onMessage) => {
-  // Your broker's subscribe() resolves once the broker confirmed the subscription
-  const subscribing = broker.subscribe(`text:${key}`, (message) => onMessage(message.payload, message.info))
-  return {
-    // Nothing to clean up if subscribing failed
-    unsubscribe: () => subscribing.then((subscription) => subscription.unsubscribe(), () => {}),
-    opened: subscribing.then(() => {}),
-  }
-}
-
-config.broadcast = {
-  transport: { send, listen, sendBinary, listenBinary }, // send(), sendBinary() and listenBinary() written for your broker
-}
-```
-
-> Telefunc calls `unsubscribe()` once for every `listen()` that returned: when it stops the listener, or once `opened` rejects. If `listen()` throws, release what it acquired before it throws.
-
-> `unsubscribe()` may return a promise: Telefunc logs what it rejects with. A new listener for the same key may start while the earlier one is cleaning up. With `telefunc/cloudflare`, pass a cleanup that must finish after the handler returns to `waitUntil()`, imported from `cloudflare:workers`.
-
-> When its connection drops, the transport reconnects on its own and keeps calling the `onMessage` it was given.
-
-> A transport that sends `sendBinary()`'s `payload` after `sendBinary()` returns (after an `await`, or from a queue) must send a copy: the publisher may reuse its buffer once <Link href="/channel#broadcast">`publishBinary()`</Link> returns.
-
+- Forward each payload unchanged with the receipt that `send()` or `sendBinary()` returned. Assign one increasing sequence per key across servers, for text and binary together, and a Unix timestamp in milliseconds.
+- Return an unsubscribe function if the listener is ready immediately. When your broker confirms subscriptions asynchronously, return `{ unsubscribe, opened }` and settle `opened` with that confirmation or error. Keep delivering across your broker's reconnects.
+- Release a listener's resources in `unsubscribe()`. Telefunc calls it even if `opened` rejects, and may start another listener while cleanup runs.
+- Copy binary payloads you keep for asynchronous sends so the publisher can reuse its buffer.
 
 ## See also
 

@@ -3,22 +3,16 @@ import { TelefuncStreamBeta } from '../../../components'
 
 <TelefuncStreamBeta />
 
-If you use <Link href="/stream">Telefunc Stream</Link>, scaling Telefunc horizontally (multiple Node instances, multiple containers, multiple machines) adds two requirements:
+To run <Link href="/stream">Telefunc Stream</Link> on multiple servers:
 
-- **Sticky sessions** (so a reconnecting client returns to the same server instance) — your load balancer must route every request from a given client to the same instance.
-  > Required for what a browser keeps open to its server-side state: a <Link href="/channel">`Channel`</Link>, a <Link href="/channel#new-broadcastchannel">`BroadcastChannel`</Link>, a <Link href="/room">room</Link> and a <Link href="/stream#callback">callback</Link>. A stream returned in one HTTP response, such as an `AsyncGenerator`, completes in that response, and a server-side `Broadcast.publish()` only needs the backend below.
-- **Cross-instance backend** (a <Link href="/channel#broadcast">broadcast</Link> or a <Link href="/room">room</Link> must reach subscribers on every server instance) — install one such as <Link href="/redis">`@telefunc/redis`</Link>.
-  > Optional: this is required only for broadcasts and rooms.
+- Use <Link href="#sticky-sessions">sticky sessions</Link> for browser channels, rooms, and callbacks.
+- Install <Link href="/redis">`@telefunc/redis`</Link> to share broadcasts and rooms across servers.
 
+For Cloudflare Workers, follow the <Link href="/stream/cloudflare">Workers setup</Link>.
 
 ## Sticky sessions
 
-A <Link href="/channel">`Channel`</Link> is a stateful connection. Its server-side state — the `new Channel()` instance, its `send()`/`listen()` closures, any interval the telefunction set up — lives in one server process. When the client reconnects (network issues, a page reload, an SSE→WS upgrade), the next request has to land on the same process or the channel can't recover.
-
-> This is the same constraint Socket.IO documents under [Using multiple nodes](https://socket.io/docs/v4/using-multiple-nodes/). The same load-balancer feature solves the problem for Telefunc: a sticky session, usually backed by a cookie or by the client IP.
-
-> Without sticky sessions, a reconnect that lands on a different instance sees no matching channel state, the recovery handshake fails, and the client's `Channel` ends.
-
+Route every `/_telefunc` request from a given client to the same server so channels can reconnect. A stream that completes in one HTTP response, such as a returned `AsyncGenerator`, works on any server.
 
 ### Nginx — `ip_hash`
 
@@ -85,49 +79,19 @@ example.com {
 
 ### Check it
 
-Have each instance answer with its name, for example in a response header, then open your app with the browser network tab open. The first `/_telefunc` call and every `/_telefunc` request after it show the same instance, including the ones after you switch the tab to **Offline** for a few seconds and back, which make the client reconnect. With HAProxy, the `SERVERID` cookie shows it too.
+Add a response header with the server's name. In the browser's network tab, check that `/_telefunc` requests reach the same server, including after going offline briefly and reconnecting.
 
 ### AWS ALB — target-group stickiness
 
 In the target group's attributes, enable **Stickiness** with type **Load balancer generated cookie**.
 
-### Cloud Run / serverless
-
-Serverless platforms that don't expose sticky-session routing aren't a good fit for `Channel`. Broadcasts still work (each publish round-trips through Redis), but channel reconnects fail whenever they land on a different instance. Most teams pair Telefunc with a long-running server tier when they need channels at scale.
-
-
-
 ## Broadcast
 
-<Link href="/channel#broadcast">`Broadcast`</Link> is different: publishers and subscribers are intentionally decoupled — they only share a `key` string. Each instance keeps its own subscriber list locally, and the backend is what makes a publisher on instance A reach a subscriber on instance B.
-
-In a single-instance setup, the default in-memory backend is enough. In a multi-instance setup, install a backend that fans out across the cluster — such as <Link href="/redis"><code>@telefunc/redis</code></Link> — or configure a broadcast transport.
-
-> A broadcast transport (NATS, Kafka, RabbitMQ, …) carries Broadcast only. For <Link href="/room">rooms</Link>, use <Link href="/redis"><code>@telefunc/redis</code></Link> or the Cloudflare adapter.
-
-> For Cloudflare Workers, Telefunc has an adapter that uses Durable Objects — see <Link href="/stream/cloudflare" />.
-
-### `BroadcastTransport`
-
-For other brokers (NATS, Kafka, …), implement a `BroadcastTransport` and assign it to `config.broadcast.transport`:
-
-```ts
-// Environment: server
-
-import { config } from 'telefunc'
-
-config.broadcast = { transport: myTransport }
-```
-
-What a transport implements is in <Link href="/broadcast-config#custom-transports" />.
+Use the default backend on one server. Across servers, install <Link href="/redis">`@telefunc/redis`</Link> or connect your broker to Broadcast with <Link href="/broadcast-config#custom-transports">`config.broadcast.transport`</Link>. Rooms work across servers with Redis or the Cloudflare adapter.
 
 ## Cloudflare
 
-[Cloudflare Workers](https://www.cloudflare.com/products/workers/) takes a different approach: `telefunc/cloudflare` routes channels through [Durable Objects](https://developers.cloudflare.com/durable-objects/) instead of sticky sessions, and fans out broadcasts across regions automatically. As a result, neither a sticky load balancer nor a separately installed backend is needed. See:
-- <Link href="/stream/cloudflare" />
-
-> You scale with <Link href="/stream/cloudflare#scaling">the `scale` option</Link> instead of a load balancer.
-
+The <Link href="/stream/cloudflare">Cloudflare adapter</Link> handles session routing and delivers broadcasts and room messages across regions. Increase capacity with <Link href="/stream/cloudflare#scaling">`scale`</Link>.
 
 ## See also
 

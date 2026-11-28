@@ -1,4 +1,4 @@
-import { Link, Warning, Advanced } from '@brillout/docpress'
+import { Link, Warning } from '@brillout/docpress'
 import { TelefuncStreamBeta } from '../../../components'
 
 **Environment**: server.
@@ -40,8 +40,6 @@ export default {
 }
 ```
 
-> `wrangler types` generates the `Env` type the handler uses ([TypeScript](https://developers.cloudflare.com/workers/languages/typescript/)).
-
 Bind its Durable Object in Wrangler:
 
 {/* spellcheck-ignore:on */}
@@ -52,8 +50,6 @@ Bind its Durable Object in Wrangler:
   "name": "my-app",
   "main": "./worker.ts",
   "compatibility_date": "2025-08-15", // or later
-  // nodejs_als (or nodejs_compat): server code that subscribes to a broadcast or a room needs it.
-  // enable_request_signal: a Worker's request.signal aborts when its client disconnects.
   "compatibility_flags": ["nodejs_als", "enable_request_signal"],
   "durable_objects": {
     "bindings": [
@@ -66,11 +62,11 @@ Bind its Durable Object in Wrangler:
 }
 ```
 
-> Keep `nodejs_als` (or `nodejs_compat`) enabled if your server joins rooms or subscribes to rooms or broadcasts.
+> Keep `nodejs_als` (or `nodejs_compat`) enabled to join rooms or subscribe to rooms or broadcasts from the server.
 
 {/* spellcheck-ignore:off */}
 
-> `enable_request_signal` is what lets <Link href="/onClose#context-signal">`context.signal` and `onClose()`</Link> see a client that disconnects before its telefunction answers.
+> Run `wrangler types` to generate `Env`. Keep `enable_request_signal` to detect disconnects in <Link href="/onClose#context-signal">`context.signal` and `onClose()`</Link>.
 
 Build the Worker with <Link href="/vite-plugin">Telefunc's Vite plugin</Link> and Cloudflare's [Vite plugin](https://developers.cloudflare.com/workers/vite-plugin/):
 
@@ -99,13 +95,9 @@ Add your page as `index.html`, next to `vite.config.ts`:
 </html>
 ```
 
-Vite serves it in development, and Cloudflare's Vite plugin deploys it with its scripts as the Worker's static assets, which Cloudflare serves before calling your Worker: the Worker only receives `/_telefunc` and your app's other routes.
+Run `vite dev` to develop, and `vite build` followed by `wrangler deploy` to deploy. Try the <Link href="/channel#new-channel">clock example</Link> with the browser code in `main.ts` and the telefunction in `Clock.telefunc.ts`.
 
-Then run `vite dev` to develop, and `vite build` followed by `wrangler deploy` to deploy. To check it works, put the <Link href="/channel#new-channel">clock example</Link>'s browser code in `main.ts`, and its telefunction in `Clock.telefunc.ts` next to it.
-
-> The Durable Object keeps each client's channels together and routes room and broadcast messages across regions. If your app doesn't use `Channel`, `Broadcast`, or `Room`, you can skip the binding and use <Link href="/serve"><code>serve()</code></Link> instead, keeping `enable_request_signal`. See <Link href="#architecture" /> for implementation details.
-
-> For rooms, also install <Link href="/room#install">`@telefunc/room`</Link>.
+> For rooms, also install <Link href="/room#install">`@telefunc/room`</Link>. For apps that use regular telefunctions and streams, see <Link href="/serve" />.
 
 ## Context
 
@@ -122,43 +114,21 @@ const telefunc = new Telefunc({
 See: <Link href="/Telefunc" />.
 
 
-## Architecture
+## Session affinity
 
-Telefunc uses [Durable Objects](https://developers.cloudflare.com/durable-objects/) for <Link href="/channel">channel</Link> state and <Link href="/channel#broadcast">broadcast</Link> fan-out. Channel state is in-memory JavaScript (closures, callbacks, local variables), so it must live on the same Durable Object that holds the WebSocket connection.
-
-### Regions
-
-Telefunc maps each request to one of six geographic regions using Cloudflare's colocation data:
-
-| Region | Code |
-|---|---|
-| West North America | `wnam` |
-| East North America | `enam` |
-| West Europe | `weur` |
-| East Europe | `eeur` |
-| Asia Pacific | `apac` |
-| Oceania | `oc` |
-
-Each region runs its own Durable Objects so that channel state stays close to users.
-
-### Session affinity
-
-Every telefunction call and channel message from a client must reach the **same Durable Object** — otherwise that client's channel state would be unavailable.
+Telefunc routes each client's channels to its [Durable Object](https://developers.cloudflare.com/durable-objects/) automatically.
 
 <Warning>
 
-**CDN / reverse proxy** — keep the `session` and `home` query parameters and the `x-telefunc-home` response header, so that requests reach the Durable Object that holds the client's channels. For a cross-origin client, expose `x-telefunc-home` with `Access-Control-Expose-Headers`.
+If you proxy Telefunc requests, preserve the `session` and `home` query parameters and the `x-telefunc-home` response header. For a cross-origin client, expose `x-telefunc-home` with `Access-Control-Expose-Headers`.
 
 </Warning>
 
+## Rooms and broadcasts
 
-### Rooms
+Telefunc delivers room messages and broadcasts across regions. Call `Room.publish()` and `Broadcast.publish()` anywhere in your Worker, including cron triggers and queue consumers. Install server-side room and broadcast listeners in a telefunction or channel handler.
 
-<Link href="/room">Room</Link> calls such as `Room.create()`, `Room.publish()` and `Room.close()` work anywhere in your Worker, including cron triggers and queue consumers. A server-side listener (`subscribe()`, `onJoin()`, …) runs on the Durable Object of the client whose request installed it (see <Link href="#session-affinity" />), so install it inside a telefunction or a channel handler.
-
-Rooms work across regions. A room's state lives in one Durable Object, in the region of the client that created the room (or the <Link href="#configuration">`locationFallback`</Link> region, for a room created from a cron trigger or a queue consumer). Joining and messaging from other regions add latency.
-
-The room's state is kept in its Durable Object's storage, so the room survives a deployment. If `me.onLeave()` reports `cause.type: 'disconnected'`, call the telefunction that returned the room again and rejoin (see <Link href="/room#create-and-join-a-room" />).
+> A server-side subscription ends if Cloudflare evicts the session Durable Object that holds it.
 
 ## Scaling
 
@@ -178,77 +148,14 @@ const telefunc = new Telefunc({
 })
 ```
 
-Only specified regions get Durable Objects. Requests from unspecified regions fall back to <Link href="#configuration">`locationFallback`</Link>.
-
-
-## Distributed broadcast
-
-<Link href="/channel#broadcast">Broadcasts</Link> fan out across all regions automatically.
-
-`publish()` works anywhere in your Worker, including cron triggers and queue consumers. A server-side `subscribe()` runs on the Durable Object of the client whose request installed it, so subscribe inside a telefunction or a channel handler.
-
-For a subscription that feeds a channel, call its unsubscribe function from that channel's `onClose()`. Use a timer to end a standalone subscription.
-
-### How it works
-
-<Advanced>
-
-You can skip this section — it's Telefunc's internal fan-out, not anything you configure.
-
-</Advanced>
-
-```
-Publisher (Durable Object)
-  → Authority DO (one per key — assigns sequence numbers)
-    → Coordinators (one per active region)
-      → Durable Objects (deliver to local subscribers)
-```
-
-1. The publisher forwards the message to an **authority** Durable Object for the key.
-2. The authority assigns a monotonic sequence number, reads the key's presence from its own storage, and forwards to each region with subscribers.
-3. Each region's coordinator fans out to the Durable Objects in that region.
-4. Each Durable Object delivers to its local subscribers.
-
-### Ordering
-
-<Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, so subscribers receive messages in order with a <Link href="/channel#broadcast">monotonic `seq`</Link>. The publishes of one Durable Object's telefunctions and channel handlers get their `seq` in call order.
-
-### Presence
-
-Each key's authority records which Durable Objects have subscribers, in its own storage:
-
-| Setting | Value |
-|---|---|
-| TTL | 90 seconds |
-| Refresh | every 30 seconds |
-
-A Durable Object registers with the authority on its first subscription to a key and withdraws on its last unsubscribe. A record that isn't refreshed for 90 seconds lapses, and fan-out skips it. A server can miss broadcasts while its record has lapsed: handle <Link href="/broadcast-config">`config.broadcast.onDeliveryLost`</Link> to refresh state.
+Requests from regions you omit use <Link href="#configuration">`locationFallback`</Link>. Include that region in the map.
 
 
 ## Delivery guarantees
 
-### Channel messages (`send` / `listen`)
+Channels hold reliable messages for reconnecting clients within <Link href="/channel-config">`config.channel.maxMemory`</Link> (64 MiB by default on Cloudflare). See <Link href="/channel#reconnection" />.
 
-| Guarantee | Details |
-|---|---|
-| Ordering | Messages are delivered in order. |
-| Buffering | The server holds messages while the client is disconnected, within <Link href="/channel-config">`config.channel.maxMemory`</Link>, which all its channels share (default on Cloudflare: 64 MiB). |
-| Replay | On reconnect, the kept reliable messages are resent and duplicates are ignored (see <Link href="/channel#errors" />). |
-| Acknowledgements | `send(data, { ack: true })` resolves when the other side processes the message. |
-| Loss | If the disconnection lasts longer than `config.channel.reconnectTimeout`, the channel closes with <Link href="/channel#errors">`NetworkError`</Link>. |
-
-### Broadcast messages (`publish` / `subscribe`)
-
-| Guarantee | Details |
-|---|---|
-| Ordering | Every subscriber receives a key's publishes in `seq` order, which is call order for the publishes of one Durable Object's telefunctions and channel handlers. |
-| Delivery | `publish()` resolves once the message has reached every Durable Object <Link href="#presence">registered</Link> for the key. If a Durable Object can't take it, `publish()` rejects. That Durable Object's subscribers miss the message, while every other subscriber still gets it, so publishing it again delivers it twice to them. Delivery to clients then happens over the channel connection. |
-| Failed registration | A subscription takes effect once its Durable Object is <Link href="#presence">registered</Link> for the key. Await `subscription.opened` before relying on delivery. If the subscription fails, subscribe again after resolving the error. |
-
-> A broadcast message handed to a client's `BroadcastChannel` has the channel's buffering and replay, as a regular channel message does. A server-side `Broadcast.subscribe()` callback is called with each message as it arrives, with no buffer or replay.
-
-When a registration fails, a `BroadcastChannel` that waited on it closes: call its telefunction again and subscribe to the broadcast it returns. A `Broadcast.subscribe()` that waited on it is removed, and its `opened` rejects: call `Broadcast.subscribe()` again. The server reports the failure through <Link href="/onBug">`onBug()`</Link> and its log.
-
+For broadcasts, await `subscription.opened` before relying on delivery. A publish resolves once it reaches every Durable Object registered for the key. If it rejects, some subscribers may already have received it, so publishing again can deliver it twice.
 
 ## Configuration
 
@@ -263,20 +170,6 @@ const telefunc = new Telefunc({
 ```
 
 See also: <Link href="/Telefunc" />.
-
-## Reconnection
-
-Set `reconnectTimeout` to choose how long channels stay open after a connection drops.
-
-```ts
-import { config } from 'telefunc'
-
-// A dropped client gets 5 s to reconnect before its channels close
-config.channel = {
-  reconnectTimeout: 5_000,
-  pingInterval: 2_000
-}
-```
 
 ## Workers Free
 

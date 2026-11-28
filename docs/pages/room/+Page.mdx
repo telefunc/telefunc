@@ -5,12 +5,7 @@ import { TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
-`Room` gives you multi-party **rooms**: who's in the room, messages to everyone or to one participant, audio/video tracks, and moderation. Use it for chat, game lobbies, collaborative editing, and live dashboards.
-
-> **Needs a long-running server**, as <Link href="/channel">channels</Link> do: run rooms on a server that can keep connections open. For Cloudflare Workers, see <Link href="/stream/cloudflare" />.
-
-> When you only need a pipe to one client, use <Link href="/channel#new-channel">`new Channel()`</Link>. When you need pub/sub without membership, use <Link href="/channel#new-broadcastchannel">`new BroadcastChannel()`</Link>.
-
+Use `Room` for chat, game lobbies, and collaboration. A room gives you a participant list, group and private messages, and audio and video tracks.
 
 ## Install
 
@@ -18,26 +13,11 @@ import { TelefuncStreamBeta } from '../../components'
 npm install @telefunc/room
 ```
 
-> Room runs on Telefunc: your app needs `telefunc` and one of its plugins installed, see <Link href="/install" />.
-
-Then load Room's client code before your client receives a room, for example in your client entry:
-
-```js
-// Environment: client
-
-import '@telefunc/room/client'
-```
-
-> If you list `@telefunc/room` as a dependency in your app's root `package.json`, Telefunc's plugins add this import for you. For other dependency layouts, such as only `deno.json`, add it as shown.
-
-> The server needs no extra import: importing `Room` from `@telefunc/room` loads it.
-
-> On Cloudflare Workers, set up your Worker as in <Link href="/stream/cloudflare#setup" />. When `@telefunc/room` isn't in your `package.json`, also add `import '@telefunc/room/server'` to your Worker's entry.
-
+> Telefunc's plugin loads Room from your app's `package.json`. If you use another dependency layout, add `import '@telefunc/room/client'` to your client entry. On Cloudflare, follow the <Link href="/stream/cloudflare#setup">Workers setup</Link> and add `import '@telefunc/room/server'` to the Worker entry if the plugin can't discover it.
 
 ## Create and join a room
 
-A telefunction returns the room, and the client joins it:
+Return a room from a telefunction:
 
 ```js
 // Lobby.telefunc.js
@@ -51,6 +31,7 @@ export async function onGetLobby() {
   return room
 }
 ```
+
 ```js
 // Lobby.js
 // Environment: client
@@ -58,260 +39,148 @@ export async function onGetLobby() {
 import { onGetLobby } from './Lobby.telefunc'
 
 const room = await onGetLobby()
-
-room.onJoin((member) => console.log(`${member.meta.name} joined`))
-room.subscribe((message, { from }) => console.log(from ? `${from.meta.name}: ${message.text}` : message.text))
+room.subscribe(({ text }, { from }) => console.log(from?.meta.name, text))
 
 const me = await room.join({ meta: { name: 'Alice' } })
 await me.publish({ text: 'hello' })
 ```
 
-`join()` returns your participant, `me`. For all of this as an app that runs as is, see <RepoLink path="/examples/room" />.
+Call `join()` to participate, or just subscribe to watch. For a working app, see <RepoLink path="/examples/room" />.
 
-A client joins only a room whose telefunction says who may: `anyoneCanJoin: true` lets anyone in, and an `onBeforeJoin()` hook decides per join (see <Link href="#control-who-can-join-and-post" />). Without either, `room.join()` on the client is refused.
-
-> `meta` is what a participant shows about itself, such as its name. A room has a `meta` too: set it with `Room.create('lobby', { meta: { topic: 'General' } })`, and read it on the client with `room.meta`.
-
-To show a room to spectators, such as a match's audience, return it from the telefunction and subscribe in the browser without joining: the page reads `room.getParticipants()` and `room.count`, and its `subscribe()` listeners receive the room's messages. Call `join()` for the people who send messages.
-
+> Use <Link href="/install">Telefunc's server setup</Link> on a server that keeps connections open. See <Link href="/stream/cloudflare" /> for Workers.
 
 ## Show who's in the room
 
-```js
-// Environment: client
-
-const update = () => renderMembers(room.snapshot().participants)
-update()
-room.onChange(update)
-```
-
-`room.onChange()` fires whenever anything `room.snapshot()` shows changes: someone joins, leaves, changes their `meta`, or loses and regains their connection, or the room's `meta` changes. `room.snapshot()` returns the whole room in one value.
-
-In React:
+Use `room.snapshot()` for the current participants and `room.onChange()` to update the view. In React:
 
 ```jsx
+// Lobby.jsx
 // Environment: client
 
 import { useSyncExternalStore } from 'react'
 
 function Members({ room }) {
-  const { participants, count } = useSyncExternalStore(room.onChange, room.snapshot)
-  return <>{count} online: {participants.map((p) => <Avatar key={p.id} {...p.meta} />)}</>
+  const { participants } = useSyncExternalStore(room.onChange, room.snapshot)
+  return (
+    <ul>
+      {participants.map((p) => (
+        <li key={p.id}>{p.meta.name}{p.isConnected ? '' : ' (reconnecting)'}</li>
+      ))}
+    </ul>
+  )
 }
 ```
 
-Snapshots show participants as they were when you read them. Compare participants by `id`.
+Snapshots show participant fields as of the read. Compare participants by `id`. A participant stays in the list while reconnecting. Use `room.onJoin()` and `room.onLeave()` for individual events.
 
-A participant whose page lost its connection stays in the room while it reconnects, with `isConnected: false`:
-
-```jsx
-// Environment: client
-
-participants.map((p) => <Avatar key={p.id} {...p.meta} status={p.isConnected ? null : 'reconnecting…'} />)
-```
-
-To react to one event, use `room.onJoin()`, `room.onLeave()`, or a participant's `onDisconnect()` and `onReconnect()`. To follow one participant, use its `onChange()`.
-
-Every listener (`onChange()`, `onJoin()`, `subscribe()`, `listen()`, …) returns a function that removes it, for example in a React effect's cleanup:
-
-```jsx
-// Environment: client
-
-useEffect(() => room.subscribe((message) => addMessage(message)), [room])
-```
-
-On the server, read `getContext()` in the telefunction and capture what your listeners need: inside a room's listeners, it throws. The hooks of `Room.guard()` run for the client that receives the room (see <Link href="#control-who-can-join-and-post" />).
-
-## Stop listening
-
-To remove several listeners at once, such as when a chat view closes, pass them one `{ signal }` and abort it:
-
-```js
-// chat.js
-// Environment: client
-
-const controller = new AbortController()
-room.onJoin((participant) => showJoined(participant.meta.name), { signal: controller.signal })
-room.subscribe((message) => addMessage(message), { signal: controller.signal })
-
-// When the chat view closes
-controller.abort()
-```
-
+> A listener returns a function that removes it. Pass `{ signal }` after the callback to remove several listeners with one `AbortController`. In server listeners, use values captured from the telefunction's `getContext()` call.
 
 ## Update your name or status
 
 ```js
+// Lobby.js
 // Environment: client
 
-await me.updateMeta({ status: 'away' })               // changes only `status`
-await me.setMeta({ name: 'Alice', status: 'online' }) // replaces all of your meta
+await me.updateMeta({ status: 'away' })
+await me.setMeta({ name: 'Alice', status: 'online' })
 ```
 
-Everyone in the room sees the change. Use `updateMeta()` to change selected fields or `setMeta()` to replace them. The `meta` you read is read-only.
-
+Use `updateMeta()` to change selected fields (`undefined` removes a field) and `setMeta()` to replace them. Set the room's own metadata with `Room.setMeta()` or `Room.updateMeta()` on the server, and read it with `room.meta`.
 
 ## Send a message to everyone
 
+Subscribe on the room to see everyone's messages, or on a participant to see their messages:
+
 ```js
+// Lobby.js
 // Environment: client
 
-room.subscribe((message, { from }) => showMessage(from?.meta.name, message.text))
+const follow = (member) => member.subscribe(({ text }) => showMessage(member.meta.name, text))
+for (const member of room.getParticipants()) follow(member)
+room.onJoin(follow)
 
 await me.publish({ text: 'hello' })
 ```
 
-`info.from` is the participant who sent the message, or `null` for one your server published (see <Link href="#send-from-the-server" />). A client can't fake it.
+> Join with `selfDelivery: false` to skip your own publishes. To read messages in a loop, use `for await (const { type, data, info } of room.messages())`.
 
-To receive the messages of one participant only, subscribe on that participant. `room.onJoin()` gives you the participants who join after you, and `room.getParticipants()` the ones already there:
-
-```js
-// Environment: client
-
-const follow = (member) => member.subscribe((message) => showMessageFrom(member.meta.name, message.text))
-for (const member of room.getParticipants()) follow(member)
-room.onJoin(follow)
-```
-
-Subscribe before calling a telefunction that publishes to the room: it runs once the subscription is in effect, so the page receives what it publishes (see <Link href="#load-chat-history" />).
-
-> You also receive your own messages. To not receive them, join with `selfDelivery: false`, on the page (`room.join({ meta, selfDelivery: false })`) or on the server (`Room.join(id, { selfDelivery: false })`).
-
-To read messages in a `for await` loop, use `messages()`. Each message is `{ type, data, info }`: `type` is `'text'` or `'binary'`, and `data` and `info` are what a `subscribe()` or `subscribeBinary()` listener receives:
+Use a named track for updates with their own audience. Where only the latest value matters, set `lossy: true`:
 
 ```js
+// Drawing.js
 // Environment: client
 
-for await (const message of room.messages()) {
-  if (message.type === 'binary') showVideo(message.info.from.id, message.data, message.info.track)
-  else showMessage(message.info.from?.meta.name, message.data.text)
-}
-```
-
-For updates that change many times per second, such as a mouse cursor, publish on a track with `lossy: true`: a page that falls behind skips to the newest one, and its `info.seq` jumps over the ones it skipped.
-
-```js
-// Environment: client
-
-onCursorMove((position) => me.publish(position, { track: 'cursor', lossy: true }))
 room.subscribe((position, { from }) => drawCursor(from.id, position), { track: 'cursor' })
+onCursorMove((position) => me.publish(position, { track: 'cursor', lossy: true }))
 ```
-
-> In `publish()`, `lossy` needs a `track`: a message on no track reaches everyone, in the room's order, and is never skipped. `publishBinary()` without a `track` publishes on the track `'main'`, which takes `lossy` like any other track.
-
-> A gap in `info.seq` can reflect messages you chose to skip or never subscribed to, such as your own with `selfDelivery: false`.
-
 
 ## Check the message type
 
 Pass your types to `Room.get()`, `Room.create()` or `Room.getOrCreate()`:
 
 ```ts
-// Chat.telefunc.ts
+// Lobby.telefunc.ts
 // Environment: server
 
-import { Abort, getContext } from 'telefunc'
 import { Room } from '@telefunc/room'
 
-type RoomMeta = { topic: string }
+type RoomMeta = { topic?: string }
 type MemberMeta = { name: string }
 type Message = { text: string }
 
-export async function onGetChat(roomId: string) {
-  const { user } = getContext()
-  if (!(await canRead(user, roomId))) throw Abort()
-  return await Room.get<RoomMeta, MemberMeta, Message>(roomId)
+export async function onGetLobby() {
+  const room = await Room.getOrCreate<RoomMeta, MemberMeta, Message>('lobby')
+  Room.guard(room, { anyoneCanJoin: true })
+  return room
 }
 ```
 
-`publish()` and `subscribe()` are then typed with `Message`, and Telefunc checks every message a client publishes against it, as it checks telefunction arguments (see <Link href="/shield" />): a message of another shape is rejected with `ShieldValidationError`.
-
+Client publishes are checked against `Message`, just like telefunction arguments (see <Link href="/shield" />).
 
 ## Send a private message
 
+Use `me.send()` with a participant or its ID. The recipient reads it with `me.listen()`:
+
 ```js
+// Lobby.js
 // Environment: client
 
 me.listen((message, { from }) => showPrivateMessage(from?.meta.name, message))
-
-await me.send(member, 'meet me in room 2') // `member` from room.onJoin() or room.getParticipants()
+await me.send(member, 'Meet me in the lobby')
 ```
 
-Only the recipient receives it.
-
-To get a reply, pass `{ ack: true }`. The recipient's `listen()` callback returns the reply:
+Pass `{ ack: true }` to wait for a reply. The recipient's listener returns the reply. Other listeners can observe by returning `undefined`.
 
 ```js
+// Game.js
 // Environment: client
 
-// Alice
+// Receiver
 me.listen((move) => (isLegal(move) ? 'ok' : 'illegal'))
 
-// Bob
-const reply = await me.send(alice, { move: 'e4' }, { ack: true })
-console.log(reply) // 'ok'
+// Sender
+const reply = await me.send(member, { move: 'e4' }, { ack: true })
 ```
 
-A callback that returns `undefined` only observes, so it can stand beside the one that replies. If two callbacks return a value, `send()` rejects.
-
-When `send(to, message, { ack: true })` gets no reply, it rejects with a `RoomError`, whose `code` says why:
-
-```js
-// Environment: client
-
-import { RoomError } from '@telefunc/room/client'
-
-try {
-  await me.send(alice, { move: 'e4' }, { ack: true })
-} catch (err) {
-  if (err instanceof RoomError && err.code === 'DM_RECIPIENT_WENT_AWAY') showMoveAsUnanswered()
-  else throw err
-}
-```
-
-| `code` | Why |
-|---|---|
-| `DM_HANDLER_THREW` | The recipient's `listen()` callback threw. Its error is logged where the recipient runs, and not sent to you, as a telefunction's error stays on the server. To reject with a value, throw <Link href="/Abort">`Abort(value)`</Link>. |
-| `DM_RECIPIENT_WENT_AWAY` | The recipient got the message, and its page went away before it replied. `send()` rejects once the server learns that the page is gone. |
-| `PARTICIPANT_LEFT` | The recipient left, or you did, before it replied. |
-| `PARTICIPANT_NOT_FOUND` | The recipient isn't in the room. |
-| `DM_NO_LISTENER` | The recipient no longer listens. |
-| `DM_INBOX_OVERFLOW` | The recipient's messages waiting for its first `listen()` passed 2 MiB, and this one was the oldest. |
-| `DM_TWO_REPLIES` | Two of the recipient's callbacks returned a value. |
-| `DM_TIMEOUT` | No reply came within 60 seconds. |
-| `ROOM_CLOSED` | The room closed. |
-| `MESSAGE_LOST` | The message's handoff to the recipient failed (see below). |
-
-> Private messages are delivered at most once, as <Link href="/channel#delivery">Broadcast's</Link> are. Handle a rejected `send()` where you need to show delivery status.
-
+> Private messages are delivered at most once. Use <Link href="#roomerror">`RoomError.code`</Link> to handle an unanswered send.
 
 ## Send from the server
 
 ```js
+// Announcements.telefunc.js
 // Environment: server
 
 import { Room } from '@telefunc/room'
 
-await Room.publish('lobby', { type: 'maintenance', in: '5min' })    // to everyone
-await Room.send('lobby', { identity: userId }, { badge: 'winner' }) // to every tab of one user
-```
-```js
-// Environment: client
-
-room.subscribe((message, { from }) => {
-  if (from === null) showBanner(message) // published by the server
-})
-me.listen((message, { from }) => {
-  if (from === null) showSystemMessage(message) // sent by the server
-})
+await Room.publish('lobby', { text: 'The match starts in five minutes.' })
+await Room.send('lobby', { identity: userId }, { text: 'You won!' })
 ```
 
-Sending to `{ identity }` works when the server joined the user with that `identity`, as in <Link href="#control-who-can-join-and-post" />. To send to one participant, pass `{ id }`.
-
+The client receives these through `room.subscribe()` and `me.listen()` respectively, with `info.from` set to `null`. Send to one participant with `{ id }` or to all of a user's participants with `{ identity }`.
 
 ## Control who can join and post
 
-Call `Room.guard()` in the telefunction that returns the room, and throw <Link href="/Abort">`Abort()`</Link> to reject a join, a message, or a private message:
+Check who can see the room in the telefunction that returns it. To set a trusted `identity`, join on the server and return both the room and the participant:
 
 ```js
 // Chat.telefunc.js
@@ -322,54 +191,24 @@ import { Room } from '@telefunc/room'
 
 export async function onJoinChat(roomId) {
   const { user } = getContext()
-  if (!(await canRead(user, roomId)) || isBanned(user.id)) throw Abort()
+  if (!(await canRead(user, roomId))) throw Abort()
   const room = await Room.getOrCreate(roomId)
   Room.guard(room, {
     onBeforePublish: (from, message) => {
       if (isSpam(message)) throw Abort('spam')
     },
     onBeforeSend: async (from, to) => {
-      if (!(await areFriends(user.id, to.identity))) throw Abort('not friends')
+      if (!(await areFriends(user.id, to.identity))) throw Abort()
     },
   })
-  const me = await room.join({ meta: { name: user.name }, identity: user.id })
+  const me = await room.join({ identity: user.id, meta: { name: user.name } })
   return { room, me }
 }
 ```
-```js
-// Chat.js
-// Environment: client
 
-import { onJoinChat } from './Chat.telefunc'
+<Warning>Use the server-set `identity` to check permissions. Clients can edit their own `meta`.</Warning>
 
-const { room, me } = await onJoinChat('general')
-try {
-  await me.publish({ text: 'buy now!!!' })
-} catch (err) {
-  console.log(err.abortValue) // 'spam'
-}
-```
-
-With no `onBeforeJoin()` and no `anyoneCanJoin`, the client can't call `room.join()` itself: users join only through `onJoinChat()`, as themselves. `identity` is your user id, set by the server at `join()`. Every message carries its sender's `identity` (`info.from.identity`), and a client can't change it.
-
-<Warning>Check permissions on `identity`, never on `meta`: a client can set its `meta` to anything.</Warning>
-
-The hooks run for the client this telefunction returns the room to, so `user` in them is that client's user.
-
-To let the client call `room.join()` itself, decide each join in `onBeforeJoin()`:
-
-```js
-// Environment: server
-
-Room.guard(room, {
-  onBeforeJoin: (member) => {
-    if (isBanned(user.id)) throw Abort('banned')
-  },
-})
-```
-
-To run code after a join or a message, such as saving the message, use `onAfterJoin()`, `onAfterPublish()` and `onAfterSend()` (see <Link href="#load-chat-history" />).
-
+To let the browser call `room.join()`, set `anyoneCanJoin: true` or add an `onBeforeJoin()` hook that throws <Link href="/Abort">Abort()</Link> to refuse a join. Use `onAfterJoin()`, `onAfterPublish()` and `onAfterSend()` to act on completed operations.
 
 ## Remove a participant
 
@@ -381,40 +220,28 @@ import { Abort, getContext } from 'telefunc'
 import { Room } from '@telefunc/room'
 
 export async function onRemove(roomId, participantId) {
-  const { user } = getContext()
-  if (!user.isModerator) throw Abort()
+  if (!getContext().user.isModerator) throw Abort()
   await Room.removeParticipant(roomId, { id: participantId, reason: 'be nice' })
 }
 ```
-```js
-// Environment: client
-
-await onRemove(room.id, member.id) // `member` from room.getParticipants() or room.onJoin()
-```
-
-To remove every tab of a user, pass their `identity`: `Room.removeParticipant(roomId, { identity: userId, reason: 'banned' })`.
-
-The removed participant learns why:
 
 ```js
+// Lobby.js
 // Environment: client
+
+import { onRemove } from './Moderation.telefunc'
 
 me.onLeave((cause) => {
-  if (cause.type === 'removed') showBanner(`Removed: ${cause.reason}`)
-  if (cause.type === 'disconnected') rejoin() // Your function: call onJoinChat() again, and listen on the room it returns
+  if (cause.type === 'removed') showBanner(cause.reason)
 })
+await onRemove(room.id, member.id)
 ```
 
-The removed participant's page stops receiving the room: `room.isClosed` is `true` and `room.onClose()` runs with the removal's cause, unless the page holds another participant of the room. A page that never joined keeps receiving.
-
-> Removing doesn't keep anyone out: a telefunction that returns the room again lets them back in, and a returned room receives messages without joining. Refuse them in that telefunction, before `Room.get(roomId)`, as in <Link href="#control-who-can-join-and-post" />; `onBeforeJoin()` only refuses a join.
-
-A page that falls behind what the server can hold for it gets `'disconnected'`. Until then, it receives every message, join, leave, `meta` change and frame, except messages and frames published with `lossy: true`, where it skips to the newest (see <Link href="#send-a-message-to-everyone" /> and <Link href="#stream-audio-or-video" />).
-
+Pass `{ identity, reason }` to remove all of a user's participants. Their `me.onLeave()` receives `{ type: 'removed', reason }`. To keep a user out, check access before returning a room from any telefunction.
 
 ## Run a game loop or a bot on the server
 
-Create the room and join it from the server with `{ hidden: true }`, for example in the telefunction that starts a match:
+Join with `hidden: true` to send and receive messages without appearing in the participant list:
 
 ```js
 // Match.telefunc.js
@@ -423,156 +250,67 @@ Create the room and join it from the server with `{ hidden: true }`, for example
 import { Room } from '@telefunc/room'
 
 export async function onStartMatch() {
-  const matchId = crypto.randomUUID()
-  const room = await Room.create(matchId, { emptyTimeout: Infinity, departureTimeout: Infinity }) // open until Room.close()
+  const room = await Room.create(crypto.randomUUID(), { emptyTimeout: Infinity, departureTimeout: Infinity })
   const host = await room.join({ identity: 'host', hidden: true })
   const game = createGame()
-  host.listen((command) => game.apply(command))     // commands from players
-  const loop = setInterval(() => host.publish(game.state()), 50) // state to everyone
+  host.listen((command) => game.apply(command))
+  const loop = setInterval(() => host.publish(game.state(), { track: 'state', lossy: true }), 50)
   room.onClose(() => clearInterval(loop))
-  game.onEnd(() => Room.close(matchId)) // ends the match, and the loop with it
-  return matchId
+  game.onEnd(() => Room.close(room.id))
+  return room.id
 }
 ```
 
-> A page that falls behind gets every message, so state it may skip goes on a track, published with <Link href="#stream-audio-or-video">`lossy: true`</Link>, where it skips to the newest frame.
+Return the host from a telefunction to let players send it commands. On the server, use `room.getParticipants({ hidden: true })` to find it.
 
-A hidden participant can do everything a participant does, but players don't see it among the room's participants.
+## Stream audio or video
 
-To let players send it commands, return it with the room:
+Publish binary frames on a track and subscribe to the tracks you show:
 
 ```js
-// Match.telefunc.js
-// Environment: server
+// Video.js
+// Environment: client
 
-import { Abort, getContext } from 'telefunc'
-import { Room } from '@telefunc/room'
+encodeCamera((frame, isKeyframe) => {
+  me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, lossy: true, retain: isKeyframe })
+})
 
-export async function onJoinMatch(matchId, name) {
-  const { user } = getContext()
-  const room = await Room.get(matchId)
-  const host = room.getParticipants({ hidden: true }).find((p) => p.identity === 'host')
-  if (!host) throw Abort('no host')
-  const me = await room.join({ meta: { name }, identity: user.id })
-  return { room, me, host }
-}
+room.subscribeBinary((frame, { from, meta }) => showVideo(from.id, frame, meta), { track: 'camera' })
 ```
+
+Use another track, such as `'mic'`, for audio. With `lossy: true`, viewers that fall behind skip to the latest frame. If decoding depends on earlier frames, include a frame number in `meta` and restart the decoder at the next keyframe after a gap.
+
+To encode only while someone is watching, read `me.demand` and follow it with `me.onChange()`:
+
+```js
+// Video.js
+// Environment: client
+
+const updateCamera = () => setCameraActive(me.demand.some(({ track }) => track === 'camera'))
+updateCamera()
+me.onChange(updateCamera)
+```
+
+Each entry gives the track, its `watchers`, and a `watcherCount` that includes viewers who did not join. The array stays the same until its contents change, so React can read it with `useSyncExternalStore(me.onChange, () => me.demand)`.
+
+> For large video calls or audiences, use a WebRTC SFU for the video and Room for chat and signaling. See [telefunc#449](https://github.com/telefunc/telefunc/issues/449).
+
+## Give late joiners the current state
+
+Set `retain: true` to share the latest state with late subscribers, such as a game phase or the last keyframe on a track:
+
 ```js
 // Match.js
 // Environment: client
 
-import { onJoinMatch } from './Match.telefunc'
-
-const { room, me, host } = await onJoinMatch(matchId, 'Alice')
-room.subscribe((state, { from }) => {
-  if (from?.identity === 'host') render(state)
-})
-await me.send(host, { type: 'move', to: 'e4' })
-```
-
-## Stream audio or video
-
-Publish each source on its own track, and subscribe to the tracks you show:
-
-```js
-// Environment: client
-
-// The participant who films
-// encodeCamera(): your encoder, e.g. WebCodecs' VideoEncoder
-// live video: don't await, or each frame waits a round trip for the previous one
-encodeCamera((frame, isKeyframe) =>
-  me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe, lossy: true }),
-)
-
-// The participants who watch; showVideo(): your decoder wrapper, e.g. around WebCodecs' VideoDecoder,
-// which waits for a keyframe per member
-const watch = (member) =>
-  member.subscribeBinary((frame, info) => showVideo(member.id, frame, info.meta.isKeyframe), { track: 'camera' })
-for (const member of room.getParticipants()) watch(member)
-room.onJoin(watch)
-```
-
-With `retain: isKeyframe`, a viewer who arrives mid-stream receives the last keyframe first, or a newer frame when one reaches it first on a slow link: start its decoder at the first keyframe it receives (see <Link href="#give-late-joiners-the-current-state" />).
-
-On a track, `info.seq` counts its sender's frames on that track. A viewer that falls behind gets every frame, and gets `'disconnected'` where the server can't hold them for it. Where only the newest frame matters, such as a position or live audio and video, pass `lossy: true` in each publish on its track: a viewer that falls behind then skips to the newest frame, and its `info.seq` jumps over what it skipped:
-
-```js
-// Environment: client
-
-// onCursorMove(), onStroke(): your app's input events, each giving a Uint8Array
-onCursorMove((position) => me.publishBinary(position, { track: 'cursor', lossy: true })) // may be skipped
-onStroke((stroke) => me.publishBinary(stroke, { track: 'drawing' })) // a viewer never misses one
-```
-
-> Each publish says `lossy` itself. A publish without it is never skipped, and on a track it arrives after the lossy ones published before it, so a cursor's last position or a stroke's end can follow its lossy updates on the same track.
-
-With `lossy: true`, a viewer can skip a video frame that later frames depend on, so number the frames in `meta` (a frame replaced on its way to the server never gets an `info.seq`) and, at a gap, drop frames until the next keyframe and restart your decoder from it.
-
-To send frames only while someone watches, read `me.demand`, the tracks of yours that someone receives now, sorted by track name, and follow it with `me.onChange()`:
-
-```js
-// Environment: client
-
-let watched = false
-function follow() {
-  watched = me.demand.some((demand) => demand.track === 'camera')
-}
-follow()
-me.onChange(follow)
-// live video: don't await, or each frame waits a round trip for the previous one
-encodeCamera((frame, isKeyframe) => {
-  if (watched) me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe, lossy: true })
-})
-```
-
-> A viewer of every track, `subscribeBinary()` without `track`, receives a track from its first publish on.
-
-Each entry also says who receives the track: `watchers`, the people at the pages and server-side rooms receiving it, in the order `room.getParticipants()` lists them, and `watcherCount`, everyone receiving it. A page or a server-side room that receives it with nobody to list, such as a page that didn't join, counts one. You are never listed, and neither is a hidden participant:
-
-```js
-// Environment: client
-
-function watchingLine({ watchers, watcherCount }) {
-  const names = watchers.map((participant) => participant.meta.name).join(', ')
-  const more = watcherCount - watchers.length
-  if (watchers.length === 0) return `${watcherCount} watching`
-  return more > 0 ? `watching: ${names} and ${more} more` : `watching: ${names}`
-}
-function showWatching() {
-  const camera = me.demand.find((demand) => demand.track === 'camera')
-  caption.textContent = camera ? watchingLine(camera) : ''
-}
-showWatching()
-me.onChange(showWatching)
-```
-
-`me.demand` stays the same array, and each entry the same object, until it changes, so `useSyncExternalStore(me.onChange, () => me.demand)` reads it in React.
-
-> Audio works the same way, on its own track such as `{ track: 'mic' }`.
-
-> For video calls with many participants, or video streamed to an audience, use a WebRTC SFU for the video, and a room for the chat and signaling. See [telefunc#449](https://github.com/telefunc/telefunc/issues/449).
-
-
-## Give late joiners the current state
-
-Use `retain: true` to give late subscribers the latest state.
-
-```js
-// Environment: client
-
-// keyframe: a Uint8Array from your encoder, e.g. WebCodecs' VideoEncoder
 await me.publish({ phase: 'voting' }, { retain: true })
-await me.publishBinary(keyframe, { track: 'camera', meta: { isKeyframe: true }, retain: true, lossy: true })
 ```
 
-A late joiner gets the room's last retained message, and each participant's last retained frame on each track, as long as its publisher is in the room. When a newer message or frame from that publisher reaches the late joiner first, such as on a slow link, it gets only the newer one. For state that outlives the participants, such as a game phase, publish it from a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>.
-
-Adding another listener while the same room is already listening to that publisher or track doesn't replay its retained message or frame. A second component that needs it calls a telefunction that returns `Room.get(id)` and subscribes on the result, without joining.
-
+The room keeps its last retained room-wide message and each participant's last retained publish per track while its publisher remains in the room.
 
 ## Load chat history
 
-Save each message in `onBeforePublish()`, before it is sent, and load the history in a telefunction the page calls after `subscribe()`:
+Save each message in `onBeforePublish()`, then load the history after subscribing:
 
 ```js
 // Chat.telefunc.js
@@ -586,21 +324,20 @@ export async function onJoinChat(roomId) {
   if (!(await canRead(user, roomId))) throw Abort()
   const room = await Room.getOrCreate(roomId)
   Room.guard(room, {
-    // Saved before it is sent, so that a history loaded once it was sent has it.
     onBeforePublish: async (from, message) => {
       await db.messages.insert({ ...message, roomId, authorId: from.identity })
     },
   })
-  const me = await room.join({ meta: { name: user.name }, identity: user.id })
+  const me = await room.join({ identity: user.id, meta: { name: user.name } })
   return { room, me }
 }
 
 export async function onLoadHistory(roomId) {
-  const { user } = getContext()
-  if (!(await canRead(user, roomId))) throw Abort()
+  if (!(await canRead(getContext().user, roomId))) throw Abort()
   return await db.messages.latest(roomId, 50) // oldest first
 }
 ```
+
 ```js
 // Chat.js
 // Environment: client
@@ -608,41 +345,38 @@ export async function onLoadHistory(roomId) {
 import { onJoinChat, onLoadHistory } from './Chat.telefunc'
 
 const { room, me } = await onJoinChat('lobby')
-
 const shown = new Set()
 const show = (message) => {
-  if (shown.has(message.id)) return // the history and the room can both bring it
+  if (shown.has(message.id)) return
   shown.add(message.id)
   render(message)
 }
-let arrived = [] // what the room brings before the history is shown
-room.subscribe((message) => (arrived ? arrived.push(message) : show(message)))
-// Runs once the subscription is in effect: a message sent before is in the history, one sent after reaches subscribe().
-const history = await onLoadHistory('lobby')
-for (const message of history) show(message)
-for (const message of arrived) show(message)
-arrived = null
+let live = []
+room.subscribe((message) => (live ? live.push(message) : show(message)))
+for (const message of await onLoadHistory(room.id)) show(message)
+for (const message of live) show(message)
+live = null
 
-await me.publish({ id: crypto.randomUUID(), text: 'hello' }) // saved by onBeforePublish()
+await me.publish({ id: crypto.randomUUID(), text: 'hello' })
 ```
 
-> Add your other hooks, such as the ones in <Link href="#control-who-can-join-and-post" />, to this same `Room.guard()` call.
-
+Give messages stable IDs so the client can display each message once even if it arrives through both paths.
 
 ## Leave a room
 
 ```js
+// Lobby.js
 // Environment: client
 
 await me.leave()
 ```
 
-Everyone else's `room.onLeave()` fires.
-
+Use `room.onLeave()` to update the participant list or `me.onLeave()` to respond when your own participant leaves.
 
 ## Close a room
 
 ```js
+// Lobby.telefunc.js
 // Environment: server
 
 import { Room } from '@telefunc/room'
@@ -650,40 +384,11 @@ import { Room } from '@telefunc/room'
 await Room.close('lobby')
 ```
 
-A room also closes by itself a while after nobody is in it and no page has it open, see <Link href="/room-config" />.
-
-To keep a room open until you call `Room.close()`, create it with:
-
-```js
-// Environment: server
-
-await Room.create('match-42', { emptyTimeout: Infinity, departureTimeout: Infinity })
-```
-
-`room.onClose((cause) => {})` fires when the room closes, with `cause.type` `'closed'`. A page's room also closes when its connection is gone for good, with `'disconnected'`, and when the page's last participant of it was removed, with `'removed'` and the removal's `reason`.
-
+Use `room.onClose()` to clean up. A room also closes automatically after all participants leave and no page has it open. Set the timeouts in <Link href="/room-config" />.
 
 ## Run on multiple servers
 
-Install <Link href="/redis">`@telefunc/redis`</Link>:
-
-```bash
-npm install @telefunc/redis ioredis
-```
-
-Call `installRedis()` before your server first uses Room, for example in a module your server entry imports first (see <Link href="/redis" />):
-
-```js
-// Environment: server
-
-import IORedis from 'ioredis'
-import { installRedis } from '@telefunc/redis'
-
-installRedis(new IORedis('redis://localhost:6379'))
-```
-
-Then route each client to one server with <Link href="/stream/scale#sticky-sessions">sticky sessions</Link>. For Redis's requirements, see <Link href="/redis" />. A Room call that Redis can't run rejects with `BackendError`, see <Link href="/redis#errors">Redis errors</Link>. On Cloudflare Workers, you need neither, see <Link href="/stream/cloudflare" />.
-
+Install <Link href="/redis">the Redis backend</Link> and configure <Link href="/stream/scale#sticky-sessions">sticky sessions</Link>. On Cloudflare, follow the <Link href="/stream/cloudflare">Workers setup</Link>.
 
 ## Methods
 
@@ -698,9 +403,9 @@ Server-side.
 | `Room.getOrCreate(id, { ...options, tail? }?)` | Get a room, or create it. `tail` as for `Room.get()`. |
 | `Room.guard(room, hooks)` | Add `onBefore*()` and `onAfter*()` hooks to a room, once, and say who may join it from the client. |
 | `Room.join(id, { meta?, selfDelivery?, identity?, hidden? }?)` | Join a room from the server, without getting the room first. |
-| `Room.list({ prefix? }?)` | List the open rooms. |
+| `Room.list({ prefix? }?)` | List open rooms as `{ id, meta, count, isEmpty }`. |
 | `Room.setMeta(id, meta)` / `Room.updateMeta(id, meta)` | Replace / update the room's `meta`. |
-| `Room.getParticipants(id, { identity? }?)` | List the participants, or one user's: each `{ id, identity, meta, joinedAt, isConnected }`, with no methods. |
+| `Room.getParticipants(id, { identity }?)` | List the participants, or one user's: each `{ id, identity, meta, joinedAt, isConnected }`, with no methods. |
 | `Room.publish(id, message)` | Send to everyone: `room.subscribe()` gets it with `info.from` `null`. Resolves to `{ seq, timestamp }`. |
 | `Room.send(id, target, message)` | Send to one participant (`{ id }`) or to every tab of a user (`{ identity }`). Resolves to `{ seq, timestamp }`, or for `{ identity }` to a list of them, one per tab it reached. |
 | `Room.removeParticipant(id, target)` | Remove a participant (`{ id, reason? }`) or every tab of a user (`{ identity, reason? }`). |
@@ -716,7 +421,7 @@ Server-side.
 |---|---|
 | `join({ meta?, selfDelivery? }?)` | Join; returns your participant. |
 | `join({ meta?, selfDelivery?, identity?, hidden? })` | Server-side: join with a user id, or as a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>. |
-| `snapshot()` / `onChange(cb)` | The whole room, `{ id, meta, count, isClosed, participants }` with each participant as of the snapshot / called when it changed, once for the changes of one task. |
+| `snapshot()` / `onChange(cb)` | Read or follow `{ id, meta, count, isClosed, participants }`. |
 | `getParticipants()` | The participants. |
 | `getParticipant(id)` | One participant, or `null`. |
 | `getParticipants({ hidden: true })` | Server-side: the hidden participants. |
@@ -733,16 +438,16 @@ Properties: `id`, `meta`, `count`, `isEmpty`, `isClosed`.
 
 | Method | Description |
 |---|---|
-| `publish(message, { track?, lossy?, retain? }?)` | Send to everyone. `lossy` needs `track`. |
+| `publish(message, { track?, lossy?, retain? }?)` | Send to everyone. With `lossy: true`, name a track. |
 | `publishBinary(data, { track?, meta?, retain?, lossy? }?)` | Send binary to everyone. Without `track`, on the track `'main'`. |
-| `send(to, message, { ack? }?)` | Send to one participant. Resolves to `{ seq, timestamp }`, or with `ack: true` to its `listen()` reply. |
+| `send(to, message, { ack? }?)` | Send to a participant or its ID. Resolves to `{ seq, timestamp }` or, with `ack: true`, its reply. |
 | `listen(cb)` | Receive private messages: `cb(message, { from })`; return a value to reply. |
 | `setMeta(meta)` / `updateMeta(meta)` | Replace / update your `meta`. |
 | `onChange(cb)` | Your `meta`, `isConnected` or `demand` changed; once for the changes of one task. |
 | `leave()` / `onLeave(cb)` | Leave / you left, with `cause.type`: `'left'`, `'removed'`, `'closed'`, `'disconnected'`, or `'unknown'` (it left while nothing here listened to the room, too long ago to know why). |
 | `onDisconnect(cb)` / `onReconnect(cb)` | Your connection to the room dropped / is back. |
 
-Properties: `id`, `meta`, `identity`, `selfDelivery`, `isConnected`, and `demand`: the tracks of yours someone receives now, each `{ track, watchers, watcherCount }`.
+Properties: `id`, `meta`, `identity`, `selfDelivery`, `isConnected`, and `demand` (one `{ track, watchers, watcherCount }` per watched track).
 
 ### Other participants
 
@@ -768,21 +473,25 @@ Properties: `id`, `meta`, `identity`, `joinedAt` (Unix epoch milliseconds), `isC
 
 ### `RoomError`
 
-Room's methods reject with a `RoomError`, exported by `@telefunc/room` and `@telefunc/room/client`. Its `code` is stable, for your code to branch on; its `message` is for people. Beside the codes of an <Link href="#send-a-private-message">acknowledged `send()`</Link>:
+Catch `RoomError` from `@telefunc/room` or `@telefunc/room/client` and branch on its `code`:
 
 | `code` | Why |
 |---|---|
-| `ROOM_NOT_FOUND` / `ROOM_EXISTS` | No room has the id given / `Room.create()` found one. |
+| `ROOM_NOT_FOUND` / `ROOM_EXISTS` | The room is missing / already exists. |
 | `ROOM_CLOSING` / `ROOM_CLOSED` | The room is closing / closed. |
-| `JOIN_NOT_GUARDED` | A client called `join()` on a room whose telefunction didn't say who may join (see <Link href="#control-who-can-join-and-post" />). |
-| `NOT_A_PARTICIPANT` | The participant didn't join through this page's connection. |
-| `PARTICIPANT_NOT_FOUND` / `PARTICIPANT_LEFT` | The participant isn't in the room / left. |
-| `LIMIT_REACHED` | A page's room joined too many participants, or a participant publishes on too many named tracks. |
-| `MESSAGE_LOST` | A private message's handoff to its recipient failed after it was sent, and it isn't sent again. |
-| `BACKEND_TIMEOUT` | The room's backend didn't get a subscription ready or hand a message on within 60 seconds. |
-| `MALFORMED` | Room couldn't read what the page sent, and ended the page's connection. |
-| `INTERNAL` | A bug, reported in your server's logs, or in the recipient's client logs where a page's reply couldn't be sent. |
-
+| `JOIN_NOT_GUARDED` | The room hasn't allowed client joins. |
+| `NOT_A_PARTICIPANT` | The participant didn't join through this connection. |
+| `PARTICIPANT_NOT_FOUND` / `PARTICIPANT_LEFT` | The participant is missing / left. |
+| `LIMIT_REACHED` | The page joined too many participants or a participant published on too many tracks. |
+| `MESSAGE_LOST` | A private message couldn't reach its recipient. |
+| `BACKEND_TIMEOUT` | A backend subscription or message handoff timed out. |
+| `MALFORMED` / `INTERNAL` | Invalid data from the page / an error reported in the logs. |
+| `DM_NO_LISTENER` | The recipient stopped listening. |
+| `DM_INBOX_OVERFLOW` | The recipient's pending messages exceeded the inbox limit. |
+| `DM_TIMEOUT` | The recipient didn't answer in time. |
+| `DM_TWO_REPLIES` | Two listeners returned a reply. |
+| `DM_HANDLER_THREW` | The recipient's listener threw. |
+| `DM_RECIPIENT_WENT_AWAY` | The recipient went away before replying. |
 
 ## See also
 

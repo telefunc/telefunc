@@ -5,9 +5,7 @@ import { TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
-Use Redis to share <Link href="/channel#broadcast">broadcasts</Link> and <Link href="/room">rooms</Link> across your Telefunc servers: a `publish()` on one server reaches every active `subscribe()` across your servers.
-
-> You only need this if you scale horizontally — see <Link href="/stream/scale" />.
+Use Redis to share <Link href="/channel#broadcast">broadcasts</Link> and <Link href="/room">rooms</Link> across your Telefunc servers.
 
 ## Install
 
@@ -27,27 +25,22 @@ const redis = new IORedis('redis://localhost:6379')
 installRedis(redis)
 ```
 
-That single call installs the Redis backend for both Broadcast and Room. Call `installRedis()` before your server first uses Broadcast or Room, for example in a module your server entry imports first.
+Call `installRedis()` in your server entry before using Broadcast or Room. Pass your existing [ioredis](https://github.com/redis/ioredis) client to reuse its TLS or authentication settings. To rotate credentials, call it again with the new credentials for the same Redis deployment.
 
-> Room keeps its state in Redis: use `maxmemory-policy noeviction`, as any other policy can close a room.
+> Use `maxmemory-policy noeviction` when running rooms, whose state is stored in Redis.
 
-### Sharing an existing client
+> Use `installRedis(redis, { prefix })` for a dedicated key and channel prefix (default: `tf:`). Configure <Link href="/stream/scale#sticky-sessions">sticky sessions</Link> for browser connections.
 
-Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster instance to reuse its options, such as TLS or authentication.
+### Redis Cluster
 
 ```ts
 // Environment: server
 
-import IORedis from 'ioredis'
+import { Cluster } from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 
-const redis = new IORedis(process.env.REDIS_URL, { tls: {} })
-installRedis(redis)
+installRedis(new Cluster([{ host: '127.0.0.1', port: 7000 }]))
 ```
-
-You can keep using the client you pass to Telefunc. To rotate credentials, call `installRedis()` again with a client that uses the new credentials for the same Redis.
-
-To prefix Telefunc's Redis keys, pass `installRedis(redis, { prefix })` (default: `tf:`). Keep the keys under that prefix to Telefunc.
 
 ### A Redis user of its own
 
@@ -71,7 +64,7 @@ installRedis(redis, { prefix: 'tf:' })
 
 ## Errors
 
-A `publish()` or a Room call that Redis can't run rejects with `BackendError`:
+When Redis can't run a publish or Room operation, use <Link href="/error-handling">`BackendError`</Link> to handle the failure:
 
 ```ts
 // Environment: server
@@ -82,59 +75,22 @@ try {
   await Broadcast.publish('chat', message)
 } catch (err) {
   if (!(err instanceof BackendError)) throw err
-  console.error(err.message) // What failed and what to do, with Redis's error code, such as `NOPERM`
-  err.code // 'unreachable' | 'unavailable' | 'denied' | 'failed'
-  err.outcome // 'not-run' | 'may-have-run'
+  console.error(err.code, err.outcome, err.message)
 }
 ```
 
-| `code` | When | What to do |
-|---|---|---|
-| `'unreachable'` | The connection to Redis failed or closed, or Redis didn't answer within 15 s (or the `commandTimeout` of the client you pass) | Call again once Redis is reachable |
-| `'unavailable'` | Redis can't serve it now, and a later call may succeed: it is loading its data, busy, out of memory, a replica, or its replicas are behind | Call again later. If it lasts, see the message: out of memory, Redis needs a higher `maxmemory`; for a replica, give `installRedis()` a client of the primary |
-| `'denied'` | Redis refuses it until you change its ACL, the password, or a command its operator disabled | Change that, then call again |
-| `'failed'` | Redis failed it otherwise | See the message |
-
-If `err.outcome` is `'not-run'`, the call changed nothing: you can call it again once you've corrected the cause.
-
-It is `'may-have-run'` when the call may have taken effect, for example when the connection dropped before Redis answered:
-
-| Call | After `'may-have-run'` |
+| `code` | When |
 |---|---|
-| `Broadcast.publish()`, `Room.publish()`, `Room.send()`, a participant's `publish()` and `send()` | Publishing again can deliver the message twice |
-| `Room.create()` | Call `Room.get()`: a second `Room.create()` rejects with `ROOM_EXISTS` if the first took effect. Or use `Room.getOrCreate()` |
-| `Room.close()`, `Room.setMeta()`, `Room.updateMeta()`, a participant's `setMeta()`, `updateMeta()` and `leave()` | Call it again: two calls end as one does |
-| `Room.removeParticipant()` | Call it again. With `{ identity }`, two calls end as one does. With `{ id }`, a second call that rejects with `PARTICIPANT_NOT_FOUND` or `ROOM_NOT_FOUND` means the participant is no longer in the room |
-| `Room.join()`, `room.join()` | Join again: Telefunc removes the participant of the failed join |
-| `Room.get()`, `Room.list()`, `Room.getParticipants()` | Call it again: you can retry a read regardless of `outcome` |
+| `unreachable` | Redis is disconnected or took too long to answer. |
+| `unavailable` | Redis can't serve the operation, for example while loading data or at its memory limit. |
+| `denied` | Credentials, permissions, or disabled commands prevent the operation. |
+| `failed` | Redis returned another error. |
+
+Retry a read or a call with `outcome: 'not-run'` after resolving the error. With `'may-have-run'`, check the current state before retrying a write. Repeating a publish or private send can deliver it twice.
 
 ## Subscriptions
 
-While Redis is unreachable, a new subscription's `opened` waits until Redis is back. A subscription already in effect stays, and its callback receives what is published once Redis is back (see <Link href="/channel#delivery">Delivery</Link> for what it missed).
-
-A subscription fails when Redis refuses it, for example when its ACL denies a channel the subscription needs. Restore the access, then subscribe again; your server's log and <Link href="/onBug">`onBug()`</Link> say what Redis refused.
-
-> A <Link href="/channel#new-broadcastchannel">`BroadcastChannel`</Link> closes: on the client, the callback you pass to `onClose()` gets a `ChannelClosedError`. Call its telefunction again and subscribe to the broadcast it returns.
-
-> A `Broadcast.subscribe()` is removed: if its `opened` hadn't resolved, it rejects with a `BackendError`. Call `Broadcast.subscribe()` again.
-
-Await `opened` before you depend on that listener receiving a publish:
-
-```ts
-// Chat.telefunc.ts
-// Environment: server
-
-import { Broadcast } from 'telefunc'
-
-const subscription = Broadcast.subscribe(key, listener)
-await subscription.opened
-```
-
-`opened` resolves when Redis confirms the subscription or you unsubscribe. If the subscription fails first, `opened` rejects and any <Link href="/channel#new-broadcastchannel">`BroadcastChannel`</Link> using that subscription closes.
-
-## Channels
-
-`Channel` is per-instance. Reconnects must land on the instance holding the channel's state, so multi-instance deployments need sticky sessions at the load balancer. See <Link href="/stream/scale" />.
+Await the subscription's `opened` before relying on delivery. A subscription waiting to open during a disconnect can open when Redis comes back. If Redis refuses it, restore access and subscribe again. See <Link href="/channel#delivery" /> for messages missed during a disconnect.
 
 ## Limitations
 

@@ -8,7 +8,7 @@ Rooms for Telefunc: members, presence, meta, messages and media tracks, on one s
 npm install @telefunc/room
 ```
 
-That's it — the Telefunc bundler plugin (Vite, webpack, Next.js, Babel) detects `@telefunc/room` in your dependencies and registers it automatically. Without a Telefunc bundler plugin, register it manually: `import '@telefunc/room/client'` in your client entry. The server needs no extra import: importing `Room` from `@telefunc/room` registers it. On Cloudflare, use Telefunc's Vite plugin.
+Telefunc's plugin loads Room from your app's `package.json`. For other dependency layouts, add `import '@telefunc/room/client'` to your client entry.
 
 ## Usage
 
@@ -25,7 +25,6 @@ type Message = { text: string }
 
 export async function onGetLobby() {
   const room = await Room.getOrCreate<RoomMeta, MemberMeta, Message>('lobby')
-  // Anyone may join from the client: without it or an onBeforeJoin() guard, room.join() is refused
   Room.guard(room, { anyoneCanJoin: true })
   return room
 }

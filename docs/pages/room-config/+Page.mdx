@@ -17,14 +17,9 @@ roomConfig.emptyTimeout = 300_000    // Close a room that nobody joined yet, onc
 roomConfig.departureTimeout = 20_000 // Close a room after the last participant leaves and no page has it open (ms)
 ```
 
-> Set them at your server entry, before your server creates rooms.
+Set these defaults in your server entry. Override either timeout when you call `Room.create()` or `Room.getOrCreate()` to create a room.
 
-> Pass either timeout to `Room.create()` or `Room.getOrCreate()` to set it for one room, such as `Room.create('match-42', { emptyTimeout: Infinity, departureTimeout: Infinity })`. A room keeps the timeouts it was created with.
-
-> `Infinity` keeps a room open until `Room.close()`. Set both to keep a room open before and after its first participant joins.
-
-> For when a room closes, see <Link href="/room#close-a-room" />.
-
+> Set both to `Infinity` to keep a room open until <Link href="/room#close-a-room">`Room.close()`</Link>.
 
 ## See also
 
