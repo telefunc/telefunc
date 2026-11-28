@@ -256,7 +256,12 @@ function LossyKeepsUp({ show }: { show: Show }) {
       Array.from({ length: 100 }, (_, n) => broadcast.publish(`${n}:`.padEnd(4096, 'x'))),
     )
     const fromPage = new Set(receipts.map((receipt) => receipt.seq)).size
-    const lossyKeepsUp = { fromServer, fromPage, last: await control.send('last', { ack: true }) }
+    let last = await control.send('last', { ack: true })
+    for (let i = 0; i < 30 && last !== '99'; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      last = await control.send('last', { ack: true })
+    }
+    const lossyKeepsUp = { fromServer, fromPage, last }
     show({ lossyKeepsUp })
     control.close()
   }
