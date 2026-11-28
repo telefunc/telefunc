@@ -269,21 +269,25 @@ function hasIncarnation(sql: SqlStore, inc: string): boolean {
  *  dropped, or null for none. */
 function nextMaintenanceDeadline(sql: SqlStore, now: number): number | null {
   if (listOrphanIncarnations(sql, readLiveHead(sql, now)?.currentInc ?? null).length > 0) return now
-  // Each table takes its own MIN, so the expiring_cell table's seeks its expires_at index.
-  const deadline = nullableIntegerColumn(
-    sql
-      .exec(
-        'SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head ' +
-          // A close lease has run out once authority time passed its end.
-          "UNION ALL SELECT MIN(lease_until) + 1 FROM head WHERE state = 'closing' " +
-          'UNION ALL SELECT MIN(expires_at) FROM expiring_cell UNION ALL SELECT MIN(due_at) FROM listing ' +
-          'UNION ALL SELECT MIN(resume_at) FROM handoff UNION ALL SELECT MIN(kept_until) FROM stored_answer)',
-      )
-      .one(),
-    'deadline',
-  )
-  const sweep = nextLeaseSweep(sql)
-  return deadline === null || sweep === null ? (deadline ?? sweep) : Math.min(deadline, sweep)
+  // Cloudflare's SQLite caps a compound SELECT at five terms.
+  const deadlines = sql
+    .exec(`
+      SELECT
+        (SELECT MIN(expires_at) FROM head) AS head_exp,
+        -- A close lease has run out once authority time passed its end.
+        (SELECT MIN(lease_until) + 1 FROM head WHERE state = 'closing') AS close_exp,
+        (SELECT MIN(expires_at) FROM expiring_cell) AS cell_exp,
+        (SELECT MIN(due_at) FROM listing) AS list_due,
+        (SELECT MIN(resume_at) FROM handoff) AS handoff_at,
+        (SELECT MIN(kept_until) FROM stored_answer) AS answer_exp
+    `)
+    .one()
+  let next = nextLeaseSweep(sql)
+  for (const column of Object.keys(deadlines)) {
+    const deadline = nullableIntegerColumn(deadlines, column)
+    if (deadline !== null && (next === null || deadline < next)) next = deadline
+  }
+  return next
 }
 
 /** Called inside `transactionSync`; a lost race returns the current head. */
