@@ -32,7 +32,7 @@ function loadedFeatures(): Features {
 async function loadFeatures(features: Feature[], call: WaitingCall): Promise<Features> {
   await abortable(call, async () => {
     try {
-      await Promise.all(features.map(loadFeature))
+      await Promise.all(features.map((feature) => (globalObject.loading[feature] ??= importFeature(feature))))
     } catch {
       throw new ConnectionError()
     }
@@ -56,10 +56,6 @@ function loadedWithExtensions(features: Pick<Features, 'channels' | 'broadcasts'
 }
 
 type WaitingCall = { abortController: AbortController; telefunctionName: string; telefuncFilePath: string }
-
-function loadFeature(feature: Feature): Promise<void> {
-  return (globalObject.loading[feature] ??= importFeature(feature))
-}
 
 async function importFeature(feature: Feature): Promise<void> {
   const { loaded } = globalObject
