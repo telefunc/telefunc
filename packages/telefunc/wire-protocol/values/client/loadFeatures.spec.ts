@@ -14,6 +14,7 @@ type LoadFeaturesModule = typeof import('./loadFeatures.js')
 // finish, or fails, as the chunk's request would.
 const FEATURES = ['streams', 'channels', 'broadcasts'] as const
 type Feature = (typeof FEATURES)[number]
+const chunkLoadError = new Error('The client chunk failed to load')
 
 let gates: Record<Feature, Deferred<void>>
 let failing: Set<Feature>
@@ -53,7 +54,7 @@ beforeEach(() => {
       imported.push(feature)
       const load = (async () => {
         await gates[feature].promise
-        if (failing.delete(feature)) throw new Error(`The ${feature} chunk failed to load`)
+        if (failing.delete(feature)) throw chunkLoadError
         return importOriginal()
       })()
       loads.push(load)
@@ -883,6 +884,7 @@ test('a later invalid argument cancels a resource created by an extension replac
 
 test('a reply chunk load failure cancels the ongoing request upload', async () => {
   const { call, ConnectionError } = await page()
+  const { NetworkError } = await import('../../../shared/NetworkError.js')
   const cancel = vi.fn()
   const upload = new ReadableStream({ cancel })
   gates.channels.resolve()
@@ -890,7 +892,15 @@ test('a reply chunk load failure cancels the ongoing request upload', async () =
   gates.streams.resolve()
   respond = streamed({ gen: GENERATOR })
 
-  await expect(call([upload])).rejects.toBeInstanceOf(ConnectionError)
+  const error = await call([upload]).catch((err: unknown) => err)
+  assert(error instanceof ConnectionError)
+  expect(error).toBeInstanceOf(NetworkError)
+  expect(error.isChannel).toBe(false)
+  expect(error.isConnectionError).toBe(true)
+  expect(error.message).toBe('Failed to load Telefunc client module (streams). Retry the call or reload the page.')
+  // Vitest adds its own error around the rejected mock import.
+  assert(error.cause instanceof Error)
+  expect(error.cause.cause).toBe(chunkLoadError)
   expect(cancel).toHaveBeenCalledOnce()
   expect(upload.locked).toBe(false)
   expect(posts).toHaveLength(1)

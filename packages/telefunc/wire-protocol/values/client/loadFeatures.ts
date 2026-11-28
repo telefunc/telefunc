@@ -27,14 +27,16 @@ function loadedFeatures(): Features {
 }
 
 /** Loads `features` for a call, each once per page: an abort rejects at once, as during the call's `fetch()`, and a load
- *  that fails rejects with `ConnectionError`, as a call that can't reach its server does; the next call that needs it
- *  calls `import()` again. */
+ *  that fails rejects with `ConnectionError` and is retried on the next call that needs it. */
 async function loadFeatures(features: Feature[], call: WaitingCall): Promise<Features> {
   await abortable(call, async () => {
     try {
       await Promise.all(features.map((feature) => (globalObject.loading[feature] ??= importFeature(feature))))
-    } catch {
-      throw new ConnectionError()
+    } catch (err) {
+      throw new ConnectionError(
+        `Failed to load Telefunc client module (${features.join(', ')}). Retry the call or reload the page.`,
+        { cause: err },
+      )
     }
   })
   return globalObject.loaded
