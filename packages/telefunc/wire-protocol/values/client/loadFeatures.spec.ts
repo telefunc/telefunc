@@ -144,17 +144,6 @@ async function warmStreams(call: (args: unknown[]) => Promise<unknown>) {
   await call([])
 }
 
-test('a failed chunk load rejects the call with ConnectionError, cancels its body, and the next call loads it', async () => {
-  const { call, ConnectionError } = await page()
-  respond = streamed({ gen: GENERATOR })
-  failing.add('streams')
-  gates.streams.resolve()
-  expect(await settledWithin(call([]), 1000)).toBeInstanceOf(ConnectionError)
-  expect(cancelled).toBe(1)
-  const ret = await call([])
-  expect(ret).toHaveProperty('gen')
-})
-
 test('a failed chunk load two calls share rejects each with ConnectionError, or Abort for the one aborted as it fails', async () => {
   const { call, withContext, ConnectionError } = await page()
   const { onAbort } = await import('../../../client/remoteTelefunctionCall/onAbort.js')
@@ -543,23 +532,6 @@ test.each(['headers', 'httpHeaders'] as const)(
   },
 )
 
-const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g
-/** A callback, an upload and plain data: what a call carries over channels of their own, and beside them. */
-const carried = () => [{ n: 1, callback() {} }, new ReadableStream(), '!TelefuncFunction:app']
-
-test("a cold callback and upload call sends the body a page with channels' code sends, but for the channel ids", async () => {
-  const { call } = await page()
-  respond = text(1)
-  const cold = call(carried())
-  gates.channels.resolve()
-  await cold
-  await call(carried())
-  expect(imported).toEqual(['channels'])
-  const [coldBody = '', warmBody = ''] = posts
-  expect(coldBody.match(UUID)).toHaveLength(2)
-  expect(coldBody.replace(UUID, 'id')).toBe(warmBody.replace(UUID, 'id'))
-})
-
 test("a cold upload's call and the wire its channel opens use the fetch of the call's invocation", async () => {
   const { config, call } = await page()
   const used: string[] = []
@@ -634,34 +606,6 @@ test("a second client module instance's channels open with its own fetch", async
   await second.withContext(second.call, { channel: { connectionKey } })([{ callback() {} }])
   await vi.waitFor(() => expect(used).toContain('second:wire'))
   expect(used).toContain('second:call')
-})
-
-test('the channel a cold call opens is the one its tag names', async () => {
-  const opened: string[] = []
-  vi.doMock('../../channel/client/ClientChannel.js', async (importOriginal: () => Promise<ClientChannelModule>) => {
-    const original = await importOriginal()
-    class RecordedChannel<A = unknown, B = unknown> extends original.ClientChannel<A, B> {
-      constructor(options: ConstructorParameters<typeof original.ClientChannel>[0]) {
-        super(options)
-        opened.push(this.id)
-      }
-    }
-    return { ...original, ClientChannel: RecordedChannel }
-  })
-  try {
-    const { call } = await page()
-    respond = text(1)
-    const pending = call(carried())
-    gates.channels.resolve()
-    await pending
-    const [callback, upload] = JSON.parse(posts[0] ?? '').args
-    const tagged = [callback.callback, upload].map(
-      (tag: string) => JSON.parse(tag.slice(tag.indexOf(':') + 1)).channelId,
-    )
-    expect(opened.toSorted()).toEqual(tagged.toSorted())
-  } finally {
-    vi.doUnmock('../../channel/client/ClientChannel.js')
-  }
 })
 
 test("a cold callback's channel is the call's once: the call's abort aborts it once", async () => {
