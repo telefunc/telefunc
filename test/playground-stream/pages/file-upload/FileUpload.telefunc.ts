@@ -24,6 +24,9 @@ export {
   onKeepFile,
   onReadKeptFile,
   onReturnChannelIgnoringFile,
+  onIgnoreFile,
+  onGreet,
+  onTransferFirstFile,
 }
 
 import { Channel } from 'telefunc'
@@ -266,4 +269,20 @@ const onReturnChannelIgnoringFile = async (_file: File) => {
   const channel = new Channel<never, string>()
   void channel.send('open').catch(() => {})
   return channel
+}
+
+const onIgnoreFile = async (_file: File) => 'ignored'
+
+const onGreet = async () => 'hello'
+
+/** Reads `first`, detaching each chunk's buffer as an app handing it to a worker does, then sums `second`'s bytes. */
+const onTransferFirstFile = async (first: File, second: File) => {
+  let firstBytes = 0
+  for await (const chunk of first.stream()) {
+    firstBytes += chunk.byteLength
+    structuredClone(chunk, { transfer: [chunk.buffer] })
+  }
+  let secondSum = 0
+  for (const byte of new Uint8Array(await second.arrayBuffer())) secondSum += byte
+  return { firstBytes, secondSum }
 }

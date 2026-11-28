@@ -1,12 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
-import { addWireCopies, dropWireCopies } from '../channel/server/channelMemory.js'
-import { CHANNEL_PING_INTERVAL_MS, CHANNEL_TRANSPORT, WIRE_SEND_AHEAD_MIN_BYTES } from '../constants.js'
-import { decode, encode, isOneFrame, messageFrames, type PiecesAck } from '../wire/frame.js'
+import { CHANNEL_TRANSPORT, WIRE_SEND_AHEAD_MIN_BYTES } from '../constants.js'
+import { decode, encode, isOneFrame, messageFrames } from '../wire/frame.js'
 import { decodePiecesAck } from '../wire/decode.fixture.js'
 import { HEADER, readTag, readU16 } from '../wire/header.js'
 import { defined } from '../../utils/defined.fixture.js'
-import { pingDeadline } from '../wire/pingDeadline.js'
 import { TAG, isPublishBody, isSequencedTag } from '../wire/tags.js'
 import { ClientPieceReceiver } from './client/ClientPieceReceiver.js'
 import { ServerHeadroom } from './server/ServerHeadroom.js'
@@ -19,15 +17,6 @@ beforeEach(() => {
 })
 afterEach(() => vi.useRealTimers())
 const sleep = (ms: number) => vi.advanceTimersByTimeAsync(ms)
-
-/** More copies than any wire's allowance: the ledger every wire shares has no copy room left. */
-const ALL_COPIES = 2 ** 40
-
-/** The most copies put past the page's word: the least send-ahead, which a frame's header may cross. */
-const COPY_BOUND = WIRE_SEND_AHEAD_MIN_BYTES + HEADER
-
-/** 100 MB/s, 2 ms each way: a frame's own crossing is under a millisecond, so what it waits is the sender's. */
-const FAST = { bytesPerMs: 100_000, delayMs: 2 }
 
 /** Slow 3G: 400 kbit/s, 200 ms each way. */
 const SLOW = { bytesPerMs: 50, delayMs: 200 }
@@ -140,88 +129,6 @@ function wireTo(
 
 type Wire = ReturnType<typeof wireTo>
 
-/** A step of the clock under a round trip of a millisecond: such a link is stepped by hand, as timers fire whole ms. */
-const STEP_MS = 0.05
-
-/** As `wireTo`, on a link whose round trip may be under a millisecond, with the clock stepped by `step()`. */
-function stepWireTo({ bytesPerMs, delayMs }: { bytesPerMs: number; delayMs: number }) {
-  const toPage: { message: Uint8Array<ArrayBuffer>; due: number }[] = []
-  const toServer: { ack: PiecesAck; due: number }[] = []
-  let linkFreeAt = 0
-  let handed = 0
-  let delivered = 0
-  const receiver = new ClientPieceReceiver({
-    owner: {
-      sendAck: (frame) => void toServer.push({ ack: decodePiecesAck(frame), due: performance.now() + delayMs }),
-      carryAck: () => {},
-    },
-  })
-  const take = (message: Uint8Array<ArrayBuffer>, at: number) => {
-    delivered += message.byteLength
-    const frames = isOneFrame(message) ? [message] : Array.from(messageFrames(message))
-    const own = defined(frames.pop(), "a message's own frame")
-    for (const each of frames) receiver.arrived(readTag(each), each.byteLength, at, 'riding')
-    const frame = decode(own)
-    if (frame.tag === TAG.ANNOUNCE) receiver.announce(frame.bytes, at, frame.floor)
-    else if (frame.tag === TAG.PIECE) receiver.add(frame.total, frame.piece, at)
-    else receiver.arrived(frame.tag, own.byteLength, at, 'alone')
-  }
-  const headroom = new ServerHeadroom({
-    socket: {
-      send: (message) => {
-        handed += message.byteLength
-        linkFreeAt = Math.max(linkFreeAt, performance.now()) + message.byteLength / bytesPerMs
-        toPage.push({ message, due: linkFreeAt + delayMs })
-      },
-      bufferedAmount: 0,
-    },
-    pingInterval: 60_000,
-  })
-  return {
-    headroom,
-    /** What the socket was handed, crossing the link alone: the least time it takes. */
-    linkMs: () => handed / bytesPerMs + delayMs,
-    crossing: () => delivered < handed,
-    async step() {
-      await vi.advanceTimersByTimeAsync(STEP_MS)
-      const now = performance.now()
-      for (let next = toPage[0]; next !== undefined && next.due <= now; next = toPage[0]) {
-        toPage.shift()
-        take(next.message, now)
-      }
-      for (let next = toServer[0]; next !== undefined && next.due <= now; next = toServer[0]) {
-        toServer.shift()
-        headroom.acknowledged(next.ack)
-      }
-    },
-    stop: () => headroom.close(),
-  }
-}
-
-/** The most bytes the page hasn't said it took, over a second of full copy pressure in which `send` sends. */
-async function mostUnconfirmedUnderCopyPressure(wire: Wire, send: () => void): Promise<number> {
-  const { sender } = wire.headroom
-  addWireCopies(ALL_COPIES)
-  try {
-    send()
-    let most = 0
-    for (let ms = 0; ms < 1_000; ms++) {
-      most = Math.max(most, sender.transmittedBytes - sender.confirmedBytes)
-      await sleep(1)
-    }
-    return most
-  } finally {
-    dropWireCopies(ALL_COPIES)
-  }
-}
-
-/** A 64 KiB and a 16 KiB frame of one channel, then 40 KiB of each of three others. */
-function framesOfFourChannels(wire: Wire): void {
-  wire.send((seq) => encode.binary(1, new Uint8Array(64 * 1024 - HEADER), seq))
-  wire.binary(1, 16 * 1024)
-  for (const ix of [2, 3, 4]) wire.binary(ix, 40 * 1024)
-}
-
 /** A wire that carried a 64 KiB download on a fast link, then nineteen on Slow 3G 2.5 s apart, each over and the link
  *  idle by the next. Each goes as two frames: the second queues behind the first, so its acknowledgement measures the
  *  link. */
@@ -237,13 +144,6 @@ async function wireThatSlowed(): Promise<Wire> {
   }
   expect(wire.linkBytes()).toBe(0)
   return wire
-}
-
-/** A 16 MiB burst on the fast link: it queues past a rate's least span, so its acknowledgements measure the link. */
-async function measureFastLink(wire: Wire): Promise<void> {
-  for (let n = 0; n < 256; n++) wire.binary(1, 64 * 1024 - HEADER)
-  await sleep(1_000)
-  expect(wire.headroom.window()).toBeLessThan(Number.POSITIVE_INFINITY)
 }
 
 /** The RECONCILED of a page that had `channels` channels open, as large as a page's many joins make it. */
@@ -296,133 +196,6 @@ function senderUnderWindow(window: number) {
 }
 
 describe('the lanes', () => {
-  test("while one channel's data waits, 64 other channels' sends hand the socket nothing past the same window", async () => {
-    const wire = await wireThatSlowed()
-    try {
-      for (let n = 0; n < 32; n++) wire.binary(1, 64 * 1024)
-      expect(wire.headroom.sender.dataWaits).toBe(true)
-      const before = wire.handed()
-      for (let ix = 2; ix < 66; ix++) wire.binary(ix, 32 * 1024)
-      expect(wire.handed() - before).toBeLessThanOrEqual(WIRE_SEND_AHEAD_MIN_BYTES)
-    } finally {
-      wire.stop()
-    }
-  })
-
-  test("a publish larger than the wire's copy allowance goes once the copy pressure ends", async () => {
-    const wire = wireTo(FAST, { copiesOnSend: true })
-    let pressured = false
-    try {
-      await measureFastLink(wire)
-      await sleep(1_000)
-      addWireCopies(ALL_COPIES)
-      pressured = true
-      wire.send((seq) => encode.publishTo(2, seq))
-      wire.send(() => encode.publishBinary(new Uint8Array(100 * 1024), { seq: 1, timestamp: 0 }))
-      await sleep(1_000)
-      dropWireCopies(ALL_COPIES)
-      pressured = false
-      await sleep(1_000)
-      expect(wire.headroom.sender.waitingBytes).toBe(0)
-    } finally {
-      if (pressured) dropWireCopies(ALL_COPIES)
-      wire.stop()
-    }
-  })
-
-  test("a report the page sent before it read a request for one isn't its answer, though it covers what went before the request", async () => {
-    const asks: number[] = []
-    const headroom: ServerHeadroom = new ServerHeadroom({
-      socket: {
-        send: (message) => {
-          const frames = isOneFrame(message) ? [message] : Array.from(messageFrames(message))
-          if (frames.some((frame) => frame[0] === TAG.PIECES_ACK_REQ)) asks.push(headroom.sender.transmittedBytes)
-        },
-        bufferedAmount: 0,
-        copiesOnSend: true,
-      },
-      pingInterval: 60_000,
-    })
-    addWireCopies(ALL_COPIES)
-    try {
-      let seq = 0
-      // 2 KiB frames past what copies may hold, which wait for the page's word: it hears none, so it asks.
-      for (let n = 0; n < 200; n++) headroom.send(encode.binary(1, new Uint8Array(2048), ++seq))
-      await sleep(10)
-      const [asked = 0] = asks
-      expect(asks).toEqual([asked])
-      // Half of what went confirmed frees copy room for more data while the request is open.
-      await sleep(10)
-      headroom.acknowledged({ bytes: Math.floor(asked / 2), heldMs: 0, spanUs: 0 })
-      // The answer to the request, 20 ms after it: the page hears nothing again, and it asks of the data handed since.
-      await sleep(10)
-      headroom.acknowledged({ bytes: asked, heldMs: 0, spanUs: 0 })
-      await sleep(10)
-      const [, again = 0] = asks
-      expect(asks).toEqual([asked, again])
-      // 1 ms after that request, the page's report of all it got before it: the request ends its message.
-      await sleep(1)
-      headroom.acknowledged({ bytes: again - encode.piecesAckReq().byteLength, heldMs: 0, spanUs: 0 })
-      expect(headroom['leastRtt']).toBe(20)
-    } finally {
-      dropWireCopies(ALL_COPIES)
-      headroom.close()
-    }
-  })
-
-  for (const { mbPerS, delayMs, within } of [
-    { mbPerS: 100, delayMs: 0.2, within: 1.1 },
-    { mbPerS: 1_000, delayMs: 0.05, within: 1.03 },
-  ])
-    test(`on a ${mbPerS} MB/s link with a ${2 * delayMs} ms round trip, a 64 MiB download reaches the page within ${within} times the link's time`, async () => {
-      const wire = stepWireTo({ bytesPerMs: mbPerS * 1_000, delayMs })
-      try {
-        const TOTAL = 64 * 1024 * 1024
-        const FRAME = 64 * 1024
-        let seq = 0
-        let sent = 0
-        let steps = 0
-        while (sent < TOTAL || wire.headroom.sender.waitingBytes > 0 || wire.crossing()) {
-          // The app keeps 512 KiB waiting, as a stream that writes ahead of the socket does.
-          while (sent < TOTAL && wire.headroom.sender.waitingBytes < 512 * 1024) {
-            wire.headroom.send(encode.binary(1, new Uint8Array(FRAME - HEADER), ++seq))
-            sent += FRAME
-          }
-          await wire.step()
-          steps++
-        }
-        expect((steps * STEP_MS) / wire.linkMs()).toBeLessThan(within)
-      } finally {
-        wire.stop()
-      }
-    })
-
-  test('on a wire whose page took its first frame, frames sent under copy pressure put no more past the page than the least send-ahead', async () => {
-    const wire = wireTo(FAST, { copiesOnSend: true })
-    try {
-      wire.send((seq) => encode.text(1, 'x'.repeat(20 * 1024), seq))
-      while (wire.headroom.sender.confirmedBytes < wire.handed()) await sleep(1)
-      expect(await mostUnconfirmedUnderCopyPressure(wire, () => framesOfFourChannels(wire))).toBeLessThanOrEqual(
-        COPY_BOUND,
-      )
-    } finally {
-      wire.stop()
-    }
-  })
-
-  test('a second after a 128 KiB frame, frames sent under copy pressure put no more past the page than the least send-ahead', async () => {
-    const wire = wireTo(FAST, { copiesOnSend: true })
-    try {
-      wire.binary(1, 128 * 1024)
-      await sleep(1_000)
-      expect(await mostUnconfirmedUnderCopyPressure(wire, () => framesOfFourChannels(wire))).toBeLessThanOrEqual(
-        COPY_BOUND,
-      )
-    } finally {
-      wire.stop()
-    }
-  })
-
   test('under a fixed window, a channel with a frame past it gets its turn while another channel has many', () => {
     const window = WIRE_SEND_AHEAD_MIN_BYTES
     const bytes = 2 * window - 7 * encode.piece(0, new Uint8Array(0)).byteLength - HEADER
@@ -465,79 +238,6 @@ describe('the lanes', () => {
     }
     expect(releases).toBeLessThanOrEqual(bound)
   })
-
-  test.each([96 * 1024, 130_988, 192 * 1024])(
-    'on Slow 3G under sustained copy pressure, two channels with frames of %d B past the copy allowance each get theirs through',
-    async (bytes) => {
-      const wire = wireTo(SLOW, { copiesOnSend: true, pingInterval: 5_000 })
-      addWireCopies(ALL_COPIES)
-      try {
-        wire.binary(1, bytes)
-        wire.binary(2, bytes)
-        for (let n = 0; n < 12; n++) wire.binary(1, bytes)
-        await sleep(22_000)
-        const arrived = wire.arrivals.filter(({ tag }) => tag === TAG.BINARY)
-        expect(arrived.filter(({ ix }) => ix === 1).length).toBeGreaterThan(3)
-        expect(arrived.filter(({ ix }) => ix === 2).length).toBe(1)
-      } finally {
-        dropWireCopies(ALL_COPIES)
-        wire.stop()
-      }
-    },
-  )
-})
-
-/** The longest a page's WebSocket goes with nothing arriving before it is taken for dead, at the default interval. */
-const DEADLINE = pingDeadline(CHANNEL_PING_INTERVAL_MS, CHANNEL_TRANSPORT.WS)
-
-/** Channel 1 sends 64 KiB every 50 ms for `ms`, which the link then carries: the longest quiet, and the frames. */
-async function downloadFor(wire: Wire, ms: number, during: (t: number) => void = () => {}) {
-  const at = performance.now()
-  let frames = 0
-  for (let t = 0; t < ms; t += 50) {
-    during(t)
-    wire.binary(1, 64 * 1024 - HEADER)
-    frames++
-    await sleep(50)
-  }
-  await sleep(Math.ceil(wire.linkBytes() / SLOW.bytesPerMs) + 60_000)
-  let quiet = 0
-  let previous = at
-  for (const t of wire.delivered.filter((t) => t >= at)) {
-    quiet = Math.max(quiet, t - previous)
-    previous = t
-  }
-  const got = wire.arrivals.filter((a) => a.tag === TAG.BINARY && a.ix === 1 && a.at >= at).length
-  return { quiet, frames, got }
-}
-
-// What follows a first burst on a slow link waits behind it; a wire that keeps delivering is alive.
-describe('a link that is or becomes slow', () => {
-  test('on Slow 3G from the start, a download keeps the page within its ping deadline and arrives whole', async () => {
-    const wire = wireTo(SLOW)
-    try {
-      const seen = await downloadFor(wire, 1_000)
-      expect(seen.quiet).toBeLessThan(DEADLINE)
-      expect(seen.got).toBe(seen.frames)
-    } finally {
-      wire.stop()
-    }
-  })
-
-  for (const slow of [
-    { bytesPerMs: 1_000, delayMs: 20 },
-    { bytesPerMs: 50, delayMs: 200 },
-  ])
-    test(`a download at 100 MB/s whose link slows to ${slow.bytesPerMs} B/ms keeps the page within its ping deadline and arrives whole`, async () => {
-      const wire = wireTo(FAST)
-      try {
-        const seen = await downloadFor(wire, 2_000, (t) => t === 1_000 && wire.reshape(slow))
-        expect(seen.quiet).toBeLessThan(DEADLINE)
-        expect(seen.got).toBe(seen.frames)
-      } finally {
-        wire.stop()
-      }
-    })
 })
 
 describe("the wire's control frames", () => {

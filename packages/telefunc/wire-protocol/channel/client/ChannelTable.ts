@@ -6,8 +6,6 @@ import type { MuxChannel } from './ClientConnection.js'
 import { assert } from '../../../utils/assert.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
 import type { SequencedFrame } from '../../wire/frame.js'
-import { TAG } from '../../wire/tags.js'
-import { isLossy } from '../broadcastPayload.js'
 
 /** `closed`: unregistered, and kept till released, as the RECONCILE releasing it, or a new wire's leaving it out, ends
  *  it on the server. */
@@ -37,8 +35,6 @@ type ChannelRecord = {
   /** Each stream's lossy frame that a newer one may take the place of while it waits to go, by its seq: made at the
    *  channel's first lossy frame. */
   replaceable: Map<string, number> | null
-  /** When the newest seq arrived, if it is a lossy value. */
-  receivedAt: number | undefined
   /** An initial channel a RECONCILED left out, till its ATTACH_RESULT: what it queues waits, so its replay goes first. */
   awaited: boolean
   /** The last time a request carrying what it sent was refused: on `wire`, through `throughSeq`. */
@@ -128,8 +124,6 @@ class ChannelTable {
     // A seq already seen: a replay resends what arrived.
     if (seq <= prev) return null
     record.lastSeq = seq
-    const lossy = isLossyFrame(frame)
-    record.receivedAt = lossy ? performance.now() : undefined
     return seq
   }
 
@@ -153,7 +147,6 @@ class ChannelTable {
       state: { tag: 'pending' },
       replay,
       lastSeq: 0,
-      receivedAt: undefined,
       awaited: false,
       replaceable: null,
       refused: null,
@@ -224,12 +217,4 @@ class ChannelTable {
     this.closed.clear()
     this.released = []
   }
-}
-
-/** A send a newer one may have replaced, or a publish its publisher made lossy. */
-function isLossyFrame(frame: SequencedFrame): boolean {
-  if (frame.tag === TAG.TEXT || frame.tag === TAG.BINARY) return frame.lossy === true
-  if (frame.tag === TAG.PUBLISH) return isLossy(frame.text)
-  if (frame.tag === TAG.PUBLISH_BINARY) return isLossy(frame.data)
-  return false
 }

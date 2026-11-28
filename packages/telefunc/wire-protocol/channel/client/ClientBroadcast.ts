@@ -158,10 +158,7 @@ class ClientBroadcast<T = unknown, Publish = T> extends ClientChannel {
   }
 
   subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): Unsubscribe {
-    const listener: BroadcastBinaryListener = (payload, info) => {
-      if (isLossy(payload)) this._confirmSoon()
-      return callback(binaryData(payload), info)
-    }
+    const listener: BroadcastBinaryListener = (payload, info) => callback(binaryData(payload), info)
     return this.subscribeWired('binary', listener, options)
   }
 
@@ -214,10 +211,12 @@ class ClientBroadcast<T = unknown, Publish = T> extends ClientChannel {
 
   protected override dispatchDataFrame(frame: ChannelDataFrame): void {
     if (frame.tag === TAG.PUBLISH) {
+      if (isLossy(frame.text)) this._confirmSoon()
       this.onPeerPublish(frame.text, frame.info, frame.bytes)
       return
     }
     if (frame.tag === TAG.PUBLISH_BINARY) {
+      if (isLossy(frame.data)) this._confirmSoon()
       this.onPeerPublishBinary(frame.data as Uint8Array<ArrayBuffer>, frame.info, frame.bytes)
       return
     }
@@ -229,7 +228,7 @@ class ClientBroadcast<T = unknown, Publish = T> extends ClientChannel {
     this.receiveCredit.onPublishArrived()
     // The wire carries no type: `T` is what the key's publishers send, as its subscriber declares.
     const parsed = parse(payload) as ChannelData<T>
-    this.deliverPublish(this.subscribers.text.list(), () => parsed, wireInfo, bytes, isLossy(payload))
+    this.deliverPublish(this.subscribers.text.list(), () => parsed, wireInfo, bytes)
   }
 
   /** A `subscribeBinary()` listener reads the payload's mark, as Room's local ones read their own frames. */
@@ -237,18 +236,16 @@ class ClientBroadcast<T = unknown, Publish = T> extends ClientChannel {
     this.receiveCredit.onPublishArrived()
     const list = this.subscribers.binary.list()
     const valueFor = (i: number) => forListener(payload, list, i, HEADER + PUBLISH_BINARY_HEADER)
-    this.deliverPublish(list, valueFor, wireInfo, bytes, false)
+    this.deliverPublish(list, valueFor, wireInfo, bytes)
   }
 
   /** Calls each listener with its value, `valueFor` its index; an `Abort` stops the rest and leaves the publish
-   *  unconsumed. A listener's promise isn't awaited. A `lossy` one is confirmed soon, so the server tells whether the
-   *  page keeps up. */
+   *  unconsumed. A listener's promise isn't awaited. */
   private deliverPublish<V>(
     listeners: readonly Registration<(value: V, info: ChannelPublishInfo) => unknown>[],
     valueFor: (i: number) => V,
     wireInfo: WirePublishInfo,
     bytes: number,
-    lossy: boolean,
   ): void {
     const info = { key: this.key, seq: wireInfo.seq, timestamp: wireInfo.timestamp }
     for (const [i, { listener }] of listeners.entries()) {
@@ -261,7 +258,6 @@ class ClientBroadcast<T = unknown, Publish = T> extends ClientChannel {
       }
     }
     this.receiveCredit.onPublishConsumed(bytes)
-    if (lossy) this._confirmSoon()
   }
 }
 

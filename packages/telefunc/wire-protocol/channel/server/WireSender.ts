@@ -61,7 +61,7 @@ type WirePieces = { headroom: ServerHeadroom; receiver: ServerPieceReceiver }
 /** Sends a wire's frames in call order, but for a RECONCILED and an attach probe's answer, which go ahead of what waits
  *  for the RECONCILED; has its owner end the wire once the ledger refuses it what it holds beyond its channels. The
  *  peers of its channels send through it, and once the wire closed it drops what they send. */
-class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, WireQueue {
+class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   private readonly owner: WireSenderOwner
   private readonly wire: Wire
   private readonly transport: ServerTransport<unknown>
@@ -212,11 +212,6 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     for (const frame of this.held) this.hand(frame)
     this.held.length = 0
     this.heldBytes = 0
-  }
-
-  /** What the wire holds back for its page: what its transport holds, then what it holds for a RECONCILED. */
-  get queue(): WireQueue {
-    return this
   }
 
   waitingPublishes(ix: number): number {

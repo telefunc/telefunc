@@ -1,7 +1,15 @@
 export { testStreaming, testStreamingRequestContext }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl, skip } from '@brillout/test-e2e'
-import { resetCleanupState, getCleanupState, forceServerGc, serverHeapUsed, navigate, getResult } from '../../e2e-utils'
+import {
+  resetCleanupState,
+  getCleanupState,
+  forceServerGc,
+  serverHeapUsed,
+  navigate,
+  getResult,
+  expectServerError,
+} from '../../e2e-utils'
 import { parseChannelTransports } from '../../channelTransports'
 
 const stallWarning = 'read all of the streams a call returned concurrently'
@@ -21,7 +29,7 @@ function testStreamingRequestContext() {
   })
 }
 
-function testStreaming() {
+function testStreaming(inDocker = false) {
   test('streaming: ReadableStream return', async () => {
     await navigate(`${getServerUrl()}/streaming`)
 
@@ -414,14 +422,15 @@ function testStreaming() {
       expect(() => expectLog(stallWarning)).throw()
     })
 
-    test("streaming: a stream beside a returned file doesn't stop the file the call waits for", async () => {
+    test('streaming: a large stream stays bounded while the call waits for a slow file beside it', async () => {
       await navigate(`${getServerUrl()}/streaming`)
       await page.click('#test-file-beside-large-stream')
       await autoRetry(async () => {
         expect(await getResult('#streaming-result')).deep.equal({
-          fileBytes: 2 * 1024 * 1024,
-          streamBytes: 2 * 1024 * 1024,
+          fileBytes: [7],
+          streamBytes: 32 * 1024 * 1024,
         })
+        expect(Number((await getCleanupState()).fileBesideStreamPulls)).at.most(64)
       })
     })
   }
@@ -498,5 +507,48 @@ function testStreaming() {
     await autoRetry(async () => {
       expect((await getCleanupState()).generatorFinallyThrowsRan).toBe('true')
     })
+  })
+
+  if (process.env.PUBLIC_ENV__STREAM_TRANSPORT === 'channel') {
+    test('streaming: channel values arrive whole across parts and preserve empty response chunks', async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await page.click('#test-values-larger-than-a-part')
+      await autoRetry(
+        async () => {
+          expect(await getResult('#streaming-result')).deep.equal({
+            yielded: ['x * 3e6', 'done'],
+            resolved: 'y * 3e6',
+            chunks: [[1], [], [2]],
+          })
+        },
+        { timeout: 20_000 },
+      )
+    })
+
+    test("streaming: an upload chunk that isn't a Uint8Array fails the upload, and the page's console says so", async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await page.click('#test-upload-chunk-not-bytes')
+      await autoRetry(async () => {
+        const result = await getResult('#streaming-result')
+        expect(result.read).not.toBe('read whole')
+        expect(result.call === 'resolved' ? result.read : result.call).toBeTruthy()
+      })
+      expectLog('Stream chunks given to a telefunction must be Uint8Array.', {
+        filter: (log) => log.logSource === 'Browser Error',
+      })
+    })
+  }
+
+  test('streaming: a call whose stream is returned beside a value that fails to serialize rejects as a bug, and the stream is cancelled', async () => {
+    await navigate(`${getServerUrl()}/streaming`)
+    await resetCleanupState()
+    await page.click('#test-stream-then-circular')
+    await autoRetry(async () => {
+      expect((await getResult('#streaming-result')).error).toContain('Internal Server Error')
+    })
+    await autoRetry(async () => {
+      expect((await getCleanupState()).streamThenCircularCancelled).toBe('true')
+    })
+    expectServerError('Cannot serialize value returned by telefunction onStreamThenCircular()', inDocker)
   })
 }

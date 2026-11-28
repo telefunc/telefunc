@@ -33,11 +33,11 @@ class Telefunc {
 }
 
 function telefunc(): TelefuncServe {
-  const { hooks, getNamespace } = getTelefuncChannelOptions({
+  const { hooks, ...options } = getTelefuncChannelOptions({
     terminate: terminateDenoPeer,
     copiesOnSend: true,
   })
-  const ws = crossws({ getNamespace, hooks: denoHooks(hooks) })
+  const ws = crossws({ ...options, hooks: denoHooks(hooks) })
 
   return {
     async serve({ request, info, context }: ServeInput): Promise<Response | undefined> {

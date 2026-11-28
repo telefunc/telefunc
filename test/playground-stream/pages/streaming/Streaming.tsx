@@ -32,6 +32,11 @@ import {
   onReturnFinishedAndEndlessStreams,
   onReturnFailingStream,
   onGeneratorFinallyThrows,
+  onYieldLargeString,
+  onReturnPromiseOfLargeString,
+  onReturnStreamWithEmptyChunk,
+  onStreamThenCircular,
+  onReadUpload,
   onReturnAsyncGenerator as onNextCall,
 } from './Streaming.telefunc'
 import { Abort as TelefuncAbort, abort, withContext } from 'telefunc/client'
@@ -821,10 +826,11 @@ function Streaming() {
         onClick={async () => {
           setResult('')
           const { file, stream } = await onReturnFileBesideLargeStream()
-          setResult(JSON.stringify({ fileBytes: file.size, streamBytes: await byteCount(stream) }))
+          const fileBytes = Array.from(new Uint8Array(await file.arrayBuffer()))
+          setResult(JSON.stringify({ fileBytes, streamBytes: await byteCount(stream) }))
         }}
       >
-        A large file beside a large stream
+        A slow file beside a large stream
       </button>
 
       <button
@@ -884,6 +890,67 @@ function Streaming() {
         }}
       >
         One 256 MiB chunk
+      </button>
+
+      <button
+        id="test-values-larger-than-a-part"
+        onClick={async () => {
+          setResult('')
+          const yielded: string[] = []
+          for await (const value of onYieldLargeString()) yielded.push(value)
+          const { promise } = await onReturnPromiseOfLargeString()
+          const resolved = await promise
+          const chunks: number[][] = []
+          for await (const chunk of await onReturnStreamWithEmptyChunk()) chunks.push(Array.from(chunk))
+          setResult(
+            JSON.stringify({
+              yielded: yielded.map((value) => (value === 'x'.repeat(3_000_000) ? 'x * 3e6' : value)),
+              resolved: resolved === 'y'.repeat(3_000_000) ? 'y * 3e6' : resolved.length,
+              chunks,
+            }),
+          )
+        }}
+      >
+        Values larger than a channel part
+      </button>
+
+      <button
+        id="test-stream-then-circular"
+        onClick={async () => {
+          setResult('')
+          try {
+            await onStreamThenCircular()
+            setResult(JSON.stringify({ error: 'none' }))
+          } catch (err) {
+            setResult(JSON.stringify({ error: (err as Error).message }))
+          }
+        }}
+      >
+        Stream beside a value that can't be serialized
+      </button>
+
+      <button
+        id="test-upload-chunk-not-bytes"
+        onClick={async () => {
+          setResult('')
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              // A string, as a JavaScript app enqueues one.
+              controller.enqueue('str' as unknown as Uint8Array)
+              controller.close()
+            },
+          })
+          let call = 'resolved'
+          let read = ''
+          try {
+            read = await onReadUpload(stream)
+          } catch (err) {
+            call = (err as Error).message
+          }
+          setResult(JSON.stringify({ call, read }))
+        }}
+      >
+        Upload a chunk that isn't a Uint8Array
       </button>
 
       {(['finish-first', 'cancel-first'] as const).map((order) => (

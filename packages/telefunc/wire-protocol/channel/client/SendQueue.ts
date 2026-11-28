@@ -122,17 +122,17 @@ class SendQueue {
   }
 
   /** Sends the frame `frameOf` makes for `channel` without a seq, or holds it as `send` does: a late WINDOW is still
-   *  right, its limit cumulative. A WINDOW goes by the arrival of the newest seq it names. False, sending nothing, once
-   *  the channel sends nothing more. */
+   *  right, its limit cumulative. A WINDOW goes with `receivedAt`, the arrival of the newest seq it names, if it is a
+   *  lossy value. False, sending nothing, once the channel sends nothing more. */
   sendUnsequenced(
     channel: MuxChannel,
     kind: OutboundFrameKind,
     frameOf: (record: ChannelRecord) => Uint8Array<ArrayBuffer>,
+    receivedAt?: number,
   ): boolean {
     const record = this.channels.of(channel)
     if (record === undefined) return false
     const frame = frameOf(record)
-    const receivedAt = frame[0] === TAG.WINDOW ? record.receivedAt : undefined
     if (!this.canSendImmediately(record)) {
       this.settleQueue().push({ frame, kind, channelIx: record.ix, waitingSince: performance.now(), receivedAt })
       return true

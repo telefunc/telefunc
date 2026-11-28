@@ -56,30 +56,17 @@ class StreamTruncatedError extends Error {
   }
 }
 
-/**
- * Pull-based byte-counting reader of a request body in the binary frame protocol.
- *
- * Wire format: [u32 metadata length][metadata bytes][file0 bytes][file1 bytes]...
- * File sizes are known from the metadata — no boundary scanning needed,
- * just read exact byte counts sequentially.
- *
- * Accepts either a Web `ReadableStream` or a Node `Readable`. The caller picks —
- * the Node `serve()` adapter passes `IncomingMessage` directly to skip the
- * `Readable.toWeb` round-trip (whose pure-JS `dequeueValue` dominates CPU on hot
- * SSE / binary-RPC paths); other adapters pass `request.body`. Both shapes
- * collapse to one `ChunkSource` so the rest of the class is
- * source-agnostic, and both can be let go of with a read under way (`letGo`).
- *
- * Fields use TS `private` rather than JS `#private`: the inner read loop touches
- * `buffer`/`source` per chunk, and `#fields` compile to per-access `WeakMap.get/set`
- * which dominates CPU on hot streaming paths. Plain property access is cheap.
- */
+/** Reads [u32 metadata length][metadata bytes][file0 bytes][file1 bytes]... from a Web or Node stream, using the file
+ *  sizes declared in the metadata. */
 class BodyReader {
   private readonly source: ChunkSource
   private buffer: Uint8Array<ArrayBuffer> = EMPTY
   /** The parts of the frame `readExact` collects, on the reader so that `discardRest` lets go of them while it waits. */
   private collected: Uint8Array<ArrayBuffer>[] = []
   private readonly fileSizes = new Map<number, number>()
+  /** The bytes the source yielded, and where in them the files begin. */
+  private bytesRead = 0
+  private filesStart = 0
   /** The files whose bytes a File can still read: neither read to their end, cancelled or failed, nor let go of. Each
    *  one's callbacks run once it leaves. */
   private readonly unread = new Map<number, Array<() => void>>()
@@ -191,8 +178,9 @@ class BodyReader {
   /** Reads the rest of the body from now on, at the answer of a call that a value it returned still holds, or at the
    *  call's end (`endCall`): the client's upload ends, so that a browser, which delivers an answer only once it has sent
    *  the whole body, gets it. While a file is left to read, each chunk is kept on the reader's memory for the file reads,
-   *  which take them in order as they read; a chunk it refuses is dropped, and so is every one after it: a file read that
-   *  reaches them fails, saying why. What is kept goes once no file is left to read. */
+   *  which take them in order as they read; a chunk it refuses is dropped, with what it kept of that chunk's file, and so
+   *  is every one after it: a file read that reaches them fails, saying why. What is kept goes once no file is left to
+   *  read. */
   keepRest(): void {
     if (this.readOff !== null || this.filesEndedBy !== null) return
     if (this.unread.size > 0) this.kept = { memory: this.memory(), chunks: [], phase: 'reading', more: null }
@@ -215,6 +203,7 @@ class BodyReader {
     try {
       if (this.reading !== null) await this.reading.catch(() => {})
       if (this.kept === null) this.buffer = EMPTY
+      else this.dropGone()
       if (this.stop) return
       for (let chunk = await this.readChunk(); chunk !== null; chunk = await this.readChunk()) this.keep(chunk)
     } finally {
@@ -229,9 +218,69 @@ class BodyReader {
   private keep(chunk: Uint8Array<ArrayBuffer>): void {
     const kept = this.kept
     if (kept === null || kept.phase !== 'reading') return
-    if (kept.memory.tryHold(chunk.length)) kept.chunks.push(chunk)
-    else kept.phase = 'refused'
+    const skipped = this.holder === null ? this.skipGoneBytes(chunk.length) : 0
+    const length = chunk.length - skipped
+    if (length === 0) return
+    if (kept.memory.tryHold(length)) {
+      kept.chunks.push(skipped === 0 ? chunk : new Uint8Array(chunk.subarray(skipped)))
+    } else {
+      this.refuseKept(kept, this.bytesRead - length)
+    }
     wakeKept(kept)
+  }
+
+  /** Drops the buffered prefix of files that can no longer be read, while no pull holds the position. */
+  private dropGone(): void {
+    const kept = this.kept
+    if (kept === null || this.holder !== null || this.unread.has(this.next)) return
+    const skipped = this.skipGoneBytes(this.buffer.length)
+    if (skipped > 0) {
+      this.buffer = skipped === this.buffer.length ? EMPTY : new Uint8Array(this.buffer.subarray(skipped))
+    }
+    for (let chunk = kept.chunks[0]; chunk !== undefined; chunk = kept.chunks[0]) {
+      const skipped = this.skipGoneBytes(chunk.length)
+      if (skipped === 0) return
+      kept.memory.letGo(skipped)
+      if (skipped < chunk.length) {
+        kept.chunks[0] = new Uint8Array(chunk.subarray(skipped))
+        return
+      }
+      kept.chunks.shift()
+    }
+  }
+
+  /** Advances the file position across up to `length` bytes belonging to files that are gone. */
+  private skipGoneBytes(length: number): number {
+    let skipped = 0
+    while (!this.unread.has(this.next) && this.fileSizes.has(this.next)) {
+      const left = this.leftOfNext()
+      const take = Math.min(left, length - skipped)
+      skipped += take
+      this.left = left - take
+      if (this.left > 0) break
+      this.next++
+      this.left = undefined
+    }
+    return skipped
+  }
+
+  /** The read-off keeps no more from `end`, the body's offset where it stopped: what it keeps of the file there goes, as
+   *  no read of that file can reach its end. The files it keeps whole stay to be read. */
+  private refuseKept(kept: Kept, end: number): void {
+    kept.phase = 'refused'
+    let partial = end - this.filesStart
+    for (let index = 0; partial >= (this.fileSizes.get(index) ?? Infinity); index++) {
+      partial -= this.fileSizes.get(index) ?? 0
+    }
+    while (partial > 0) {
+      const last = kept.chunks.pop()
+      if (last === undefined) return
+      const cut = Math.min(partial, last.length)
+      kept.memory.letGo(cut)
+      // Copied, so that the bytes cut go with their buffer.
+      if (cut < last.length) kept.chunks.push(new Uint8Array(last.subarray(0, last.length - cut)))
+      partial -= cut
+    }
   }
 
   /** The read-off's next chunk, for `by`'s read: null where it drops what it reads, as at the body's end; at the end of
@@ -286,6 +335,7 @@ class BodyReader {
   /** Registers a file's size, as the call's metadata declares it, while the call is revived: the file, as its File reads
    *  it. */
   registerFile(index: number, size: number): RequestFile {
+    if (this.fileSizes.size === 0) this.filesStart = this.bytesRead - this.buffer.length
     this.fileSizes.set(index, size)
     this.unread.set(index, [])
     return {
@@ -308,6 +358,7 @@ class BodyReader {
     this.files.get(index)?.dropAhead()
     for (const callback of onGone) callback()
     if (this.unread.size === 0) this.dropKept()
+    else this.dropGone()
   }
 
   /**
@@ -319,7 +370,7 @@ class BodyReader {
    * its own read takes it, and the later read waits until the piece is read, the reader releases its lock, the file is
    * cancelled, or the files end. One the app began and left without a reader may take a reader again: its rest is read
    * for it, kept within the reader's memory, and the later read goes on; where its memory refuses a piece, the file
-   * fails, saying why, and the rest of it is dropped. A cancelled file's bytes are dropped once a later read passes it.
+   * fails, saying why, and the rest of it is dropped. A later file read or the body drain drops the bytes of cancelled files it passes.
    * The files end at the body's let-go, at a read that fails, and where the client leaves.
    */
   private fileStream(index: number): ReadableStream<Uint8Array<ArrayBuffer>> {
@@ -503,6 +554,7 @@ class BodyReader {
   /** Lets go of the position, and wakes the reads that wait for it. */
   private release(): void {
     this.holder = null
+    this.dropGone()
     this.wake()
   }
 
@@ -546,6 +598,7 @@ class BodyReader {
         this.source.letGo()
         return null
       }
+      this.bytesRead += value.length
       this.onChunk?.()
       return value
     } catch (error) {

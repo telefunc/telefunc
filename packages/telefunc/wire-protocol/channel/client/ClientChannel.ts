@@ -33,7 +33,7 @@ import {
   type ChannelFrame,
   type SequencedEncoder,
 } from '../../wire/frame.js'
-import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
+import { TAG, countsCredit, isChannelCtrlTag, isSequencedTag } from '../../wire/tags.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
@@ -102,10 +102,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  different types, each with `parse(text)` of the answer. */
   protected pendingAcks = new Map<number, Deferred<any>>()
   protected selfTime = new SelfTime()
-  /** Paces fire-and-forget TEXT, BINARY and PUBLISH sends to what the server grants; see `constants.ts`. */
+  /** Paces fire-and-forget TEXT and BINARY sends to what the server grants; see `constants.ts`. */
   protected sendCredit: SendCredit
   protected receiveCredit: ReceiveCredit
-  /** @internal Its credits as its connection drives them across wires. */
+  /** @internal What it declares each time it attaches: its credits and, for a broadcast, its want. */
   readonly _attach: ChannelAttach
   /** Sends this page's lossy send that waits for the server to grant more credit; a newer one takes its place. */
   private heldLossy: (() => void) | null = null
@@ -117,8 +117,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     // Built before the connection: registering the channel fits its credits to the replay buffers.
     const owner: CreditOwner = {
       // A closed channel's server ends its sends with the close, so the channel grants it no more credit.
-      sendByteLimit: (limit, urgency) => {
-        if (!this.isClosed) this.connection.sendByteLimit(this, limit, urgency)
+      sendByteLimit: (limit, urgency, receivedAt) => {
+        if (!this.isClosed) this.connection.sendByteLimit(this, limit, urgency, receivedAt)
       },
       sendMessageLimit: (limit, urgency) => {
         if (!this.isClosed) this.connection.sendMessageLimit(this, limit, urgency)
@@ -386,6 +386,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal — Entry point for every per-channel wire frame. The connection routes
    *  here for any frame carrying an index; this method then splits ctrl vs data. */
   _dispatchFrame(frame: ChannelFrame): void {
+    if (isSequencedTag(frame.tag)) this.receiveCredit.onSequencedArrival()
     if (isChannelCtrlTag(frame.tag)) {
       this.dispatchCtrl(frame as ChannelCtrlFrame)
       return
@@ -401,15 +402,15 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected dispatchDataFrame(frame: ChannelDataFrame): void {
     switch (frame.tag) {
       case TAG.TEXT:
-        this.onPeerMessage(frame.text, frame.bytes)
         if (frame.lossy) this.receiveCredit.confirmSoon()
+        this.onPeerMessage(frame.text, frame.bytes)
         return
       case TAG.TEXT_ACK_REQ:
         void this.onPeerAckReqMessage(frame.text, frame.seq)
         return
       case TAG.BINARY:
-        this.onPeerBinaryMessage(frame.data as Uint8Array<ArrayBuffer>, frame.bytes)
         if (frame.lossy) this.receiveCredit.confirmSoon()
+        this.onPeerBinaryMessage(frame.data as Uint8Array<ArrayBuffer>, frame.bytes)
         return
       case TAG.BINARY_ACK_REQ:
         void this.onPeerBinaryAckReqMessage(frame.data, frame.seq)

@@ -574,7 +574,7 @@ price.subscribe((value, info) => showPrice(value, info.seq))
 | `publishBinary(data)` | Publish raw binary to every subscriber. Returns a receipt. |
 | `publish(data, { lossy: true })` | Publish where only the newest matters. A client that falls behind skips to the newest. |
 | `publishBinary(data, { lossy: true })` | Publish binary where only the newest matters. |
-| `subscribeBinary(cb)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function with the same `opened` promise as `subscribe(cb)`'s. |
+| `subscribeBinary(cb)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function whose `opened` promise follows the same rules. |
 | `messages({ signal })` | Receive text and binary messages, each with its `info`, in a `for await` loop. |
 | `onOpen(cb)` | Called when the channel opens. |
 | `onClose(cb)` | Called when the channel closes. |
@@ -588,8 +588,6 @@ price.subscribe((value, info) => showPrice(value, info.seq))
 > The instance is bound to its `key`, so `publish(data)` / `subscribe(cb)` take no key. The static <Link href="#broadcast"><code>Broadcast.publish(key, data)</code></Link> / `Broadcast.subscribe(key, cb)` have no `onOpen` / `onClose` / `close` / `abort` since there's no instance to manage.
 
 > Where only the newest message matters, such as a price, publish it with `lossy: true`: a client that falls behind then skips to the newest (see <Link href="#lossy-broadcast" />).
-
-> On Cloudflare, a subscription in effect reaches other locations' publishes once they see it, see <Link href="/stream/cloudflare#delivery-guarantees">delivery guarantees</Link>.
 
 
 ## `new BroadcastChannel()` VS `new Channel()`
@@ -637,12 +635,10 @@ Channels and broadcasts signal failure through five errors:
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
 | `NetworkError` (`isChannel: true`) | Connection lost beyond `reconnectTimeout`, replay evicted while offline, or, on the server, the user left the page | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
-| `ChannelClosedError` (broadcast) | On the client, where a `BroadcastChannel`'s subscription didn't take effect on the server, or ended there after it took effect | Closed | In both cases, call its telefunction again and subscribe to the broadcast it returns |
-| `ChannelOverflowError` (`send()`) | The message would pass the default per-channel limit of 320 MiB, or `maxMemory`. For a client's `send(data, { ack: true })`, also where the server can't hold the answer | **Open**; only that message is lost, or for `{ ack: true }` its answer: the server's listener may have run, so a retry can repeat it | `await` each `send()` before the next. Split a message past the per-channel limit: awaiting doesn't help it, and neither does `maxMemory`. Raise `maxMemory` only where all channels together hold too much |
-| `ChannelOverflowError` (closed) | A `BroadcastChannel`'s client fell behind what the server holds for it; for lossy publishes, the server couldn't hold even the newest one. For any channel, its client sent more than the server holds while your `listen()` callbacks or a stream's reader work on what it sent, or had so many `send(data, { ack: true })` or `publish()` calls waiting for their answers at once that the server couldn't hold even their refusals | Closed | Call its telefunction again, then publish with `lossy: true`, `await` each send and acknowledged call before the next, or raise `maxMemory` |
-| `ChannelOverflowError` (`messages()`) | Its loop fell over 2 MiB behind the publishes, past its next message, or `maxMemory` is held and it's behind | The loop ends, the broadcast stays open | Handle each message faster, or use `subscribe()` |
-| `ChannelOverflowError` (`publish()`) | With no Redis or other transport installed, a `subscribe()` callback published more than 320 MiB before its first `await` | Open | Publish less from the callback |
-| `BackendError` (`publish()`) | With <Link href="/redis">`@telefunc/redis`</Link>, Redis couldn't run the publish | Open | Read `err.code` and `err.outcome`, see <Link href="/redis#errors">Redis errors</Link> |
+| `ChannelOverflowError` | A `send()` hit the server's memory limit | **Open** | `await` your sends (only that call rejects; `{ ack: true }` may have run already) |
+| `ChannelOverflowError` | Client messages outran the server's memory limit | Closed | Recreate the channel; `await` sends and finish `listen()` callbacks sooner |
+| `ChannelOverflowError` | A broadcast subscriber fell behind | Closed | Rejoin, read faster, or use `lossy: true` |
+| `BackendError` (`publish()`) | With <Link href="/redis">`@telefunc/redis`</Link>, Redis couldn't run the publish | Open | See <Link href="/redis#errors">Redis errors</Link> |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `null`).
 

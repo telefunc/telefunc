@@ -12,8 +12,9 @@ type ChannelAttachOptions = {
   receiveCredit: ReceiveCredit
 }
 
-/** A page channel's credits as its connection drives them across wires: what the channel's RECONCILE entry carries,
- *  the replay buffers' caps, and a wire turning to batch POSTs or joining an upgrade. */
+/** What a page channel declares each time it attaches, as its connection drives it across wires: its credits and a
+ *  broadcast's want, which its RECONCILE entry carries, the replay buffers' caps, and a wire turning to batch POSTs or
+ *  joining an upgrade. */
 class ChannelAttach {
   private readonly channel: { readonly isClosed: boolean }
   readonly sendCredit: SendCredit
@@ -33,8 +34,8 @@ class ChannelAttach {
   }
 
   /** The channel's entry in the RECONCILE sent each time it attaches to `uplink`'s wire: a probe of a path it hasn't
-   *  measured, and a broadcast's want. A page of broadcasts alone measures its round trip so: a lossy one's
-   *  `behindAfter` needs it. */
+   *  measured, and a broadcast's want. A page of broadcasts alone measures its round trip so: how long a frame may wait
+   *  before the page counts as behind (`behindAfter`) needs it. */
   state(uplink: Uplink): AttachState {
     const probe = this.receiveCredit.probeAttach(uplink.roundTrips)
     return {

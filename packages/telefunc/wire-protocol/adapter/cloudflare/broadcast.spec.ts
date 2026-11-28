@@ -597,8 +597,8 @@ describe.runIf(hasNodeSqlite)("a subscriber's `ready` on Cloudflare", () => {
       servesRequest(w.sessions.first, call)
       const broadcast = new ServerBroadcast<string>({ key: 'room:test' })
       // As `carryChannel` stamps the broadcast a call returns.
-      broadcast._end._callRequest = returning
-      getChannelMux().registerChannel(broadcast._end, ATTACHABLE_NOW)
+      broadcast._end._carriedBy = returning
+      getChannelMux().registerChannel(broadcast._end, ATTACHABLE_NOW, 'page')
       const inEffect = getChannelMux().applyCallWants(call, [
         { channel: broadcast.id, version: 1, text: true, binary: false },
       ])

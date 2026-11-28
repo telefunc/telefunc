@@ -1,12 +1,19 @@
 import { ATTACHABLE_NOW } from './ServerChannel.js'
-import { afterEach, describe, expect, it } from 'vitest'
-import { config } from '../../../node/server/serverConfig.js'
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
+import { config, getChannelConfig } from '../../../node/server/serverConfig.js'
+import { getChannelMux } from './ChannelMux.js'
+import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
+import { decodeChannelFrame } from '../../wire/decode.fixture.js'
+import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
+import { hold, releaseHolder } from './channelMemory.js'
+import { ChannelOverflowError } from '../channelErrors.js'
 import { ServerBroadcastEnd } from './ServerBroadcastEnd.js'
 import { IndexedPeer } from './IndexedPeer.js'
-import type { ServerReplay } from './ServerReplay.js'
-import { publishBody } from './PublishBody.js'
+import { ServerReplay } from './ServerReplay.js'
+import { PublishBody, publishBody } from './PublishBody.js'
 import { disposeBackend } from '../../backend/install.js'
-import { decode } from '../../wire/frame.js'
+import { decode, encode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 
 // A file of its own: `config.channel` is set before the first channel exists.
@@ -45,12 +52,14 @@ function awayEnd(): ServerBroadcastEnd {
       deliveredBefore: () => 0,
       terminate() {},
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-      queue: {
-        waitingPublishes: () => Number.POSITIVE_INFINITY,
-        dropWaitingPublishes() {},
-        dropUngiven: () => 0,
-        dropWaitingFrom() {},
+      sendPublish(index, seq, body) {
+        this.send(encode.publishTo(index, seq))
+        this.send(body)
       },
+      waitingPublishes: () => Number.POSITIVE_INFINITY,
+      dropWaitingPublishes() {},
+      dropUngiven: () => 0,
+      dropWaitingFrom() {},
     },
     index: 7,
     replay: replayOf(end),
@@ -114,9 +123,9 @@ describe.each(Object.entries(PAGES))('to a page that %s', (page, { behindAfter, 
 
 /** An attached page's end whose page is behind once a publish waits longer than `behindAfter` for its confirmation, with
  *  `waiting` of its newest publishes not yet taken by its wire. */
-function pageEnd(behindAfter: number, waiting: number) {
-  const end = new ServerBroadcastEnd()
-  end.setOwner({ _onPagePublish() {}, _onPagePublishBinary() {} })
+function pageEnd(behindAfter: number, waiting: number, broadcast?: ServerBroadcast<string>) {
+  const end = broadcast?._end ?? new ServerBroadcastEnd()
+  if (!broadcast) end.setOwner({ _onPagePublish() {}, _onPagePublishBinary() {} })
   end._registerChannel(ATTACHABLE_NOW)
   const peer = new IndexedPeer({
     sender: {
@@ -127,17 +136,19 @@ function pageEnd(behindAfter: number, waiting: number) {
       deliveredBefore: () => 0,
       terminate() {},
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-      queue: {
-        waitingPublishes: () => waiting,
-        dropWaitingPublishes() {},
-        dropUngiven: () => 0,
-        dropWaitingFrom() {},
+      sendPublish(index, seq, body) {
+        this.send(encode.publishTo(index, seq))
+        this.send(body)
       },
+      waitingPublishes: () => waiting,
+      dropWaitingPublishes() {},
+      dropUngiven: () => 0,
+      dropWaitingFrom() {},
     },
     index: 7,
     replay: replayOf(end),
   })
-  end._attachPeer(peer)
+  end._attachPeer(peer, { want: { version: 1, text: true, binary: true } })
   return { end, peer }
 }
 
@@ -163,5 +174,163 @@ function mulberry32(seed: number): () => number {
     let t = Math.imul(state ^ (state >>> 15), 1 | state)
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+it('a call without a session token applies no want to any channel, though the broadcast came from a call without one', () => {
+  const mux = getChannelMux()
+  const end = new ServerBroadcastEnd()
+  let wants = 0
+  end.setOwner({
+    _onPagePublish() {},
+    _onPagePublishBinary() {},
+    _onPageWantParts() {
+      wants++
+    },
+  })
+  const call = new Request('https://example.test/_telefunc', { method: 'POST' })
+  end._carriedBy = call
+  mux.registerChannel(end, ATTACHABLE_NOW)
+  expect(
+    mux.applyCallWants(call, [{ channel: end.id, version: 1, text: false, binary: false, parts: {} }]),
+  ).toBeUndefined()
+  expect(wants).toBe(0)
+  end.abort()
+})
+
+it('partial confirmation and dropping a stale lossy publish keep the newest route and timing', () => {
+  vi.useFakeTimers({ toFake: ['performance'] })
+  const holder = { heldBytes: 0 }
+  const replay = new ServerReplay(holder)
+  const bodies = [1, 3, 4, 5, 6].map(
+    (seq) => new PublishBody(encode.publishBinary(Uint8Array.of(seq), { seq, timestamp: 1 }), 'cursor', true),
+  )
+  const push = (index: number, body: PublishBody | undefined) => {
+    if (body === undefined) throw new Error('missing test publish')
+    replay.pushPublish(replay.nextSeq(), index, body)
+  }
+  try {
+    push(7, bodies[0])
+    vi.advanceTimersByTime(50)
+    replay.acknowledge(1)
+    expect(replay.leastConfirmMs).toBe(50)
+
+    const textSeq = replay.nextSeq()
+    replay.push(textSeq, encode.text(7, '"plain"', textSeq))
+    push(300, bodies[1])
+    vi.advanceTimersByTime(1)
+    push(301, bodies[2])
+    vi.advanceTimersByTime(1)
+    push(302, bodies[3])
+    vi.advanceTimersByTime(1)
+    push(303, bodies[4])
+    vi.advanceTimersByTime(53)
+
+    replay.acknowledge(4, 3)
+    // The extra 24-byte publish and 14-byte text frame took 2 ms beyond the baseline after subtracting the hold.
+    expect(replay.confirmRate).toBe(19)
+    // The 24-byte baseline publish took about 1.26 ms at that rate.
+    expect(replay.leastConfirmMs).toBeCloseTo(48.74)
+    replay.dropStaleLossy(2)
+    const [route, body] = replay.getAfter(4)
+    if (route === undefined) throw new Error('missing route')
+    expect(decode(route)).toMatchObject({ tag: TAG.PUBLISH_TO, index: 303, seq: 6 })
+    expect(body).toBe(bodies[4]?.frame)
+    expect(bodies.map((publish) => publish.refs)).toEqual([0, 0, 0, 0, 1])
+    expect(replay.unconfirmedSince).toBe(53)
+
+    replay.acknowledge(6)
+    expect(replay.isEmpty).toBe(true)
+    expect(holder.heldBytes).toBe(0)
+  } finally {
+    replay.dispose()
+    vi.useRealTimers()
+  }
+})
+
+const ledger = getGlobalObject('channelMemory.ts', { total: 0 })
+
+for (const lossy of [false, true]) {
+  it(`a broadcast whose ${lossy ? 'lossy' : 'plain'} publish doesn't fit under the budget closes, and the server holds no more than it`, async () => {
+    const key = crypto.randomUUID()
+    const broadcast = new ServerBroadcast<string>({ key })
+    const { end } = pageEnd(Infinity, 2, broadcast)
+    const filler = { heldBytes: 0 }
+    const { maxMemory } = getChannelConfig()
+    hold(filler, maxMemory - ledger.total - 300_000)
+    try {
+      expect(await Broadcast.publish(key, 'a'.repeat(400_000), { lossy })).toMatchObject({ key })
+      expect(ledger.total).toBeLessThanOrEqual(maxMemory)
+      expect(await broadcast.closed).toBeInstanceOf(ChannelOverflowError)
+    } finally {
+      releaseHolder(filler)
+      end._release()
+    }
+  })
+}
+
+for (const kind of ['text', 'binary'] as const) {
+  for (const publishes of ['plain', 'lossy'] as const) {
+    it(`on a WebSocket, a ${publishes} ${kind} publish after a subscriber's close() near the budget costs it nothing it was owed`, async () => {
+      const key = crypto.randomUUID()
+      const broadcast = new ServerBroadcast<string>({ key })
+      const end = broadcast._end
+      end._registerChannel(ATTACHABLE_NOW)
+      onTestFinished(() => {
+        if (!end.isClosed) end.abort()
+        end._release()
+      })
+      const headroom = new ServerHeadroom({ socket: { send() {}, bufferedAmount: 0 }, pingInterval: 5_000 })
+      onTestFinished(() => headroom.close())
+      const replay = replayOf(end)
+      const peer = new IndexedPeer({
+        sender: {
+          send: (frame: Uint8Array<ArrayBuffer>) => headroom.send(frame),
+          sendPublish(index, seq, body) {
+            this.send(encode.publishTo(index, seq))
+            this.send(body)
+          },
+          carry() {},
+          behindAfter: () => Infinity,
+          deliveredBefore: () => 0,
+          bufferedAmount: () => 0,
+          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+          terminate() {},
+          waitingPublishes: (index) => headroom.waitingPublishes(index),
+          dropWaitingPublishes: (index, seqs) => headroom.dropWaitingPublishes(index, seqs),
+          dropWaitingFrom: (index, mode) => headroom.dropWaitingFrom(index, mode),
+          dropUngiven: (index) => headroom.dropUngiven(index),
+        },
+        index: 0,
+        replay,
+      })
+      end._attachPeer(peer, { want: { version: 1, text: kind === 'text', binary: kind === 'binary' } })
+      const lossy = publishes === 'lossy'
+      const publish = (name: string, bytes: number) => {
+        const value = name + 'x'.repeat(bytes)
+        return kind === 'text'
+          ? Broadcast.publish(key, value, { lossy })
+          : Broadcast.publishBinary(key, new TextEncoder().encode(value), { lossy })
+      }
+      for (const name of ['p1', 'p2', 'p3']) await publish(name, 600_000)
+      const closing = broadcast.close()
+      const after = lossy ? 900_000 : 600_000
+      const filler = { heldBytes: 0 }
+      hold(filler, (getChannelConfig().maxMemory * 7) / 8 - ledger.total - after / 2)
+      try {
+        await publish('p4', after)
+        const owed = replay.getAfter(0).map(decode)
+        const delivered = owed.flatMap((frame) =>
+          frame.tag === TAG.PUBLISH || frame.tag === TAG.PUBLISH_BINARY ? [frame.info.seq] : [],
+        )
+        expect(delivered).toEqual(lossy ? [1, 3] : [1, 2, 3])
+        expect(owed.at(-1)?.tag).toBe(TAG.CLOSE)
+        end._dispatchFrame(decodeChannelFrame(encode.closeAck(0, replay.seq, 1)))
+        end._dispatchFrame(decodeChannelFrame(encode.closeDone(0, replay.seq, 2)))
+        await expect(closing).resolves.toBeNull()
+      } finally {
+        releaseHolder(filler)
+      }
+    })
   }
 }

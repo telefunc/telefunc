@@ -53,7 +53,7 @@ interface MuxChannel {
   _onTransportDisconnect(): void
   /** Its connection is gone for good. */
   _onConnectionLost(err: Error): void
-  /** Its credits as the connection drives them across wires. */
+  /** What it declares each time it attaches: its credits and, for a broadcast, its want. */
   readonly _attach: ChannelAttach
 }
 
@@ -97,7 +97,7 @@ interface MuxConnection {
   sendCloseAck(channel: MuxChannel): void
   sendCloseDone(channel: MuxChannel): void
   sendCloseTimedOut(channel: MuxChannel): void
-  sendByteLimit(channel: MuxChannel, limit: number, urgency: Urgency): void
+  sendByteLimit(channel: MuxChannel, limit: number, urgency: Urgency, receivedAt?: number): void
   sendMessageLimit(channel: MuxChannel, limit: number, urgency: Urgency): void
   sendBdpPing(channel: MuxChannel, probe: number): void
   sendBdpPingAck(channel: MuxChannel, ack: BdpPingAck): void
@@ -152,8 +152,8 @@ type ClientChannelTransport = {
   sendFrame(frame: OutboundFrame): void
   /** How many bytes of data frames it accepts now, `Infinity` if nothing bounds them. Other frames go at once. */
   headroom(): number
-  /** How long a lossy publish may wait to go before the page counts as behind: past the wire's own wait, its least
-   *  round trip, so `Infinity` before that is measured. */
+  /** How long a frame may wait to go before the page counts as behind: past the wire's own wait, its least round trip,
+   *  so `Infinity` before that is measured. */
   readonly behindAfter: number
   /** Bytes of the frames it was handed that haven't gone out to the network. */
   bufferedAmount(): number
@@ -352,8 +352,8 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     )
   }
 
-  sendByteLimit(channel: MuxChannel, limit: number, urgency: Urgency): void {
-    this.sendQueue.sendUnsequenced(channel, urgency, ({ ix, lastSeq }) => encode.window(ix, limit, lastSeq))
+  sendByteLimit(channel: MuxChannel, limit: number, urgency: Urgency, receivedAt?: number): void {
+    this.sendQueue.sendUnsequenced(channel, urgency, ({ ix, lastSeq }) => encode.window(ix, limit, lastSeq), receivedAt)
   }
 
   sendMessageLimit(channel: MuxChannel, limit: number, urgency: Urgency): void {

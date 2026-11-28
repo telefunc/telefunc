@@ -117,7 +117,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const crosswsAdapter = crossws({
     bindingName,
     instanceName: baseInstanceName,
-    ...getTelefuncChannelOptions({ copiesOnSend: true }),
+    ...getTelefuncChannelOptions({ bufferedAmount: () => undefined, copiesOnSend: true }),
   })
   function telefuncNamespace(env: Cloudflare.Env): TelefuncDurableObjectNamespace {
     // The binding is named at runtime, by `bindingName`, and the app's `Env` has no index signature: no type reaches it.

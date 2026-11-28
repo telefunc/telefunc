@@ -46,10 +46,15 @@ type BroadcastEndOwner = {
   _pageReads?(stream?: string): boolean
 }
 
+const SERVER_BROADCAST_END_BRAND: unique symbol = Symbol.for('ServerBroadcastEnd')
+
 /** The server end of a page's `ClientBroadcast`: a channel to that page, which also takes the page's publishes and
  *  subscriptions, and delivers publishes to it. */
 class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
+  readonly [SERVER_BROADCAST_END_BRAND] = true
   private owner: BroadcastEndOwner | null = null
+  /** The call whose Cloudflare session applies the page's subscriptions. */
+  _carriedBy: Request | undefined = undefined
   /** The page's channel on the wire it last attached on: a publish while the page is away joins the replay through it,
    *  as one a silently dead wire lost does. */
   private lastPeer: IndexedPeer | null = null
@@ -69,6 +74,10 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   private pageWantInEffect = true
   /** The calls waiting for its page's want to take effect, which go on once it does or the broadcast ends. */
   private readonly callWaits = new Set<() => void>()
+
+  static isServerBroadcastEnd(channel: object): channel is ServerBroadcastEnd {
+    return SERVER_BROADCAST_END_BRAND in channel
+  }
 
   setOwner(owner: BroadcastEndOwner): void {
     this.owner = owner
@@ -290,7 +299,7 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     const gap = this.dropBeforeAttachFromGap(toBytes) || replay.dropFromGap(toBytes, this.unhanded()) > 0
     const peer = this.peer ?? this.abortOwed?.on
     if (gap) {
-      peer?.sender.queue.dropWaitingFrom(peer.index, 'publish')
+      peer?.sender.dropWaitingFrom(peer.index, 'publish')
       this.dropPendingFrames()
     }
     if (toBytes === 0 && !ended) this.overflow(NOT_EVEN_NEWEST)
@@ -374,6 +383,7 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     if (this.endsPageGone) this.dropBeforeAttach()
     this.lossyPublishes?.dispose()
     this.lastPeer = null
+    this._carriedBy = undefined
     super._finalize(err)
     this.releaseCallWaits()
   }
@@ -420,7 +430,7 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     const owner = this.owner
     assert(owner)
     this.pageWant = want
-    const pending = inRequestScope(this._callRequest, () => [
+    const pending = inRequestScope(this._carriedBy, () => [
       owner._onPageSubscription?.('text', want.text),
       owner._onPageSubscription?.('binary', want.binary),
       owner._onPageWantParts?.(want.parts),

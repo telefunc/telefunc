@@ -1,5 +1,10 @@
 import { expect, test } from 'vitest'
 
+import { createServer } from 'node:http'
+import { once } from 'node:events'
+import { Telefunc } from '../../../serve/node.js'
+import { ClientBroadcast } from '../client/ClientBroadcast.js'
+import { ServerBroadcastEnd } from './ServerBroadcastEnd.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { createDeferred } from '../../../utils/createDeferred.js'
@@ -105,4 +110,47 @@ test('a publish an end sends before it answers, while its page is away, reaches 
   const back = await attach(broadcast, { initial: false })
   expect((await back.readToAnswer()).map(({ label }) => label)).toEqual(['publish:joined', 'answer:member'])
   await back.drop()
+})
+
+// An add-on's own protocol, as Room's joins, meta writes and messages: what the page sends and what the server answers
+// keep their bytes.
+test("an add-on's request and publish on a page's broadcast, and their answers, keep the bytes in them", async () => {
+  const server = createServer((_req, res) => res.writeHead(404).end())
+  new Telefunc().installWebSocket(server)
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('No port')
+  const telefuncUrl = `http://127.0.0.1:${address.port}/_telefunc`
+  const published: unknown[] = []
+  const end = new ServerBroadcastEnd()
+  end.setOwner({
+    _onPagePublish(serialized) {
+      published.push(parse(serialized))
+      return { thumbnail: new Uint8Array([11]) }
+    },
+    _onPagePublishBinary() {},
+  })
+  getChannelMux().registerChannel(end, ATTACHABLE_NOW)
+  const page = new ClientBroadcast({
+    channelId: end.id,
+    key: 'room',
+    connection: { telefuncUrl, transports: ['ws'], idleTimeout: 0 },
+  })
+  try {
+    await Promise.all([end.opened, page.opened])
+    const received: unknown[] = []
+    end.listen((request) => {
+      received.push(request)
+      return { meta: { avatar: new Uint8Array([9, 10]) } }
+    })
+    const answer = await page._sendRequest({ meta: { avatar: new Uint8Array([7, 8]) } })
+    expect(received).toEqual([{ meta: { avatar: new Uint8Array([7, 8]) } }])
+    expect(answer).toEqual({ meta: { avatar: new Uint8Array([9, 10]) } })
+    expect(await page._publishUnreported({ data: new Uint8Array([12]) })).toEqual({ thumbnail: new Uint8Array([11]) })
+    expect(published).toEqual([{ data: new Uint8Array([12]) }])
+  } finally {
+    await end.close({ timeout: 100 })
+    server.close()
+  }
 })

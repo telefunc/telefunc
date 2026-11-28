@@ -6,15 +6,26 @@
 // fires the same 'websocket' event on its probe socket, but that socket only carries the tiny
 // PREPARE/READY/PING exchange before closing — so a frame threshold, not the event alone, separates
 // commit from abort. The paired sse-only run is the control: no `/_telefunc` WebSocket may ever open.
-export { testUpgrade }
+export { testUpgrade, testOtherWireVersionAndOrigins, testWebSocketUnanswered }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import type { Page, WebSocket, WebSocketRoute } from 'playwright-chromium'
-import { navigate, getResult, getCleanupState, resetCleanupState, serverRuntime } from '../../e2e-utils'
+import type { Page, Request, WebSocket, WebSocketRoute } from 'playwright-chromium'
+import {
+  navigate,
+  getResult,
+  getCleanupState,
+  resetCleanupState,
+  serverRuntime,
+  dropNextWebSocket,
+  holdNextWebSocket,
+} from '../../e2e-utils'
 import { parseChannelTransports } from '../../channelTransports'
 import { rawRequestStatus, upgradeStatus } from '../../../utils'
 
 type FrameCounts = { received: number }
+
+/** A wire version no server of this repo runs. */
+const OLD_WIRE_VERSION = 0
 
 function testUpgrade(isDev: boolean) {
   const transports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
@@ -50,6 +61,9 @@ function testUpgrade(isDev: boolean) {
           expectLog(/No error page found|HTTP response ← \/(no-such-page|_telefunc\/other) 500/)
         })
     })
+  testOtherWireVersionAndOrigins()
+  // Only the Node server holds or drops an upgrade (+server.ts), which `pnpm dev` doesn't serve.
+  if (transports.includes('ws') && !isDev && serverRuntime() === 'node') testWebSocketUnanswered()
   // ws-only (['ws']): no SSE to start from, so data-on-WS is normal and asserting it would be vacuous
   // — the existing channel suite already covers pure-WS delivery. Run only the upgrade path + control.
   if (!expectsUpgrade && !isSseOnly) return
@@ -254,4 +268,86 @@ type UpgradeChannelState = {
   multiCh2IsMonotonic: boolean | null
   upstreamReconnectChannelId: string | null
   acrossFlip: { received: number[] } | null
+}
+
+/** What a page on another wire version is told, and the refusals of forged or odd Origin headers. */
+function testOtherWireVersionAndOrigins() {
+  const transports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
+  if (transports.includes('ws'))
+    test('a page on another wire version is told to reload: its WebSocket opens, then closes with the code a page reloads on', async () => {
+      const url = new URL(`/_telefunc?wire=${OLD_WIRE_VERSION}`, getServerUrl())
+      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+      const ws = new globalThis.WebSocket(url)
+      const closed = await new Promise<{ code: number; reason: string }>((resolve, reject) => {
+        ws.onclose = (event) => resolve({ code: event.code, reason: event.reason })
+        ws.onerror = () => reject(new Error('The WebSocket failed before it closed'))
+      })
+      expect(closed).deep.equal({ code: 4001, reason: 'reload the page' })
+    })
+  if (transports.includes('sse'))
+    test('a page on another wire version is told to reload: its SSE request is refused `reload`', async () => {
+      const resp = await fetch(`${getServerUrl()}/_telefunc?_telefunc=sse&wire=${OLD_WIRE_VERSION}`, {
+        method: 'POST',
+        headers: { 'x-telefunc-request': 'sse' },
+        body: new Uint8Array(4),
+      })
+      expect(resp.status).toBe(409)
+      expect(resp.headers.get('content-type')).toMatch(/^text\/vnd\.telefunc\.refusal; kind=reload;/)
+      expect(await resp.text()).toBe('The server runs another wire version: reload the page.')
+    })
+  if (transports.includes('ws'))
+    test('WebSocket upgrades with forged or odd Origin headers are all refused, and the log stays bounded', async () => {
+      const origins = [
+        // `data:` parses, and its origin is the opaque `null`.
+        'data:,x',
+        'null',
+        `blob:https://${'a'.repeat(4000)}.example/id`,
+        `${'s'.repeat(8000)}://x`,
+        ...Array.from({ length: 30 }, (_, i) => `https://forged-${i}.example`),
+      ]
+      for (const origin of origins) expect(await upgradeStatus(origin)).toBe(403)
+      await autoRetry(async () => {
+        expectLog(/WebSocket upgrades from more than 20 origins were refused/, {
+          filter: (log) => log.logSource === 'stderr',
+        })
+      })
+      const lines: string[] = []
+      expectLog(/WebSocket upgrades? from/, {
+        filter: (log) => {
+          if (log.logSource !== 'stderr' || !/WebSocket upgrades? from/.test(log.logText)) return false
+          lines.push(...log.logText.split('\n').filter((line) => /WebSocket upgrades? from/.test(line)))
+          return true
+        },
+      })
+      expect(lines.length).lessThanOrEqual(21)
+      for (const line of lines) expect(line.length).lessThan(1000)
+    })
+}
+
+/** A page with ['ws', 'sse'] whose WebSocket upgrade gets no answer, or is dropped before it opens. */
+function testWebSocketUnanswered() {
+  for (const [what, arm] of [
+    ['gets no answer, as behind a proxy that black-holes WebSockets,', holdNextWebSocket],
+    ['is dropped before it opens', dropNextWebSocket],
+  ] as const)
+    test(`a page with ['ws', 'sse'] whose WebSocket upgrade ${what} opens its channel over SSE, and every message arrives once`, async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      let sseOpens = 0
+      const onRequest = (request: Request) => {
+        const url = new URL(request.url())
+        if (url.searchParams.get('_telefunc') === 'sse' && request.headers().accept === 'text/event-stream') sseOpens++
+      }
+      page.on('request', onRequest)
+      try {
+        await arm()
+        const opened = await page.evaluate(() => window.openCounted!(['ws', 'sse']))
+        if (!('id' in opened)) throw new Error(`The channel ended before it opened: ${opened.ended}`)
+        const sent = ['one', 'two', 'three']
+        for (const msg of sent) expect(await page.evaluate((msg) => window.sendCounted!(msg), msg)).toBe(`ack:${msg}`)
+        expect(sseOpens).toBe(1)
+        expect(JSON.parse((await getCleanupState())[`counted_${opened.id}`] ?? '[]')).deep.equal(sent)
+      } finally {
+        page.off('request', onRequest)
+      }
+    })
 }

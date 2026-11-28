@@ -89,9 +89,10 @@ All channels share a single multiplexed connection per server URL, so opening ma
 
 ### WebSocket
 
-The server opens a WebSocket for pages of its own origin. A page of another origin uses SSE if enabled, unless you list its origin:
+By default, the server accepts WebSocket upgrades from pages on its public host. When the browser reports that the page is from another origin in `Sec-Fetch-Site`, the server requires that origin to be listed. To open a WebSocket from another host, list the page's origin. A page whose WebSocket is refused uses SSE if enabled.
 
 ```ts
+// server.ts
 // Environment: server
 
 import { config } from 'telefunc'

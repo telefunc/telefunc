@@ -530,7 +530,10 @@ app.post('/api/server-close-trigger', async (c) => {
 // 'hold-open': the next POST that opens an SSE wire is held whole.
 // The others: the next batch POST.
 let nextSsePost: 'hold' | 'refuse' | 'hold-stream' | 'hold-open' | null = null
-let dropNextWebSocket = false
+// 'drop': the server drops the page's next WebSocket upgrade before it opens. 'hold': it never answers it.
+let nextWebSocket: 'drop' | 'hold' | null = null
+// The Node server, for a test that closes all its connections.
+let nodeServer: HttpServer | undefined
 const heldSsePosts: (() => void)[] = []
 
 // Test-only: the in-memory backend fails a store call, or drops a message, when a test asks (failing-backend.ts).
@@ -545,7 +548,16 @@ app.post('/api/server-action', (c) => {
 })
 app.post('/api/wire/cut', (c) => c.json({ cut: cutWireSockets() }))
 app.post('/api/wire/next-websocket', (c) => {
-  dropNextWebSocket = true
+  const action = c.req.query('action') ?? 'drop'
+  if (action !== 'drop' && action !== 'hold') return c.json({ ok: false, reason: 'action is drop or hold' }, 400)
+  nextWebSocket = action
+  return c.json({ ok: true })
+})
+// As a shutdown does. After this answer went out, since it closes the connection carrying it too.
+app.post('/api/server/close-all-connections', (c) => {
+  if (!nodeServer) return c.json({ ok: false, reason: 'not on Node' }, 404)
+  const server = nodeServer
+  setTimeout(() => server.closeAllConnections(), 100)
   return c.json({ ok: true })
 })
 app.post('/api/wire/next-sse-post', (c) => {
@@ -680,6 +692,7 @@ export default {
       // to reach the Node primitives when `TELEFUNC_NATIVE=1`.
       const httpServer = server?.node?.server
       if (!httpServer) return
+      nodeServer = httpServer
       // Compose's servers behind Caddy: Node's 5 s idle timer destroyed sockets Caddy then wrote to, which is a 502.
       if (process.env.INSTANCE_ID) httpServer.keepAliveTimeout = 60_000
       // The app upgrades nothing of its own: the listener below only watches Telefunc's handshakes, so another request
@@ -689,12 +702,16 @@ export default {
       // Registered first: a socket it destroys is one Telefunc's upgrade listener then leaves alone.
       httpServer.on('upgrade', (req, socket) => {
         if (!req.url?.startsWith('/_telefunc')) return
-        if (dropNextWebSocket) {
-          dropNextWebSocket = false
+        const action = nextWebSocket
+        nextWebSocket = null
+        if (action === 'drop') {
           socket.destroy()
           return
         }
         trackWireSocket(socket)
+        // Nothing the server writes reaches the page, so its upgrade gets no answer, as behind a proxy that black-holes
+        // WebSockets.
+        if (action === 'hold') socket.write = () => true
       })
       tf!.installWebSocket(httpServer)
     },

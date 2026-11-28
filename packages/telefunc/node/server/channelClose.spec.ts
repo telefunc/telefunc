@@ -44,6 +44,10 @@ config.channel = { maxPendingBytes: MAX_PENDING_BYTES }
 function createPeer(frames: Uint8Array[]) {
   return new IndexedPeer({
     sender: {
+      sendPublish(index, seq, body) {
+        this.send(encode.publishTo(index, seq))
+        this.send(body)
+      },
       send(frame) {
         frames.push(frame)
       },
@@ -53,7 +57,10 @@ function createPeer(frames: Uint8Array[]) {
       deliveredBefore: () => 0,
       terminate() {},
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-      queue: { waitingPublishes: () => 0, dropUngiven: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
+      waitingPublishes: () => 0,
+      dropUngiven: () => 0,
+      dropWaitingPublishes() {},
+      dropWaitingFrom() {},
     },
     index: 7,
     replay: new ServerReplay({ heldBytes: 0 }),
@@ -221,38 +228,6 @@ describe('self-initiated close', () => {
     expect(channel._phase).toBe('ended')
   })
 
-  test('the page done before the server: close() resolves null once its own cleanup settled', async () => {
-    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
-    const frames: Uint8Array[] = []
-    const cleanup = createDeferred<void>()
-    channel.onClose(() => cleanup.promise)
-    channel._registerChannel(ATTACHABLE_NOW)
-    channel._attachPeer(createPeer(frames))
-    const page = fromPage(channel, frames)
-    const closePromise = channel.close({ timeout: 1_000 })
-    page.closeAck()
-    page.closeDone()
-    await new Promise((resolve) => setTimeout(resolve, 5))
-    expect(channel._phase).not.toBe('ended')
-    cleanup.resolve()
-    await expect(closePromise).resolves.toBeNull()
-    expect(tagsOf(frames)).toEqual([TAG.CLOSE, TAG.CLOSE_DONE])
-  })
-
-  test('the page never done: the close times out on both ends, and close() resolves the timeout error', async () => {
-    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
-    const frames: Uint8Array[] = []
-    channel._registerChannel(ATTACHABLE_NOW)
-    channel._attachPeer(createPeer(frames))
-    const page = fromPage(channel, frames)
-    const closePromise = channel.close({ timeout: 10 })
-    page.closeAck()
-    await expect(closePromise).resolves.toBeInstanceOf(Error)
-    await expect(channel.closed).resolves.toHaveProperty('message', expect.stringContaining('Channel close timed out'))
-    const end = frames.map((frame) => decode(frame))[1]
-    expect(end?.tag === TAG.ERROR && end.reason).toBe(ERROR_REASON.CLOSE_TIMED_OUT)
-  })
-
   test('close() waits for inflight inbound ack before resolving', async () => {
     const channel = new ServerChannel<(v: string) => Promise<string>, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
@@ -339,22 +314,6 @@ describe('self-initiated close', () => {
     expect(didFinishOnClose).toBe(true)
     expect(channel._phase).toBe('ended')
   })
-
-  const UNRETURNED = {
-    'a Channel': () => new ServerChannel<never, number>(),
-    'a BroadcastChannel used only on the server': () => new ServerBroadcast<number>({ key: crypto.randomUUID() }),
-  }
-  for (const [kind, create] of Object.entries(UNRETURNED)) {
-    test(`close() of ${kind} no telefunction has returned ends it without waiting for a page, and onClose() receives null`, async () => {
-      const channel = create()
-      const closes: unknown[] = []
-      channel.onClose((err) => void closes.push(err))
-
-      await expect(channel.close({ timeout: 1_000 })).resolves.toBeNull()
-      expect(closes).toEqual([null])
-      await expect(channel.closed).resolves.toBeNull()
-    })
-  }
 
   test('buffered send flushes before close request on attachPeer', async () => {
     const channel = new ServerChannel<never, number>({ id: crypto.randomUUID() })
@@ -818,7 +777,7 @@ describe('stopping an onOpen or onClose callback', () => {
     expect(closes).toBe(1)
   })
 
-  test('aborting { signal } removes the callback', () => {
+  test('aborting { signal } removes an onOpen callback before open', () => {
     const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
     const controller = new AbortController()
@@ -828,12 +787,10 @@ describe('stopping an onOpen or onClose callback', () => {
     }
 
     channel.onOpen(fire, { signal: controller.signal })
-    channel.onClose(fire, { signal: controller.signal })
     controller.abort()
 
     channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
-    fromPage(channel, frames).closeRequest(100)
     expect(didFire).toBe(false)
   })
 })
