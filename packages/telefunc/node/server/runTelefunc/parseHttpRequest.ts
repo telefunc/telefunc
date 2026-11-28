@@ -240,12 +240,10 @@ async function readBody(
     // Half-duplex clients deliver the answer only once they have sent the whole body: where a returned value holds the
     // request on, the rest of the body is read now, and kept for the call's files within what the channels' memory
     // allows.
-    runContext.requestContext.finishUpload = (answer) => {
-      // An early final response can make the client stop sending bytes that its retained files still need.
-      if (answer === 'plain') return reader.retainedFilesReady
+    runContext.requestContext.onAnswered(() => {
       reader.keepRest()
       watchClient()
-    }
+    })
     runContext.requestContext.onClose(() => void readOffBody(reader, clientGone, watchClient))
     const metadata = await reader
       .readFrame(CALL_METADATA_MAX_BYTES)
@@ -306,7 +304,7 @@ async function giveUpOnceReadSettled(reader: BodyReader): Promise<void> {
 async function readOffBody(reader: BodyReader, signal: AbortSignal, watchClient: () => void): Promise<void> {
   // A client that left (on Node 22.0, the Node adapter's `AbortSignal.any()` signal says so only once its source's
   // `abort` listeners ran, so the wait lets that dispatch finish) fails the read under way, which settles first to keep
-  // its own failure.
+  // its own failure; an answered call's read may wait on the client, so it isn't awaited.
   if (!signal.aborted) await node22AbortSignalLag()
   if (signal.aborted) await reader.readSettled()
   watchClient()

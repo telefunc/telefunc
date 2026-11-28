@@ -33,8 +33,9 @@ type Row = {
 
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
-/** Sends the head, envelope and first file part, and reports when the answer begins. */
-async function startCall(port: number, row: Row): Promise<{ socket: Socket; answered: Promise<void> }> {
+/** A socket that has sent, to an entry's `port`, `row`'s head and envelope and its File's first part. Resolves once the
+ *  answer begins. */
+async function startCall(port: number, row: Row): Promise<Socket> {
   const size = row.parts * PART
   const file = `${SERIALIZER_PREFIX_BLOB}${JSON.stringify({ index: 0, size, type: '' })}`
   const metadata = JSON.stringify({
@@ -57,7 +58,8 @@ async function startCall(port: number, row: Row): Promise<{ socket: Socket; answ
   )
   socket.write(envelope)
   socket.write(part())
-  return { socket, answered }
+  await answered
+  return socket
 }
 
 /** Does `row`'s rest on `socket`, whose first part is sent: `'all sent'`, where it stalled, or `'left'`. */

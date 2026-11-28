@@ -110,11 +110,6 @@ class BodyReader {
     return this.readOffEnd.promise
   }
 
-  /** Wait for the drain only when a file can still be read. */
-  get retainedFilesReady(): Promise<void> | undefined {
-    if (this.unread.size > 0) return this.restRead
-  }
-
   constructor(
     source: ReadableStream<Uint8Array<ArrayBuffer>> | Readable,
     clientLeft: (err: unknown) => boolean | null,

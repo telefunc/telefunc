@@ -274,10 +274,8 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
   } finally {
     // A call that answers without a value ends the live values it was passed as arguments.
     if (response?.statusCode !== STATUS_CODE_SUCCESS) requestContext.markCallFailed()
-    const upload = requestContext.markComplete(
-      response?.statusCode === STATUS_CODE_SUCCESS && typeof response.body === 'string',
-    )
-    if (upload) await upload
+    // However the call ended: what its response still sends, a stream or a channel, holds the request from here on.
+    requestContext.markComplete()
   }
   return createHttpResponse(response, requestContext.responseHold)
 }
