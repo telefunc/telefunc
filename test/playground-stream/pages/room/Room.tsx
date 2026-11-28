@@ -135,7 +135,6 @@ import {
   onSeedAndChurn,
   onStopChurn,
   onPublishWhileEstablishing,
-  onCutWire,
   onPublishOnServer,
   onServerPublisherReads,
   onJoinHiddenHeld,
@@ -3196,14 +3195,18 @@ function Room() {
         const seen: number[] = []
         view.subscribeBinary((_data, info) => seen.push(numberAt(info.meta, 'n')), { track: 'cursor' })
         const me = await view.join({ meta: { name: 'Me' } })
-        // A link that keeps up takes every frame: they wait while the page reconnects.
-        await onCutWire()
-        await new Promise((resolve) => setTimeout(resolve, 150))
-        const receipts = await Promise.all(
+        const { promise: away, resolve } = Promise.withResolvers<void>()
+        const stop = me.onDisconnect(resolve)
+        setResult(JSON.stringify({ ready: true }))
+        await away
+        stop()
+        const queued = Promise.all(
           Array.from({ length: 20 }, (_, n) =>
             me.publishBinary(new Uint8Array(256 * 1024), { track: 'cursor', meta: { n }, lossy: true }),
           ),
         )
+        setResult(JSON.stringify({ queued: true }))
+        const receipts = await queued
         await pollUntil(() => ({ done: seen.at(-1) === 19 }))
         await new Promise((resolve) => setTimeout(resolve))
         // The room's own channel: its handle holds it, as its state's owner. Its connection lists a stream's newest lossy

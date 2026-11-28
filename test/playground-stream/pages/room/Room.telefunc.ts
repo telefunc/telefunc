@@ -115,7 +115,6 @@ export {
   onSeedAndChurn,
   onStopChurn,
   onPublishWhileEstablishing,
-  onCutWire,
   onPublishOnServer,
   onServerPublisherReads,
   onJoinHiddenHeld,
@@ -135,7 +134,6 @@ import { redis, whileRedisSubscribersDown } from '../../redis'
 import { cleanupState } from '../../cleanup-state'
 import { byteAt, entryOf, messageOf, numberOf, present, textOf } from '../../../checked'
 import { forgetServerAction, onServerAction } from '../../server-actions'
-import { cutWireSockets } from '../../wire-sockets'
 import { demandNames, type NamedDemand } from './demandNames'
 import { publishMine } from './publishMine'
 import {
@@ -1567,11 +1565,6 @@ async function onPublishWhileEstablishing(roomId: string, count: number, bytes: 
     ),
   )
   return await Promise.all(publishes)
-}
-
-/** The page's wire drops right after this answer, as a failing network would drop it. */
-async function onCutWire() {
-  setTimeout(cutWireSockets, 50)
 }
 
 const serverPublishers = new Map<string, { refs: unknown[]; reads: NamedDemand[][] }>()

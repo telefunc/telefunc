@@ -1,8 +1,8 @@
 export { onBroadcastKeys, onUnreadSends, onKeptUpload, onUnreadEventStream, onHello }
 
-import { Channel, BroadcastChannel } from 'telefunc'
+import { Channel, BroadcastChannel, ChannelPageLeftError } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
-import { onServerAction } from '../../server-actions'
+import { forgetServerAction, onServerAction } from '../../server-actions'
 import { watchChannelMemory, channelMemoryHeld } from '../../channel-memory'
 
 /** Two broadcasts of keys of their own. Once the page asks, a publish on the first larger than the server may hold,
@@ -44,6 +44,15 @@ function sendToUnread() {
     },
     { once: false },
   )
+  onServerAction('unreadSendsGone', () => {
+    forgetServerAction('unreadSendsPeak')
+    for (const { channel } of pages) {
+      if (!('_onPeerGone' in channel) || typeof channel._onPeerGone !== 'function') {
+        throw new Error('Expected a server channel')
+      }
+      channel._onPeerGone(new ChannelPageLeftError())
+    }
+  })
   const text = 'x'.repeat(15 * 1024)
   for (const { channel, outcomes } of pages) {
     const count = (outcome: string) => void (outcomes[outcome] = (outcomes[outcome] ?? 0) + 1)

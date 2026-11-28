@@ -1,4 +1,4 @@
-import { ATTACHABLE_NOW } from './ServerChannel.js'
+import { ATTACHABLE_NOW, ServerChannel } from './ServerChannel.js'
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { config, getChannelConfig } from '../../../node/server/serverConfig.js'
 import { getChannelMux } from './ChannelMux.js'
@@ -8,12 +8,13 @@ import { decodeChannelFrame } from '../../wire/decode.fixture.js'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { hold, releaseHolder } from './channelMemory.js'
 import { ChannelOverflowError } from '../channelErrors.js'
+import { binaryData, binaryPayload } from '../broadcastPayload.js'
 import { ServerBroadcastEnd } from './ServerBroadcastEnd.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { ServerReplay } from './ServerReplay.js'
 import { PublishBody, publishBody } from './PublishBody.js'
 import { disposeBackend } from '../../backend/install.js'
-import { decode, encode } from '../../wire/frame.js'
+import { ACK_STATUS, decode, encode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 
 // A file of its own: `config.channel` is set before the first channel exists.
@@ -126,6 +127,11 @@ describe.each(Object.entries(PAGES))('to a page that %s', (page, { behindAfter, 
 function pageEnd(behindAfter: number, waiting: number, broadcast?: ServerBroadcast<string>) {
   const end = broadcast?._end ?? new ServerBroadcastEnd()
   if (!broadcast) end.setOwner({ _onPagePublish() {}, _onPagePublishBinary() {} })
+  const peer = attachPage(end, behindAfter, waiting)
+  return { end, peer }
+}
+
+function attachPage(end: ServerChannel, behindAfter: number, waiting = 0): IndexedPeer {
   end._registerChannel(ATTACHABLE_NOW)
   const peer = new IndexedPeer({
     sender: {
@@ -149,7 +155,7 @@ function pageEnd(behindAfter: number, waiting: number, broadcast?: ServerBroadca
     replay: replayOf(end),
   })
   end._attachPeer(peer, { want: { version: 1, text: true, binary: true } })
-  return { end, peer }
+  return peer
 }
 
 /** The ids of the publishes a reconnect of `end`'s page would get, in order. */
@@ -160,7 +166,7 @@ function replayedIds(end: ServerBroadcastEnd): number[] {
     .flatMap((decoded) => (decoded.tag === TAG.PUBLISH ? [Number(decoded.text)] : []))
 }
 
-function replayOf(end: ServerBroadcastEnd): ServerReplay {
+function replayOf(end: ServerChannel): ServerReplay {
   const replay = end._replayBuffer
   if (replay === null) throw new Error('The end has no replay')
   return replay
@@ -248,7 +254,106 @@ it('partial confirmation and dropping a stale lossy publish keep the newest rout
   }
 })
 
-const ledger = getGlobalObject('channelMemory.ts', { total: 0 })
+const ledger = getGlobalObject('channelMemory.ts', { total: 0, maxMemory: 0, reserved: 0 })
+
+function useSmallMemory(reserved = 0) {
+  const { maxMemory: previousMax, reserved: previousReserved } = ledger
+  ledger.maxMemory = 2 * 1024 * 1024
+  ledger.reserved = reserved
+  vi.useFakeTimers({ toFake: ['performance'] })
+  onTestFinished(() => {
+    ledger.maxMemory = previousMax
+    ledger.reserved = previousReserved
+    vi.useRealTimers()
+  })
+}
+
+it.each(['measured', 'unmeasured'] as const)(
+  'with a %s link on a 2 MiB server, a page stays open and gets the latest lossy publish',
+  async (link) => {
+    useSmallMemory(link === 'measured' ? 512 * 1024 : 0)
+    const key = crypto.randomUUID()
+    const broadcast = new ServerBroadcast<string>({ key })
+    const { end } = pageEnd(600, 0, broadcast)
+    const replay = replayOf(end)
+    const confirm = () => end._dispatchFrame(decodeChannelFrame(encode.window(7, 0, replay.seq)))
+    const frames = () => replay.getAfter(0).map(decode)
+    const delivered = () =>
+      frames().flatMap((frame) => (frame.tag === TAG.PUBLISH_BINARY ? [binaryData(frame.data)[0]] : []))
+    try {
+      if (link === 'measured') {
+        await Broadcast.publishBinary(key, new Uint8Array(16 * 1024), { lossy: true })
+        vi.advanceTimersByTime(2)
+        confirm()
+        await Broadcast.publishBinary(key, new Uint8Array(256 * 1024), { lossy: true })
+        await Broadcast.publishBinary(key, new Uint8Array(256 * 1024), { lossy: true })
+        vi.advanceTimersByTime(4)
+        confirm()
+        expect(replay.confirmRate).toBeGreaterThan(100_000)
+      }
+
+      const payload = new Uint8Array(256 * 1024)
+      for (let id = 1; id <= 20; id++) {
+        payload[0] = id
+        if (link === 'measured') await Broadcast.publishBinary(key, payload, { lossy: true })
+        else await end._onPeerPublishBinaryAckReqMessage(binaryPayload(payload, true), id)
+      }
+      expect(end._phase).toBe('open')
+      expect(delivered()).not.toContain(20)
+      if (link === 'unmeasured') {
+        expect(replay.confirmRate).toBe(0)
+        const receipts = frames().filter((frame) => frame.tag === TAG.ACK_RES && frame.status === ACK_STATUS.OK)
+        expect(receipts).toHaveLength(20)
+      }
+
+      vi.advanceTimersByTime(4)
+      confirm()
+      expect(delivered().at(-1)).toBe(20)
+      if (link === 'measured') expect(delivered()).toEqual([20])
+      expect(end._phase).toBe('open')
+    } finally {
+      if (end._phase === 'open') end.abort()
+      end._release()
+    }
+  },
+)
+
+it('a 1:1 channel with wire credit can replace a lossy send held for the 2 MiB server budget', async () => {
+  useSmallMemory()
+  const end = new ServerChannel()
+  const peer = attachPage(end, 600)
+  const replay = replayOf(end)
+  const confirm = () => end._dispatchFrame(decodeChannelFrame(encode.window(peer.index, 16 * 1024 * 1024, replay.seq)))
+  try {
+    confirm()
+    await end.sendBinary(new Uint8Array(16 * 1024), { lossy: true })
+    vi.advanceTimersByTime(2)
+    confirm()
+    await end.sendBinary(new Uint8Array(256 * 1024), { lossy: true })
+    await end.sendBinary(new Uint8Array(256 * 1024), { lossy: true })
+    vi.advanceTimersByTime(4)
+    confirm()
+    expect(replay.confirmRate).toBeGreaterThan(100_000)
+
+    const payload = new Uint8Array(256 * 1024)
+    for (let id = 1; id <= 20; id++) {
+      payload[0] = id
+      await end.sendBinary(payload, { lossy: true })
+    }
+    payload[0] = 0
+    vi.advanceTimersByTime(4)
+    confirm()
+    const delivered = replay
+      .getAfter(0)
+      .map(decode)
+      .flatMap((frame) => (frame.tag === TAG.BINARY ? [frame.data[0]] : []))
+    expect(delivered).toEqual([20])
+    expect(end._phase).toBe('open')
+  } finally {
+    if (end._phase === 'open') end.abort()
+    end._release()
+  }
+})
 
 for (const lossy of [false, true]) {
   it(`a broadcast whose ${lossy ? 'lossy' : 'plain'} publish doesn't fit under the budget closes, and the server holds no more than it`, async () => {

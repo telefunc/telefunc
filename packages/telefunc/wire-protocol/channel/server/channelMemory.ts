@@ -278,9 +278,9 @@ function fits(holder: MemoryHolder, bytes: number): boolean {
  *  can't make room, they end all the same, and so do its own pages (`fitsPublish`). */
 function admitPublish(body: PublishBody): void {
   const maxMemory = maxMemoryOf()
-  const bytes = body.frame.byteLength
+  const bytes = heldPublishBytes(body)
   // Nothing let go makes room for one that can't fit at all: its own pages end (`fitsPublish`), and no other page does.
-  if (bytes + HELD_PUBLISH_OVERHEAD_BYTES > maxMemory) return
+  if (bytes > maxMemory) return
   const target = shedTarget(maxMemory)
   const most = heldAtMost(maxMemory, memory.reserved)
   if (nearBudget(bytes)) {
@@ -460,9 +460,10 @@ function holdsAtMost(): number {
 }
 
 /** The top eighth is for wires' copies and for those under an equal share. */
-/** Whether `bytes` more would take what this server holds past the target it sheds to. */
+/** Whether `bytes` more would reach past the shedding target or the space left by waiting sends. */
 function nearBudget(bytes: number): boolean {
-  return memory.total + bytes > shedTarget(maxMemoryOf())
+  const maxMemory = maxMemoryOf()
+  return memory.total + bytes > Math.min(shedTarget(maxMemory), heldAtMost(maxMemory, memory.reserved))
 }
 
 function shedTarget(maxMemory: number): number {

@@ -5,7 +5,15 @@ import { ServerChannel } from './ServerChannel.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assert } from '../../../utils/assert.js'
 import type { IndexedPeer } from './IndexedPeer.js'
-import { fitsPublish, hold, letGo, maxPendingBytesOf, nearBudget, type MemoryHolder } from './channelMemory.js'
+import {
+  fitsPublish,
+  heldPublishBytes,
+  hold,
+  letGo,
+  maxPendingBytesOf,
+  nearBudget,
+  type MemoryHolder,
+} from './channelMemory.js'
 import type { PublishBody } from './PublishBody.js'
 import { LossyDelivery } from './LossyDelivery.js'
 import { EVERY_STREAM } from '../ownStream.js'
@@ -109,7 +117,7 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     if (this.overflowed !== null) return this.endOverflowed()
     if (!fitsPublish(body)) return this.overflow(body.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND)
     const { stream } = body
-    if (body.lossy && stream !== null) return this.lossyPublishDelivery().send(stream, body)
+    if (body.lossy && stream !== null) return this.lossyPublishDelivery().send(stream, body, heldPublishBytes(body))
     // A plain publish goes after the lossy ones waiting before it in its stream, or in every stream, oldest first.
     if (stream === EVERY_STREAM) this.lossyPublishes?.flush()
     else if (stream !== null) this.lossyPublishes?.flush(stream)
@@ -315,8 +323,6 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   /** An answer past the gap would cross it: the channel ends first, and the publish it answers settles with that. */
   protected override sendAckRes(ackedSeq: number, result: string, status?: AckResultStatus): void {
     if (this.overflowed !== null) return this.endOverflowed()
-    // As a channel's reliable send, it goes behind its lossy publishes that wait.
-    this.lossyPublishes?.flush()
     super.sendAckRes(ackedSeq, result, status)
   }
 

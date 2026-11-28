@@ -372,17 +372,21 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private sendLossy(tag: typeof TAG.TEXT | typeof TAG.BINARY, data: EntryData, bytes: number): void | Promise<void> {
     const held = heldSendBytes(bytes)
     if (this.roomWait !== null) return this.sendLossyBehind(this.roomWait, { tag, data, bytes, held })
-    const added = held - this.replaceableHeld()
+    const replaceable = this.replaceableHeld(held)
+    const added = held - replaceable
     if (added > 0 && !admit(this, added)) return Promise.reject<void>(this.refuseSend(added))
-    return this.makeLossy({ tag, data, bytes, held })
+    return this.makeLossy({ tag, data, bytes, held }, replaceable)
   }
 
   /** Makes a lossy send admitted, or held from what it reserved. */
-  private makeLossy({ tag, data, bytes, held }: LossyBehind): void | Promise<void> {
+  private makeLossy({ tag, data, bytes, held }: LossyBehind, replaceable = 0): void | Promise<void> {
     if (!this.peer) return this.offlineBuffer.pushLossy(tag, data, bytes)
     // Detached bytes read as empty: copying them throws before they take the place of the send that waits.
     if (typeof data !== 'string' && data.byteLength === 0) new Uint8Array(data)
-    this.lossyDelivery().send(OWN_STREAM, { data, held })
+    const delivery = this.lossyDelivery()
+    // Reclaiming other channels can ease pressure after admission counted the bytes this send replaces.
+    if (replaceable > 0 && !delivery.replaces(held)) delivery.letWaitingGo(OWN_STREAM)
+    delivery.send(OWN_STREAM, { data, held })
   }
 
   /** Behind a send of its channel that waits for room, a lossy one waits too, as the newest, reserved in that one's turn:
@@ -397,13 +401,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** What its next lossy send takes the place of, by what that holds: with no page attached, the offline buffer's lossy
-   *  last entry; attached to a page that is behind or out of credit, those that wait and its sends still in the
-   *  wire's queue since its last frame. Nothing for a page that keeps up. */
-  private replaceableHeld(): number {
+   *  last entry; attached, what waits and the sends still in the wire's queue since its last frame, if they need
+   *  replacing. */
+  private replaceableHeld(held: number): number {
     if (!this.peer) return this.offlineBuffer.replaceableHeld
     // Made before the first attached lossy send is measured: the attach may have handed lossy sends that still wait.
     const sends = this.lossyDelivery()
-    if (!sends.replaces()) return 0
+    if (!sends.replaces(held)) return 0
     return sends.waitingBytes + this.peer.replaceableHeld()
   }
 

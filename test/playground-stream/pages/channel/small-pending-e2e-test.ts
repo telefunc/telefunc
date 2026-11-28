@@ -472,5 +472,7 @@ function testSmallPending() {
       await page.goto('about:blank')
       await proxy.close()
     }
+    // Those pages are gone for good. Release the replay kept for their reconnect window.
+    await runServerAction('unreadSendsGone')
   })
 }

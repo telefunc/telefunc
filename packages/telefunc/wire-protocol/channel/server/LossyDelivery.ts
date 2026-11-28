@@ -2,6 +2,7 @@ export { LossyDelivery }
 export type { LossyHost }
 
 import { WIRE_SEND_AHEAD_MIN_BYTES } from '../../constants.js'
+import { nearBudget } from './channelMemory.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import type { ServerReplay } from './ServerReplay.js'
 
@@ -28,13 +29,14 @@ interface LossyHost<U> {
 interface Waiting<U> {
   stream: string
   unit: U
+  held: number
 }
 
 /** A page that keeps up gets every send. One that is behind gets each stream's newest once it catches up, so that older
- *  ones don't fill its link first. Before its first rate, what waits waits in order. */
+ *  ones don't fill its link first. Before its first rate, what waits waits in order while memory has room. */
 class LossyDelivery<U> {
   private readonly host: LossyHost<U>
-  /** The sends waiting for its page, oldest first: past one of a stream only before its page confirmed a rate. */
+  /** The sends waiting for its page, oldest first. */
   private waiting: Waiting<U>[] = []
 
   constructor(host: LossyHost<U>) {
@@ -53,18 +55,14 @@ class LossyDelivery<U> {
     return bytes
   }
 
-  /** With no wire, which only a subscriber's publishes meet, `unit` goes as the replay's newest; behind, or out of
-   *  credit, it waits as its stream's newest, and takes the place of those of its stream that no wire has taken. Before
-   *  its page confirmed a rate, past what any sender sends ahead, it waits behind those waiting. Otherwise it goes. */
-  send(stream: string, unit: U): void {
-    if (!this.host.peer() || this.replaces()) this.letWaitingGo(stream)
-    // Those that went gave their credit back, and may have been all its page left unconfirmed: this one may go at once.
-    if (this.waits()) {
+  /** A page that is behind, out of credit, or short of memory keeps only the newest send of this stream waiting. */
+  send(stream: string, unit: U, held = this.host.bytes(unit)): void {
+    if (!this.host.peer() || this.replaces(held)) this.letWaitingGo(stream)
+    if (this.waiting.length > 0 || this.holdsBack() || this.memoryFull(2 * held)) {
       this.host.hold(unit)
-      this.waiting.push({ stream, unit })
+      this.waiting.push({ stream, unit, held })
       return
     }
-    this.flush()
     this.host.hand(unit)
   }
 
@@ -85,7 +83,15 @@ class LossyDelivery<U> {
   /** Its page confirmed more, or granted more: those waiting go, or, behind with them, only each stream's newest. */
   mayGo(): void {
     if (this.waiting.length > 1 && this.isBehind(this.waitingBytes)) this.waiting = this.newestOfEach(this.waiting)
-    if (this.waiting.length > 0 && !this.holdsBack()) this.flush()
+    if (this.waiting.length === 0 || this.holdsBack()) return
+    let sent = 0
+    for (const { unit, held } of this.waiting) {
+      if (this.memoryFull(held)) break
+      this.host.hand(unit)
+      this.host.letGo(unit)
+      sent++
+    }
+    if (sent > 0) this.waiting = this.waiting.slice(sent)
   }
 
   /** The sends of `stream` that a newer one replaces go, and those of it that wait, as the newer one takes their place. */
@@ -99,14 +105,14 @@ class LossyDelivery<U> {
     for (const { unit } of this.takeWaiting(stream)) this.host.letGo(unit)
   }
 
-  /** Whether a send made now waits: others wait, or its page can't take it now. */
-  waits(): boolean {
-    return this.waiting.length > 0 || this.holdsBack()
+  /** Whether a newer send takes the place of those no wire has taken. */
+  replaces(held?: number): boolean {
+    return this.isBehind() || this.host.outOfCredit() || (held !== undefined && this.memoryFull(2 * held))
   }
 
-  /** Whether a send made now takes the place of those of its stream that no wire has taken: behind, or out of credit. */
-  replaces(): boolean {
-    return this.isBehind() || this.host.outOfCredit()
+  /** Leaves room for a successor once a publish is awaiting confirmation. */
+  private memoryFull(bytes: number): boolean {
+    return nearBudget(bytes) && this.host.peer() !== null && this.host.replay()?.unconfirmedSince !== undefined
   }
 
   /** Takes out those waiting of `stream`, all of them without `stream`, oldest first. */
