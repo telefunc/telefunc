@@ -38,12 +38,10 @@ type RequestContext = {
   /** Register a callback that fires when the request lifecycle ends for any reason
    *  (response sent, stream complete, or client disconnect). Fires exactly once. */
   onClose: (cb: () => void) => void
-  /** Fires once the call has answered while what its response still sends (a channel, a stream) holds the request:
-   *  never where nothing holds the request on. */
-  onAnswered: (cb: () => void) => void
-  /** @internal Called by `runTelefunc` once the call answered, whichever way: fires the onAnswered callbacks where a hold
-   *  is left, and onClose callbacks once no item of trackPending is pending. */
-  markComplete: () => void
+  /** Continues an upload after the call answers, or waits for its retained files before a plain success. */
+  finishUpload?: (answer: 'pending' | 'plain') => Promise<void> | undefined
+  /** Releases the call's hold and returns any upload that must finish before sending the response. */
+  markComplete: (plainSuccess: boolean) => Promise<void> | undefined
   /** On Deno, keeps the response open until the call's binary upload ends. */
   responseHold: ResponseHold | null
   /** The page this call answers, as a channel the call returned waits for it to attach: each byte of its upload shows it
@@ -106,14 +104,6 @@ function createRequestContext(request: Request): RequestContext {
     call = 'watched'
   }
 
-  const answeredCallbacks: Array<() => void> = []
-  const markComplete = () => {
-    releaseCall()
-    if (closed) return
-    for (const cb of answeredCallbacks) invokeCloseCallback(cb)
-    answeredCallbacks.length = 0
-  }
-
   const responseAbort = createResponseAbortSource(releaseCall)
 
   const ctx: RequestContext = {
@@ -136,9 +126,6 @@ function createRequestContext(request: Request): RequestContext {
       failedCallbacks.push(cb)
     },
     markCallFailed: fireFailed,
-    onAnswered(cb) {
-      answeredCallbacks.push(cb)
-    },
     onClose(cb) {
       watchClient()
       if (closed) {
@@ -147,7 +134,14 @@ function createRequestContext(request: Request): RequestContext {
       }
       closeCallbacks.push(cb)
     },
-    markComplete,
+    markComplete(plainSuccess) {
+      releaseCall()
+      const finishUpload = ctx.finishUpload
+      if (!finishUpload) return
+      ctx.finishUpload = undefined
+      if (!closed) return finishUpload('pending')
+      if (plainSuccess) return finishUpload('plain')
+    },
     responseHold: null,
     page: ATTACHABLE_NOW,
     trackPending() {

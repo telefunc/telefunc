@@ -52,8 +52,10 @@ const entries = {
 }
 const control = await listenDeno(async (request) => {
   const { entry, row } = await request.json()
-  const socket = await startCall(entries[entry], row)
+  const { socket, answered } = await startCall(entries[entry], row)
+  if (row.telefunction === 'keepsFile') await answered
   const sent = await sendRest(socket, row)
+  await answered
   const state = await seen(row.row, SETTLE_MS)
   socket.destroy()
   return Response.json({ sent, ...state })
