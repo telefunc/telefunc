@@ -370,7 +370,7 @@ class BodyReader {
    * its own read takes it, and the later read waits until the piece is read, the reader releases its lock, the file is
    * cancelled, or the files end. One the app began and left without a reader may take a reader again: its rest is read
    * for it, kept within the reader's memory, and the later read goes on; where its memory refuses a piece, the file
-   * fails, saying why, and the rest of it is dropped. A cancelled file's bytes are dropped once a later read passes it.
+   * fails, saying why, and the rest of it is dropped. A later file read or the body drain drops the bytes of cancelled files it passes.
    * The files end at the body's let-go, at a read that fails, and where the client leaves.
    */
   private fileStream(index: number): ReadableStream<Uint8Array<ArrayBuffer>> {
