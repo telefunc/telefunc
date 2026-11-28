@@ -338,7 +338,7 @@ describe('a Cluster slot whose master changed', () => {
   // The old master's own connection, which the rows never open.
   const OLD = new Redis({ lazyConnect: true })
   const node = (view: Pick<FormerMaster, 'master' | 'history'> & Partial<FormerMaster>): FormerMaster => ({
-    client: OLD,
+    replicaReader: async () => OLD,
     previous: null,
     serves: async () => false,
     close() {},
@@ -347,13 +347,14 @@ describe('a Cluster slot whose master changed', () => {
   /** The old master of history 'a', which gave the slot away. */
   const resharded = node({ master: true, history: 'a' })
 
-  it('resumes the attempt, told of a loss, where the old master is gone, serves the slot still, is of another history, or resynced in full', async () => {
+  it('resumes the attempt, told of a loss, where the old master is gone, serves the slot still, is of another history, resynced in full, or refuses a keyed read', async () => {
     const views: Array<FormerMaster | null> = [
       null,
       node({ master: true, history: 'a', serves: async () => true }),
       node({ master: true, history: 'x' }),
       // A replica now that took the new master's history whole: what it had past the new master's copy is gone.
       node({ master: false, history: 'b' }),
+      node({ master: false, history: 'a', replicaReader: async () => null }),
     ]
     for (const view of views) {
       const { subscriptions, listen, missed } = setup()

@@ -8,7 +8,7 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { Cluster } from 'ioredis'
 import { afterAll, describe, expect, it } from 'vitest'
-import { Broadcast } from 'telefunc'
+import { Broadcast, config } from 'telefunc'
 import { Room } from '@telefunc/room'
 import {
   arrived,
@@ -100,6 +100,33 @@ async function moveRoom(nodes: Nodes, id: string, whileMigrating: () => Promise<
   return migrating
 }
 
+/** A live Broadcast shares the Room's slot. Wait for the former primary's redirect before checking for loss. */
+async function moveWhileSubscribed(nodes: Nodes, id: string) {
+  const lost: unknown[] = []
+  const previous = config.broadcast.onDeliveryLost
+  config.broadcast.onDeliveryLost = (delivery) => lost.push(delivery)
+  const heard: unknown[] = []
+  const off = Broadcast.subscribe(id, (message) => heard.push(message))
+  const redirects = async () =>
+    /^cmdstat_exists:.*rejected_calls=(\d+)/m.exec(await nodes.primary.admin.info('commandstats'))?.[1]
+  try {
+    await off.opened
+    await Broadcast.publish(id, 'before move')
+    expect(await arrived(heard)).toBe(true)
+    const before = await redirects()
+    const asked = await moveRoom(nodes, id, () => outcomeOf(() => Room.getParticipants(id)))
+    const moved = await outcomeOf(() => Room.updateMeta(id, { b: '2' }))
+    await expect.poll(redirects, { timeout: 15_000 }).not.toBe(before)
+    await Broadcast.publish(id, 'after move')
+    await expect.poll(() => heard).toEqual(['before move', 'after move'])
+    expect(lost).toEqual([])
+    return { asked, moved }
+  } finally {
+    off()
+    config.broadcast = previous === undefined ? {} : { onDeliveryLost: previous }
+  }
+}
+
 describe.runIf(runs)("the Redis page's ACL rule on a Cluster", () => {
   for (const store of STORES) {
     it(`${store.name}: every node takes the rule, and a user of it makes every call`, async () => {
@@ -129,8 +156,7 @@ describe.runIf(runs)("the Redis page's ACL rule on a Cluster", () => {
       const id = 'acl-moving'
       await Room.create(id)
       await Room.setMeta(id, { a: '1' })
-      const asked = await moveRoom(nodes, id, () => outcomeOf(() => Room.getParticipants(id)))
-      const moved = await outcomeOf(() => Room.updateMeta(id, { b: '2' }))
+      const { asked, moved } = await moveWhileSubscribed(nodes, id)
       // The replica takes the primary's slots over.
       await nodes.replica.admin.call('CLUSTER', 'FAILOVER')
       await settled(nodes, nodes.replica, 'master')

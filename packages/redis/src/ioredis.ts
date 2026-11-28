@@ -33,7 +33,6 @@ import { hasFlag } from '@ioredis/commands'
 import { Cluster, Command, Redis } from 'ioredis'
 import { isObject } from 'telefunc/__internal'
 import { assert } from './assert.js'
-import { twoOf } from './replies.js'
 import { getGlobalObject } from './getGlobalObject.js'
 
 type RedisClient = Redis | Cluster
@@ -386,17 +385,17 @@ function slotOf(key: string): number {
   return new Command('exists', [key]).getSlot()
 }
 
-/** A Cluster node a slot had, over a connection of its own that is READONLY, so that as a replica it answers a start
- *  read from its own data: its role, its history (its replication id) and the one before it (`master_replid2`), which a
- *  partial resync to a new master leaves it. */
+/** Replication evidence from a Cluster node that used to serve a slot. A partial resync leaves the old replication ID
+ *  in `master_replid2`. */
 type FormerMaster = {
-  readonly client: Redis
   readonly master: boolean
   readonly history: string
   readonly previous: string | null
   /** Whether, as master, it serves `key`'s slot: a command on the key that it redirects (`MOVED`, or `ASK` while it
    *  migrates the slot's keys) says it doesn't; null where it answers otherwise. */
   serves(key: string): Promise<boolean | null>
+  /** A replica serves keyed reads only if this connection can enter READONLY mode. */
+  replicaReader(): Promise<Redis | null>
   close(): void
 }
 
@@ -417,15 +416,15 @@ async function formerMaster(cluster: Cluster, node: string): Promise<FormerMaste
     retryStrategy: () => null,
   })
   redis.on('error', () => {})
-  const info = await readOnlyReplication(redis)
+  const info = await readReplication(redis)
   const history = info === null ? undefined : /^master_replid:(\w+)/m.exec(info)?.[1]
   if (info === null || history === undefined) {
     redis.disconnect()
     return null
   }
   const previous = /^master_replid2:(\w+)/m.exec(info)?.[1]
+  let reader: Promise<Redis | null> | undefined
   return {
-    client: redis,
     master: /^role:master\r?$/m.test(info),
     history,
     // A replica that never followed another history has an all-zero one.
@@ -438,19 +437,21 @@ async function formerMaster(cluster: Cluster, node: string): Promise<FormerMaste
         return error instanceof Error && /^(?:MOVED|ASK) /.test(error.message) ? false : null
       }
     },
+    replicaReader() {
+      return (reader ??= redis.readonly().then(
+        () => redis,
+        () => null,
+      ))
+    },
     close: () => redis.disconnect(),
   }
 }
 
-/** What `redis` says of its replication, once its connection is READONLY; null where it can't be reached or answers
- *  otherwise. */
-async function readOnlyReplication(redis: Redis): Promise<string | null> {
+/** Replication INFO doesn't require the optional READONLY grant. */
+async function readReplication(redis: Redis): Promise<string | null> {
   try {
     await redis.connect()
-    const replies = await redis.pipeline().info('replication').readonly().exec()
-    assert(replies !== null)
-    const [[infoError, info], [readOnlyError]] = twoOf(replies)
-    return infoError === null && readOnlyError === null && typeof info === 'string' ? info : null
+    return await redis.info('replication')
   } catch {
     return null
   }

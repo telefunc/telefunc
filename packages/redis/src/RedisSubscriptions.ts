@@ -872,7 +872,9 @@ async function lostNothing(attempt: RedisAttempt, old: FormerMaster | null, hist
   }
   if (old.previous === history) return here
   if (old.history !== history) return null
-  const there = await attempt.readStarts(old.client)
+  const replica = await old.replicaReader()
+  if (replica === null) return null
+  const there = await attempt.readStarts(replica)
   if (there === null || historyOf(there.authority) !== history) return null
   return attempt.holds(there.starts, here.starts) ? here : null
 }
