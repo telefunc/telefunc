@@ -52,7 +52,12 @@ function describeError(err: unknown): string {
   while (error !== undefined && !seen.has(error)) {
     seen.add(error)
     texts.push((hasProp(error, 'stack') && String(error.stack)) || describeValue(error))
-    error = hasProp(error, 'cause') ? error.cause : undefined
+    try {
+      error = hasProp(error, 'cause') ? error.cause : undefined
+    } catch {
+      // A cause can be an accessor. The error itself is still worth reporting.
+      break
+    }
   }
   return texts.join('\n[cause]: ')
 }

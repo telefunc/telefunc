@@ -17,13 +17,20 @@ function onBug(listener: (err: unknown) => void) {
  *  logged, whatever it is: the other listeners still get the bug, and whoever reported it goes on. */
 function callBugListeners(err: unknown) {
   for (const listener of [...globalObject.bugListeners]) {
-    let listening: unknown
     try {
-      listening = listener(err)
+      const listening = listener(err)
+      if (isPromise(listening)) void listening.then(undefined, logListenerError)
     } catch (listenerErr) {
-      logError(listenerErr)
-      continue
+      logListenerError(listenerErr)
     }
-    if (isPromise(listening)) void listening.then(undefined, logError)
+  }
+}
+
+/** A monitor's failure may itself throw while being formatted. Reporting still reaches the other monitors. */
+function logListenerError(error: unknown): void {
+  try {
+    logError(error)
+  } catch {
+    console.error('A Telefunc onBug listener failed, and its error could not be logged')
   }
 }
