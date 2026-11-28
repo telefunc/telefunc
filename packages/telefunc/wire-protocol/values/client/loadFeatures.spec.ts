@@ -1,4 +1,5 @@
 import { afterEach, assert, beforeEach, expect, onTestFinished, test, vi } from 'vitest'
+import { runInNewContext } from 'node:vm'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { concat, encodeIndexedFrame, encodeU32, textEncoder } from '../../wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
@@ -1124,6 +1125,40 @@ test('plain RPC: a response whose body an app read before rejects with TypeError
   reader.releaseLock()
   respond = () => response
   await expect(call([])).rejects.toBeInstanceOf(TypeError)
+})
+
+test('plain RPC: DataView response chunks reject with TypeError, cancel the body and release its reader', async () => {
+  const { call } = await page()
+  const cancel = vi.fn()
+  const body = new ReadableStream(
+    {
+      start(controller) {
+        controller.enqueue(new DataView(textEncoder.encode('{"ret":"ok"}').buffer))
+      },
+      pull(controller) {
+        controller.close()
+      },
+      cancel,
+    },
+    { highWaterMark: 0 },
+  )
+  respond = () => new Response(body)
+  await expect(call([])).rejects.toBeInstanceOf(TypeError)
+  expect(cancel).toHaveBeenCalledOnce()
+  expect(body.locked).toBe(false)
+})
+
+test('plain RPC: Uint8Array response chunks from another realm are accepted', async () => {
+  const { call } = await page()
+  const bytes: Uint8Array = runInNewContext('new Uint8Array(bytes)', { bytes: textEncoder.encode('{"ret":"ok"}') })
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes)
+      controller.close()
+    },
+  })
+  respond = () => new Response(body)
+  await expect(call([])).resolves.toBe('ok')
 })
 
 test("plain RPC: a text body that fails to decode rejects with that failure and lets the body's source go", async () => {

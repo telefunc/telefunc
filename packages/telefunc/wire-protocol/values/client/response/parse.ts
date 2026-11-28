@@ -27,6 +27,7 @@ import { loadFeatures, loadedFeatures, loadedFeature } from '../loadFeatures.js'
 const globalObject = getGlobalObject('wire-protocol/values/client/response/parse.ts', {
   gcRegistry: new GcRegistry(),
 })
+const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype)
 
 // ===== Types =====
 
@@ -125,6 +126,10 @@ async function readText(response: Response, callContext: CallContext): Promise<s
       const { done, value } = await reader.read()
       if (signal.aborted) break
       if (done) return text + decoder.decode()
+      // The intrinsic tag getter checks the type of the array across realms.
+      if (Reflect.get(typedArrayPrototype, Symbol.toStringTag, value) !== 'Uint8Array') {
+        throw new TypeError('Response body chunks must be Uint8Array')
+      }
       text += decoder.decode(value, { stream: true })
     }
   } catch (err) {
