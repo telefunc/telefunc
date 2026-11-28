@@ -19,6 +19,7 @@ export {
   letGo,
   maxPendingBytesOf,
   nearBudget,
+  publishHoldCost,
   queueMemory,
   releaseHolder,
   RoomWait,
@@ -302,8 +303,7 @@ function admitPublish(body: PublishBody): void {
 
 /** Whether one more page may hold `body` within `maxMemory`, once `admitPublish` made what room it could. */
 function fitsPublish(body: PublishBody): boolean {
-  const bytes = HELD_PUBLISH_OVERHEAD_BYTES + (body.refs === 0 ? body.frame.byteLength : 0)
-  return memory.total + bytes <= heldAtMost(maxMemoryOf(), memory.reserved)
+  return memory.total + publishHoldCost(body) <= heldAtMost(maxMemoryOf(), memory.reserved)
 }
 
 /** Fewest sharers first. A body another page has on the wire counts more references than holders here, so it's left. */
@@ -329,6 +329,11 @@ function heldPublishBytes(body: PublishBody): number {
   return body.frame.byteLength + HELD_PUBLISH_OVERHEAD_BYTES
 }
 
+/** What one more holder adds to the ledger. */
+function publishHoldCost(body: PublishBody): number {
+  return HELD_PUBLISH_OVERHEAD_BYTES + (body.refs === 0 ? body.frame.byteLength : 0)
+}
+
 /** What an answer of `result` holds in a replay, or while its page is away. */
 function heldAnswerBytes(result: string): number {
   return utf8ByteLength(result) + MESSAGE_FRAME_OVERHEAD_MAX_BYTES + HELD_SEND_OVERHEAD_BYTES
@@ -343,7 +348,8 @@ function hold(holder: MemoryHolder, held: number | PublishBody): void {
     memory.total += held
   } else {
     holder.heldBytes += heldPublishBytes(held)
-    memory.total += HELD_PUBLISH_OVERHEAD_BYTES + (held.refs++ === 0 ? held.frame.byteLength : 0)
+    memory.total += publishHoldCost(held)
+    held.refs++
   }
 }
 
@@ -361,7 +367,8 @@ function letGo(holder: MemoryHolder, held: number | PublishBody): void {
     memory.total -= held
   } else {
     holder.heldBytes -= heldPublishBytes(held)
-    memory.total -= HELD_PUBLISH_OVERHEAD_BYTES + (--held.refs === 0 ? held.frame.byteLength : 0)
+    held.refs--
+    memory.total -= publishHoldCost(held)
   }
   if (holder.heldBytes === 0) memory.holders.delete(holder)
   wakeSoon()

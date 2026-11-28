@@ -1173,7 +1173,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
   ): ChannelHandle | null {
     const buffer = channel._replayBuffer
     if (buffer === null) return null
-    channel._onPageAttach(open.lastSeq)
+    channel._onPageAttach(open.lastSeq, replay)
     const peer = new IndexedPeer({ sender, index: open.ix, replay: buffer })
     if (replay) for (const frame of buffer.getAfter(open.lastSeq)) sender.send(frame)
     channel._attachPeer(peer, open)

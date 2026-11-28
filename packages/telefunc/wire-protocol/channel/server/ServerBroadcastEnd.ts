@@ -7,11 +7,11 @@ import { assert } from '../../../utils/assert.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import {
   fitsPublish,
-  heldPublishBytes,
   hold,
   letGo,
   maxPendingBytesOf,
   nearBudget,
+  publishHoldCost,
   type MemoryHolder,
 } from './channelMemory.js'
 import type { PublishBody } from './PublishBody.js'
@@ -117,7 +117,7 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     if (this.overflowed !== null) return this.endOverflowed()
     if (!fitsPublish(body)) return this.overflow(body.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND)
     const { stream } = body
-    if (body.lossy && stream !== null) return this.lossyPublishDelivery().send(stream, body, heldPublishBytes(body))
+    if (body.lossy && stream !== null) return this.lossyPublishDelivery().send(stream, body, publishHoldCost(body))
     // A plain publish goes after the lossy ones waiting before it in its stream, or in every stream, oldest first.
     if (stream === EVERY_STREAM) this.lossyPublishes?.flush()
     else if (stream !== null) this.lossyPublishes?.flush(stream)
@@ -237,8 +237,8 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     this.lossyPublishes?.flush()
   }
 
-  protected override onPageHas(lastSeq: number, heldMs?: number): void {
-    super.onPageHas(lastSeq, heldMs)
+  protected override sendWaitingLossy(): void {
+    super.sendWaitingLossy()
     this.lossyPublishes?.mayGo()
   }
 

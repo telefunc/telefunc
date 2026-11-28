@@ -34,13 +34,16 @@ class PublishQueue {
     this.bodies[this.head + i] = bytes
   }
 
-  discardForgotten(release: (bytes: number) => void): void {
+  discardForgotten(release: (bytes: number) => void): number {
+    let discarded = 0
     for (let i = this.length - 1; i >= 0; i--) {
       const body = this.bodyAt(i)
       if (typeof body !== 'number') continue
       this.removeAt(i)
       release(body)
+      discarded++
     }
+    return discarded
   }
 
   indexAt(i: number): number {

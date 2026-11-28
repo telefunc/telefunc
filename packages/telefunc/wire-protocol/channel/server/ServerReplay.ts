@@ -275,10 +275,12 @@ class ServerReplay {
     this.movedAt = performance.now()
   }
 
-  /** A new wire cannot confirm the old wire's superseded publishes. */
-  attached(): void {
-    this.moving()
-    if (this.supersededBytes > 0) this.publishes.discardForgotten((bytes) => this.letPublishGo(bytes))
+  /** Drops confirmation records that a replacement wire cannot acknowledge. */
+  discardSuperseded(): { bytes: number; messages: number } | undefined {
+    const bytes = this.supersededBytes
+    if (bytes === 0) return
+    const messages = this.publishes.discardForgotten((bytes) => this.letPublishGo(bytes))
+    return { bytes, messages }
   }
 
   /** Since when the oldest publish its page hasn't confirmed waits for that: since it was sent, or since its page began

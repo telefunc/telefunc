@@ -668,7 +668,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  an open one applies the RECONCILE's broadcast want before `onOpen` fires. */
   _attachPeer(peer: IndexedPeer, state?: AttachState): void {
     const live = this._phase !== 'ended'
-    this._replayBuffer?.attached()
+    this._replayBuffer?.moving()
     if (live) {
       this.stopPageWait()
       this.peer = peer
@@ -677,6 +677,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     // What the page gets on attach, in this order: the held sends, the offline buffer, the answers, the end.
     this.sendHeldForAttach(peer)
+    if (this.peer === peer) this.sendWaitingLossy()
     this.offlineBuffer.flush(peer)
     this.sendPendingAckRes(peer)
     if (this.endLost) {
@@ -1019,9 +1020,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** @internal The page attaches, having received this channel's frames through `lastSeq`. */
-  _onPageAttach(lastSeq: number): void {
-    this.endLost = this._replayBuffer?.lacksEndAfter(lastSeq) ?? false
-    this.onPageHas(lastSeq)
+  _onPageAttach(lastSeq: number, replay: boolean): void {
+    const buffer = this._replayBuffer
+    if (buffer === null) return
+    this.endLost = buffer.lacksEndAfter(lastSeq)
+    buffer.acknowledge(lastSeq)
+    if (!replay) return
+    const discarded = buffer.discardSuperseded()
+    // Only its own lossy sends count against credit.
+    if (discarded && this.lossySends) this.sendCredit.refund(discarded.bytes, discarded.messages)
   }
 
   /** @internal */
@@ -1042,8 +1049,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** The page received this channel's frames through `lastSeq`, so the replay buffer lets them go. */
-  protected onPageHas(lastSeq: number, heldMs?: number): void {
+  private onPageHas(lastSeq: number, heldMs?: number): void {
     this._replayBuffer?.acknowledge(lastSeq, heldMs)
+    this.sendWaitingLossy()
+  }
+
+  protected sendWaitingLossy(): void {
     this.lossySends?.mayGo()
   }
 
