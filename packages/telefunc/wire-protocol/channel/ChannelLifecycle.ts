@@ -1,9 +1,10 @@
 export { ChannelLifecycle }
-export type { ChannelLifecycleOwner }
+export type { ChannelLifecycleOwner, EndingFrame, EndingSide }
 
 import type { ChannelCloseCallback, ChannelCloseResult } from './channel.js'
-import { ChannelClosedError } from './channelErrors.js'
-import { ChannelEnding, type EndingFrame, type EndingSide } from './ChannelEnding.js'
+import { ChannelClosedError, ChannelCloseUnknownError } from './channelErrors.js'
+import { END_CAUSE } from './endCause.js'
+import { assertProtocol } from '../wire/protocolViolation.js'
 import { Abort, type AbortError } from '../../shared/Abort.js'
 import { Listeners } from '../../utils/Listeners.js'
 import { isPromise } from '../../utils/isPromise.js'
@@ -24,6 +25,40 @@ interface ChannelLifecycleOwner {
   _abortFromCallback(err: AbortError): void
 }
 
+type EndingSide = 'page' | 'server'
+
+/** The frames a graceful close sends, each sequenced behind every message its end still owes:
+ *  - `close`: CLOSE, "I send nothing more; close within `timeoutMs`". The end that begins the close sends it once; the
+ *    end that follows sends it again only to ask for a shorter deadline, always after its `closeAck`.
+ *  - `closeAck`: CLOSE_ACK, the follower's own "I send nothing more", sent the moment the CLOSE arrives.
+ *  - `closeDone`: CLOSE_DONE, "my side of the close is done": its acknowledged sends are answered and its `onClose()`
+ *    cleanup settled. The deciding end sends its own only once it has the other's, so from it, it means "closed".
+ *  - `timedOut`: ERROR CLOSE_TIMED_OUT, the deciding end's deadline passed first. */
+type EndingFrame =
+  | { kind: 'close'; timeoutMs: number }
+  | { kind: 'closeAck' }
+  | { kind: 'closeDone' }
+  | { kind: 'timedOut' }
+
+/** Its close, once it began or follows one. `timerAt`: the deadline, or the follower's bound. */
+type Closing =
+  /** Sent its CLOSE and hasn't heard the other end yet. */
+  | { role: 'initiator'; timerAt: number }
+  /** Owns the deadline and alone sends a graceful verdict: the end whose CLOSE went first, or the server on a cross.
+   *  The other end stopped sending; `peerDone`: its CLOSE_DONE arrived. */
+  | { role: 'decider'; timerAt: number; peerDone: boolean }
+  /** Waits for the decider's verdict, at most the close's timeout and the reconnect window past the CLOSE. The other end
+   *  stopped sending; `sentDone`: this end sent its CLOSE_DONE. */
+  | { role: 'follower'; timerAt: number; sentDone: boolean }
+
+type Terminal =
+  /** `endWith()` sends its own end, as an abort does. */
+  | { ended: false }
+  /** It ended: with `error`, or gracefully. */
+  | { ended: true; error: Error | undefined }
+
+const SENDING_OWN_END: Terminal = { ended: false }
+
 type ChannelLifecycleOptions = {
   owner: ChannelLifecycleOwner
   side: EndingSide
@@ -33,12 +68,17 @@ type ChannelLifecycleOptions = {
   reportError: (err: unknown) => void
 }
 
-/** A channel end's open and close callbacks and how it ends (`ChannelEnding`): its timer, its `onClose()` cleanup, the
+/** A channel end's open and close callbacks and how it ends: its timer, its `onClose()` cleanup, the
  *  acknowledged sends its close waits for, and the promises that tell the outcome. */
 class ChannelLifecycle {
   private readonly owner: ChannelLifecycleOwner
   private readonly reportError: (err: unknown) => void
-  private readonly ending: ChannelEnding
+  private readonly side: EndingSide
+  private readonly reconnectWindowMs: () => number
+  private closing: Closing | null = null
+  private terminal: Terminal | null = null
+  private owed = 0
+  private cleanup: 'idle' | 'running' | 'settled' = 'idle'
   private openListeners = new Listeners<() => void>()
   private didFireOpen = false
   private closeListeners = new Listeners<ChannelCloseCallback>()
@@ -62,7 +102,7 @@ class ChannelLifecycle {
       const opened = createDeferred()
       this.openedDeferred = opened
       if (this.didFireOpen) opened.resolve()
-      else if (this.ending.ended) opened.reject(this.ending.error ?? new ChannelClosedError())
+      else if (this.ended) opened.reject(this.closeError ?? new ChannelClosedError())
       opened.promise.catch(() => {})
     }
     return this.openedDeferred.promise
@@ -74,7 +114,7 @@ class ChannelLifecycle {
     if (this.closedDeferred === null) {
       const closed = createDeferred<ChannelCloseResult>()
       this.closedDeferred = closed
-      if (this.ending.ended) closed.resolve(this.outcome)
+      if (this.ended) closed.resolve(this.outcome)
     }
     return this.closedDeferred.promise
   }
@@ -82,50 +122,38 @@ class ChannelLifecycle {
   constructor({ owner, side, reconnectWindowMs, reportError }: ChannelLifecycleOptions) {
     this.owner = owner
     this.reportError = reportError
-    this.ending = new ChannelEnding({
-      side,
-      port: {
-        send: (frame) => this.owner._sendEnding(frame),
-        stop: () => this.owner._stopSending(),
-        startCleanup: (err) => this.fireClose(err),
-        end: (err) => this.onEnded(err),
-        otherEnded: () => this.owner._otherEnded(),
-        armTimer: (at) => this.timer.arm(at, () => this.ending.timerFired()),
-        disarmTimer: () => this.timer.disarm(),
-        now: () => performance.now(),
-        reconnectWindowMs,
-      },
-    })
+    this.side = side
+    this.reconnectWindowMs = reconnectWindowMs
   }
 
   get ended(): boolean {
-    return this.ending.ended
+    return this.terminal?.ended === true
   }
 
   /** It takes no more sends: it began or follows a close, it sends its own end, or it ended. */
   get stopped(): boolean {
-    return this.ending.stopped
+    return this.closing !== null || this.terminal !== null
   }
 
   /** Its close callbacks have been called. */
   get closeFired(): boolean {
-    return this.ending.cleanupStarted
+    return this.cleanup !== 'idle'
   }
 
   /** What the channel ended with, where it didn't close gracefully. */
   get closeError(): Error | undefined {
-    return this.ending.error
+    return this.terminal?.ended ? this.terminal.error : undefined
   }
 
   /** How it ended: `null` where it closed gracefully. */
   private get outcome(): ChannelCloseResult {
-    return this.ending.error ?? null
+    return this.closeError ?? null
   }
 
   onOpen(callback: () => void, options?: { signal?: AbortSignal }): () => void {
     if (!this.didFireOpen) {
       // Ended unopened, it never opens: nothing would let go of the registration, or of its signal's listener.
-      if (this.ending.ended) return () => {}
+      if (this.ended) return () => {}
       return this.openListeners.add(callback, options)
     }
     if (!options?.signal?.aborted) this.invokeOpenCallback(callback)
@@ -167,20 +195,20 @@ class ChannelLifecycle {
   /** What `send()` throws once the channel takes no more sends: after the end, one error for the channel, with what it
    *  ended with as `cause`. */
   sendRefusal(): ChannelClosedError {
-    if (!this.ending.ended) return new ChannelClosedError()
-    this.sendAfterEndError ??= new ChannelClosedError(undefined, this.ending.error && { cause: this.ending.error })
+    if (!this.ended) return new ChannelClosedError()
+    this.sendAfterEndError ??= new ChannelClosedError(undefined, this.closeError && { cause: this.closeError })
     return this.sendAfterEndError
   }
 
   /** Reports what a callback threw or rejected with, unless it is the error this channel ended with, as a send it
    *  awaited rejects with: that is no bug, and `closed` gives it already. */
   private report(err: unknown): void {
-    if (this.ending.error !== undefined && err === this.ending.error) return
+    if (this.closeError !== undefined && err === this.closeError) return
     this.reportError(err)
   }
 
   onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void {
-    if (!this.ending.cleanupStarted) return this.closeListeners.add(callback, options)
+    if (this.cleanup === 'idle') return this.closeListeners.add(callback, options)
     if (!options?.signal?.aborted) void this.invokeCloseCallback(callback, this.outcome)
     return () => {}
   }
@@ -189,54 +217,127 @@ class ChannelLifecycle {
    *  the one outcome, `closed`'s. `peerAbsent`: no page will ever attach. */
   close(timeoutMs: number, { peerAbsent = false } = {}): Promise<ChannelCloseResult> {
     const closed = this.closed
-    this.ending.localClose(timeoutMs, { peerAbsent })
+    this.beginClose(timeoutMs, peerAbsent)
     return closed
   }
 
+  /** The app closes this end within `timeoutMs`. `peerAbsent`: no other end is there to wait for, so it decides alone;
+   *  its frames still go, for one that attaches later. */
+  private beginClose(timeoutMs: number, peerAbsent: boolean): void {
+    if (this.ended) return
+    const at = performance.now() + timeoutMs
+    const { closing } = this
+    if (closing === null) {
+      const begun: Closing = peerAbsent
+        ? { role: 'decider', timerAt: Number.POSITIVE_INFINITY, peerDone: true }
+        : { role: 'initiator', timerAt: Number.POSITIVE_INFINITY }
+      this.closing = begun
+      this.owner._stopSending()
+      this.owner._sendEnding({ kind: 'close', timeoutMs })
+      this.setTimer(begun, at)
+    } else if (closing.role === 'follower') {
+      // Only the decider's deadline ends the close: this end asks it for a shorter one.
+      if (at + this.reconnectWindowMs() >= closing.timerAt) return
+      this.owner._sendEnding({ kind: 'close', timeoutMs })
+      this.setTimer(closing, at + this.reconnectWindowMs())
+      return
+    } else if (at < closing.timerAt) this.setTimer(closing, at)
+    this.progress()
+  }
+
+  /** The other end's CLOSE arrived. This and the two after it come only before it ends: an ended channel hands its end
+   *  no frame of the other end's. */
   peerClose(timeoutMs: number): void {
-    this.ending.peerClose(timeoutMs)
+    const at = performance.now() + timeoutMs
+    const { closing } = this
+    if (closing === null) {
+      const follower: Closing = { role: 'follower', timerAt: Number.POSITIVE_INFINITY, sentDone: false }
+      this.closing = follower
+      this.owner._stopSending()
+      this.owner._sendEnding({ kind: 'closeAck' })
+      this.setTimer(follower, at + this.reconnectWindowMs())
+      return this.progress()
+    }
+    switch (closing.role) {
+      case 'initiator':
+        // A cross: each end sent its CLOSE before it had the other's, and each CLOSE is its end's stop boundary.
+        if (this.side === 'server') {
+          const decider: Closing = { role: 'decider', timerAt: closing.timerAt, peerDone: false }
+          this.closing = decider
+          if (at < decider.timerAt) this.setTimer(decider, at)
+        } else {
+          const follower: Closing = { role: 'follower', timerAt: closing.timerAt, sentDone: false }
+          this.closing = follower
+          this.setTimer(follower, Math.min(follower.timerAt, at) + this.reconnectWindowMs())
+        }
+        break
+      case 'decider':
+        // The follower asks for a shorter deadline: its CLOSE_ACK, or its crossing CLOSE, came first.
+        if (at < closing.timerAt) this.setTimer(closing, at)
+        break
+      case 'follower':
+        assertProtocol(false, 'a second CLOSE from the deciding end')
+    }
+    this.progress()
   }
 
   peerCloseAck(): void {
-    this.ending.peerCloseAck()
+    const { closing } = this
+    assertProtocol(closing?.role === 'initiator', 'CLOSE_ACK without a CLOSE')
+    this.closing = { role: 'decider', timerAt: closing.timerAt, peerDone: false }
+    this.progress()
   }
 
   peerCloseDone(): void {
-    this.ending.peerCloseDone()
+    const { closing } = this
+    assertProtocol(closing !== null && closing.role !== 'initiator', 'CLOSE_DONE before its boundary')
+    if (closing.role === 'follower') {
+      this.owner._otherEnded()
+      return this.finish(undefined)
+    }
+    closing.peerDone = true
+    this.progress()
   }
 
-  /** The connection ended for good with `err`: during a close, neither end can learn its outcome. */
-  connectionLost(err: Error): void {
-    this.ending.connectionLost(err)
-  }
-
-  /** Ends the channel with `err`, after `send` sends its terminal word, unless it ended already; true where it did. */
+  /** Ends it with `err` once `send` sent its terminal word, unless it ended already: the first terminal word, its own or
+   *  one that arrived (no `send`), wins. It ends also where `send` throws. True where it ended it. */
   endWith(err: Error | undefined, send?: () => void): boolean {
-    if (!send) return this.ending.endWith(err)
-    return this.ending.endWith(err, () => {
-      send()
-      this.sentOwnEnd = true
-    })
+    if (this.ended) return false
+    if (send) this.terminal = SENDING_OWN_END
+    try {
+      if (send) {
+        send()
+        this.sentOwnEnd = true
+      }
+    } finally {
+      this.finish(err)
+    }
+    return true
+  }
+
+  /** The connection ended for good with `err`. During a close, the verdict can no longer cross, on either end: it ends
+   *  with that unknown, `err` its cause. A decider that has the other end's CLOSE_DONE still chooses the verdict, once
+   *  its own side is done. */
+  connectionLost(err: Error): void {
+    const { closing } = this
+    if (closing?.role === 'decider' && closing.peerDone) return
+    this.endWith(closing === null ? err : new ChannelCloseUnknownError({ cause: err }))
   }
 
   /** What a send still waiting for credit settles with as the channel ends. Its frame already went: it resolves where
    *  that frame is ahead of an end the other side reads, a graceful close or this end's own terminal word (`abort()`),
    *  and rejects with the channel's outcome otherwise, a page that left included. */
   get waitingSendOutcome(): Error | undefined {
-    return this.sentOwnEnd ? undefined : this.ending.error
+    return this.sentOwnEnd ? undefined : this.closeError
   }
 
   /** The close waits for `promise`, an ack request's answer. */
   trackAck<T>(promise: Promise<T>): Promise<T> {
-    this.ending.owedStarted()
-    return promise.finally(() => this.ending.owedSettled())
-  }
-
-  private onEnded(err: Error | undefined): void {
-    this.owner._finalize(err)
-    if (!this.didFireOpen) this.openedDeferred?.reject(err ?? new ChannelClosedError())
-    this.closedDeferred?.resolve(this.outcome)
-    this.openListeners.clear()
+    this.owed++
+    return promise.finally(() => {
+      this.owed--
+      this.progress()
+    })
   }
 
   /** Calls the close callbacks with `err`; a graceful close (`undefined`, which they receive as `null`) waits for the
@@ -276,7 +377,9 @@ class ChannelLifecycle {
   }
 
   private cleanupStepDone(): void {
-    if (--this.runningCleanup === 0) this.ending.cleanupSettled()
+    if (--this.runningCleanup !== 0) return
+    if (this.cleanup === 'running') this.cleanup = 'settled'
+    this.progress()
   }
 
   /** Where `callback` returned a Promise, returns one that settles after it. What it throws or rejects with is
@@ -293,7 +396,59 @@ class ChannelLifecycle {
   }
 
   private closeCallbackFailed(err: unknown): void {
-    if (err instanceof Abort && !this.ending.ended) this.owner._abortFromCallback(err)
+    if (err instanceof Abort && !this.ended) this.owner._abortFromCallback(err)
     else this.report(err)
+  }
+
+  private timerFired(): void {
+    if (this.ended) return
+    if (this.closing?.role === 'follower') return this.finish(new ChannelCloseUnknownError())
+    this.progress()
+  }
+
+  private setTimer(closing: Closing, at: number): void {
+    closing.timerAt = at
+    if (at !== Number.POSITIVE_INFINITY) this.timer.arm(at, () => this.timerFired())
+  }
+
+  private progress(): void {
+    const { closing } = this
+    if (this.ended || closing === null) return
+    // Past the initiator, the other end's CLOSE or CLOSE_ACK arrived: it sends nothing more.
+    if (this.cleanup === 'idle' && closing.role !== 'initiator' && this.owed === 0) {
+      this.cleanup = 'running'
+      this.fireClose(undefined)
+      if (this.ended) return
+    }
+    if (closing.role === 'follower') {
+      if (this.cleanup === 'settled' && !closing.sentDone) {
+        closing.sentDone = true
+        this.owner._sendEnding({ kind: 'closeDone' })
+      }
+      return
+    }
+    // The deadline is checked where the verdict is chosen: a timer that fires late never turns into a graceful close.
+    if (performance.now() >= closing.timerAt) {
+      this.owner._sendEnding({ kind: 'timedOut' })
+      // The channel may end with a terminal word of its own in the timeout's place.
+      if (this.ended) return
+      return this.finish(END_CAUSE.closeTimedOut.error())
+    }
+    if (closing.role === 'decider' && closing.peerDone && this.cleanup === 'settled') {
+      this.owner._sendEnding({ kind: 'closeDone' })
+      this.finish(undefined)
+    }
+  }
+
+  private finish(err: Error | undefined): void {
+    this.terminal = { ended: true, error: err }
+    this.timer.disarm()
+    const runCleanup = this.cleanup === 'idle'
+    if (runCleanup) this.cleanup = 'settled'
+    this.owner._finalize(err)
+    if (!this.didFireOpen) this.openedDeferred?.reject(err ?? new ChannelClosedError())
+    this.closedDeferred?.resolve(this.outcome)
+    this.openListeners.clear()
+    if (runCleanup) this.fireClose(err)
   }
 }

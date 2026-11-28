@@ -50,7 +50,7 @@ import type { IndexedPeer } from './IndexedPeer.js'
 import type { AttachState, Want } from '../../wire/payloads.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { Abort } from '../../../node/server/Abort.js'
-import type { EndingFrame } from '../ChannelEnding.js'
+import type { EndingFrame } from '../ChannelLifecycle.js'
 assertIsNotBrowser()
 
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')

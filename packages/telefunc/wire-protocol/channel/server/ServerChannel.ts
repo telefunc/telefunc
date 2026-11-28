@@ -58,7 +58,7 @@ import { forListener, listenerAnswer } from '../listenerAnswer.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { TIMER_DELAY_MAX_MS, UPGRADE_MAX_ID_BYTES } from '../../constants.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
-import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
+import { ChannelLifecycle, type ChannelLifecycleOwner, type EndingFrame } from '../ChannelLifecycle.js'
 import { creditWindowOf, type CreditOwner } from '../../flowControl/credit.js'
 import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import { SelfTime } from '../../flowControl/SelfTime.js'
@@ -74,7 +74,6 @@ import {
 import { ServerReplay } from './ServerReplay.js'
 import { LossyDelivery, type LossyHost } from './LossyDelivery.js'
 import { getChannelConfig, reconnectWindow } from '../../../node/server/serverConfig.js'
-import type { EndingFrame } from '../ChannelEnding.js'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ACK_STATUS, encode, isCloseOutcomeFrame, isSequencedFrame, tellsLastRead } from '../../wire/frame.js'
@@ -141,7 +140,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** @internal Open; closing once it takes no more sends (`close`, `abort` or the page's CLOSE began it); ended.
-   *  `ChannelEnding` owns it. */
+   *  `ChannelLifecycle` owns it. */
   get _phase(): 'open' | 'closing' | 'ended' {
     if (this.lifecycle.ended) return 'ended'
     return this.lifecycle.stopped ? 'closing' : 'open'

@@ -46,8 +46,7 @@ import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import { SelfTime } from '../../flowControl/SelfTime.js'
 import { SendCredit } from '../../flowControl/SendCredit.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
-import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
-import type { EndingFrame } from '../ChannelEnding.js'
+import { ChannelLifecycle, type ChannelLifecycleOwner, type EndingFrame } from '../ChannelLifecycle.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import { ChannelAttach } from './ChannelAttach.js'
 import type { CreditOwner } from '../../flowControl/credit.js'
@@ -168,7 +167,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.stopped
   }
 
-  /** It takes no more sends: it began or follows a close, or ended. `ChannelEnding` owns it. */
+  /** It takes no more sends: it began or follows a close, or ended. `ChannelLifecycle` owns it. */
   protected get stopped(): boolean {
     return this.lifecycle.stopped
   }
