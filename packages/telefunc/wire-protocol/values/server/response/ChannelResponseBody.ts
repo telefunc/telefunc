@@ -6,7 +6,6 @@ import { concat } from '../../../wire/envelope.js'
 import { CHANNEL_PUMP_TAG_ERROR } from '../../../constants.js'
 import { ServerChannel } from '../../../channel/server/ServerChannel.js'
 import { ChannelClosedError } from '../../../channel/channelErrors.js'
-import { reconnectWindow } from '../../../../node/server/serverConfig.js'
 import { getChannelMux } from '../../../channel/server/ChannelMux.js'
 import { Abort } from '../../../../node/server/Abort.js'
 import { encodeErrorPayload } from './StreamingResponseBody.js'
@@ -50,6 +49,7 @@ function pumpProducerToChannel(
   channel: ServerChannel<never, never>,
   producer: StreamingProducer,
   runContext: ChannelPumpRunContext,
+  reconnectWindow: () => number,
   onComplete: () => void,
 ): void {
   getChannelMux().registerChannel(channel as unknown as ServerChannel<unknown, unknown>)

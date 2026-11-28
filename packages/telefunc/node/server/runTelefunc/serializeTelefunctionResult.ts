@@ -5,7 +5,7 @@ import { assert, assertUsage } from '../../../utils/assert.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
 import { createStreamingReplacer } from '../../../wire-protocol/values/server/response/registry.js'
-import { getAdapterMaxFrameBytes, getServerExtensionTypes } from '../serverConfig.js'
+import { getAdapterMaxFrameBytes, getServerExtensionTypes, reconnectWindow } from '../serverConfig.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
 import { buildShieldValidators, type ShieldValidators, type ValueShields, type ShieldLogConfig } from '../shield.js'
@@ -158,7 +158,8 @@ class ResponseValues {
 
   private start({ channel, producer }: Staged): void {
     const { requestContext } = this.run
-    if (producer) return pumpProducerToChannel(channel, producer, this.run, requestContext.trackPending())
+    if (producer)
+      return pumpProducerToChannel(channel, producer, this.run, reconnectWindow, requestContext.trackPending())
     channel._validators = this.validatorsOf(channel)
     carryChannel(channel, requestContext)
   }

@@ -3,8 +3,8 @@
 // upload ends. A text response can carry channels the client needs to attach before reading from the upload.
 // In legacy abort mode, Deno can abort request.signal on a successful response. Ignore that signal once the upload
 // ends or a text response is sent. A failed body read can still report a disconnect.
-// TODO: remove the signal's unhook once https://github.com/denoland/deno/pull/35733 is released and Telefunc drops
-// legacy abort mode, and the held body once a fix of https://github.com/denoland/deno/issues/36966 is released.
+// TODO: remove once Deno ships https://github.com/denoland/deno/pull/35733 and Telefunc drops legacy abort mode (signal unhook).
+// TODO: remove once Deno ships a fix for https://github.com/denoland/deno/issues/36966 (held body).
 export { holdUploadResponse }
 
 import { hasProp } from '../utils/hasProp.js'
