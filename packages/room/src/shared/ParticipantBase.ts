@@ -176,11 +176,11 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
     assertPublishOptions(options)
     if (options?.track === undefined) return markHandled(this.publishText(this._ownMessage(data), options?.retain))
-    return this.publishOnTrack(encodeMessageFrame(this.id, data, options), options)
+    return markHandled(this.publishFrame(encodeMessageFrame(this.id, data, options), options))
   }
 
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
-    return this.publishOnTrack(encodeBinaryFrame(this.id, data, options), options)
+    return markHandled(this.publishFrame(encodeBinaryFrame(this.id, data, options), options))
   }
 
   private async publishText(data: unknown, retain: boolean | undefined): Promise<ChannelPublishAck> {
@@ -188,13 +188,12 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
     return await this.link.publishText(this.id, data, retain)
   }
 
-  private publishOnTrack(framed: Uint8Array, options: BinaryPublishOptions | undefined): Promise<ChannelPublishAck> {
-    return markHandled(this.publishFrame(framed, this.trackStreamOf(options?.track), options?.lossy === true))
-  }
-
-  private async publishFrame(framed: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck> {
+  private async publishFrame(
+    framed: Uint8Array,
+    options: BinaryPublishOptions | undefined,
+  ): Promise<ChannelPublishAck> {
     this.assertActive()
-    return await this.link.publishFrame(framed, stream, lossy)
+    return await this.link.publishFrame(framed, this.trackStreamOf(options?.track), options?.lossy === true)
   }
 
   /** The stream this member's publishes on `track` go up in, in order: a newer lossy one replaces an older one still

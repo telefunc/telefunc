@@ -56,8 +56,7 @@ type SubscriptionDriver<Source> = {
  */
 type BroadcastDriver = SubscriptionDriver<BroadcastRoute> & {
   /** Keeps `payload` past the call only as a copy: the caller reuses its bytes. A publish this host makes after
-   *  `subscribe()` returned reaches that subscription, so a driver whose publish can overtake its own subscribe (Redis,
-   *  on its two connections) holds the publish until the subscription is ready. */
+   *  `subscribe()` returned reaches that subscription. */
   publish<Kind extends BroadcastKind>(
     route: BroadcastRoute<Kind>,
     payload: BroadcastPayload<Kind>,

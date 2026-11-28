@@ -24,9 +24,8 @@ export { unrefTimer } from '../../utils/unrefTimer.js'
 export { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 
 // An add-on that drives a page's channel ends: Room's stubs and its client.
-export type { ServerBroadcastEnd }
 export type { ClientBroadcast } from '../../client/__internal.js'
-export type { BroadcastEndOwner } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
+export type { BroadcastEndOwner, ServerBroadcastEnd } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 export type { BroadcastKind } from '../../wire-protocol/wire/payloads.js'
 export type { ChannelPublishAck, ChannelPublishInfo } from '../../wire-protocol/channel/channel.js'
 export { publishBody, type PublishBody } from '../../wire-protocol/channel/server/PublishBody.js'
@@ -127,23 +126,3 @@ export type {
   SqlStore,
   SqlValue,
 } from '../../wire-protocol/adapter/cloudflare/sqlStorage.js'
-
-import type { ServerBroadcastEnd as ServerBroadcastEndClass } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
-
-/** The members of a page's broadcast end that an add-on drives. */
-type ServerBroadcastEnd = Pick<
-  ServerBroadcastEndClass,
-  | 'id'
-  | 'setOwner'
-  | 'terminateWire'
-  | 'trackAck'
-  | 'isAttached'
-  | 'isClosed'
-  | 'isConnected'
-  | 'deliver'
-  | 'listen'
-  | 'onClose'
-  | 'onDisconnect'
-  | 'onReconnect'
-  | 'close'
->

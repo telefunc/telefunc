@@ -4,8 +4,8 @@ export type { BackendErrorCode, BackendCallOutcome }
 import { markErrorClass } from '../../shared/markErrorClass.js'
 
 /** What went wrong with the store, the same for every backend:
- *  - `'unreachable'`: the connection to it failed or closed, or its reply didn't come in time (Redis: 15 s, or the
- *    `commandTimeout` of the app's client); it works again once the store is reachable.
+ *  - `'unreachable'`: the connection to it failed or closed, or its reply didn't come in time. It works again once the
+ *    store is reachable.
  *  - `'unavailable'`: it can't serve this now, and a later call may succeed (loading its data, busy, out of memory, a
  *    replica, replicas behind, a failover); the message says what it needs if the state lasts.
  *  - `'denied'`: it refuses until an operator changes it (its permissions, credentials or commands).
