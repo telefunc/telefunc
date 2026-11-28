@@ -1,37 +1,45 @@
-export { nodeReadableToWebRequest, normalizeHeaders }
+export { nodeReadableToWebRequest, normalizeHeaders, unwatchEarlyReadableError }
 
 import type { EventEmitter } from 'node:events'
 import type { Readable, Writable } from 'node:stream'
+import { getStreamNodeModule, loadStreamNodeModuleOnce } from './loadStreamNodeModule.js'
 import { assertIsNotBrowser } from './assertIsNotBrowser.js'
 assertIsNotBrowser()
 
 type HeadersInput = Record<string, string | string[] | undefined> | [string, string][] | Headers
 
-function nodeReadableToWebRequest(
+async function nodeReadableToWebRequest(
   readable: Readable,
   url: string,
   method: string,
-  headers: HeadersInput,
+  headers: Headers,
+  nativeBody: boolean,
   response?: Writable,
-): { request: Request; unwatch: () => void; clientGone: AbortSignal } {
-  // `new Request()` refuses a body for these methods.
-  const hasBody = !['GET', 'HEAD'].includes(method.toUpperCase())
-  const body = hasBody ? webBodyOf(readable) : null
-
-  const headerPairs = normalizeHeaders(headers)
-
+): Promise<{ request: Request; unwatch: () => void; clientGone: AbortSignal }> {
+  // Native readers observe `readable.errored` when they take over. Keep errors handled until then or until close.
+  if (!readable.closed) {
+    readable.on('error', ignoreEarlyReadableError)
+    readable.once('close', unwatchEarlyReadableError)
+  }
   // Wire the readable's close event to an AbortSignal so that
   // request.signal fires when the client disconnects.
   // `close` fires both after normal completion and on premature disconnect —
   // readableAborted is true when the stream was destroyed before emitting 'end'
   // (i.e. client disconnected).
   const abortController = new AbortController()
-  readable.on('close', () => {
-    if (readable.readableAborted && !abortController.signal.aborted) abortController.abort()
+  readable.once('close', () => {
+    if (readable.readableAborted) abortController.abort(readable.errored ?? undefined)
   })
+  let body: ReadableStream<Uint8Array<ArrayBuffer>> | null = null
+  if (!nativeBody && !['GET', 'HEAD'].includes(method.toUpperCase())) {
+    await loadStreamNodeModuleOnce()
+    const { Readable } = getStreamNodeModule()
+    body = Readable.toWeb(readable, { strategy: { highWaterMark: 0 } }) as ReadableStream<Uint8Array<ArrayBuffer>>
+    unwatchEarlyReadableError.call(readable)
+  }
   const request = new Request(url, {
     method,
-    headers: headerPairs,
+    headers,
     body,
     signal: abortController.signal,
     // @ts-expect-error duplex required for streaming request bodies
@@ -66,24 +74,11 @@ function socketClosesBeforeEnd(readable: Readable, socket: EventEmitter | null |
   return gone.signal
 }
 
-/** `readable` as a Web body that reads it only once read itself. A binary call's or an SSE upload's body is read off
- *  `readable` by Telefunc's own reader: `Readable.toWeb()` would copy all of it into a queue nothing reads. */
-function webBodyOf(readable: Readable): ReadableStream<Uint8Array> {
-  // Its generator starts at the first `next()`: until then nothing listens to `readable`.
-  const chunks = readable[Symbol.asyncIterator]()
-  return new ReadableStream<Uint8Array>(
-    {
-      async pull(controller) {
-        const { value, done } = await chunks.next()
-        if (done) controller.close()
-        else controller.enqueue(value)
-      },
-      async cancel() {
-        await chunks.return?.()
-      },
-    },
-    { highWaterMark: 0 },
-  )
+function ignoreEarlyReadableError(): void {}
+
+function unwatchEarlyReadableError(this: Readable): void {
+  this.off('error', ignoreEarlyReadableError)
+  this.off('close', unwatchEarlyReadableError)
 }
 
 function normalizeHeaders(headers: HeadersInput): [string, string][] {

@@ -7,13 +7,14 @@ import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
 import { nodeReadableToWebRequest, normalizeHeaders } from '../../utils/nodeReadableToWebRequest.js'
 import type { Readable, Writable } from 'node:stream'
+import { readRequestUrl } from '../../utils/getUrlPathname.js'
+import { REQUEST_KIND, REQUEST_KIND_HEADER } from '../../wire-protocol/wire/requestKind.js'
 
 type HttpRequestResolved = {
   request: Request
   /** Node `Readable` source for the request body, when the entry adapter has one
    *  (currently: `serve/node.ts` passes its `IncomingMessage`). Downstream body
-   *  consumers prefer this over `request.body` to skip Node's webstreams overhead,
-   *  and are then its one reader: `request.body` reads it only once something reads it.
+   *  consumers read it directly for binary and SSE requests, which have no Web body.
    *  `undefined` on Web-runtime adapters (`{ request }` input from Bun / Deno / edge). */
   readable?: Readable
   context?: Telefunc.Context
@@ -111,13 +112,18 @@ async function resolveHttpRequest(
     }
   }
   // `url` is either the full URL (e.g. `request.url`) or only its pathname (e.g. `req.originalUrl`)
-  const url = new URL(httpRequest.url, 'http://localhost').href
+  const url = readRequestUrl(httpRequest.url)
+  assertUsage(url, '`serve({ url })`: argument `url` should be a valid request URL or path.')
   if ('readable' in httpRequest) {
-    const { request, unwatch, clientGone } = nodeReadableToWebRequest(
+    const headers = new Headers(normalizeHeaders(httpRequest.headers))
+    const kind = headers.get(REQUEST_KIND_HEADER)
+    const nativeBody = kind === REQUEST_KIND.BINARY || kind === REQUEST_KIND.SSE
+    const { request, unwatch, clientGone } = await nodeReadableToWebRequest(
       httpRequest.readable,
-      url,
+      url.href,
       httpRequest.method,
-      httpRequest.headers,
+      headers,
+      nativeBody,
       response,
     )
     return {

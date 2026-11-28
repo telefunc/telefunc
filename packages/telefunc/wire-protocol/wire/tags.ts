@@ -115,11 +115,11 @@ const TAG = {
 }
 
 function isWireCtrlTag(tag: number): boolean {
-  return tag < DATA_TAG_MIN
+  return (tag > 0 && tag < DATA_TAG_MIN) || tag === TAG.PIECES_ACK_REQ
 }
 
 function isChannelCtrlTag(tag: number): boolean {
-  return tag >= CHANNEL_CTRL_TAG_MIN
+  return tag >= CHANNEL_CTRL_TAG_MIN && tag !== TAG.PIECES_ACK_REQ
 }
 
 /** `tag` may be read straight off a frame: an empty one has none, and isn't sequenced. */

@@ -246,6 +246,7 @@ type ServerConfigState = {
   adapterMaxMemory: number | undefined
   defaultMaxMemory: number | undefined
   channelConfigInUse: boolean
+  rootFromVite: string | null
   webSocketEnabled: boolean
   allowedOrigins: readonly AllowedOrigin[]
 }
@@ -262,6 +263,7 @@ const globalObject = getGlobalObject<ServerConfigState>('node/server/serverConfi
   defaultMaxMemory: undefined,
   /** A channel read `config.channel`, whose values each of its parts then relies on staying as they are. */
   channelConfigInUse: false,
+  rootFromVite: null,
   webSocketEnabled: false,
   /** The entries of `config.channel.allowedOrigins`, parsed when it was assigned. */
   allowedOrigins: [],
@@ -375,6 +377,7 @@ function getServerConfig(): ConfigResolved {
         return toPosixPath(configState.root)
       }
       // Doesn't work for Cloudflare Workers — but we can make it work if we want to, see reverted commits at https://github.com/telefunc/telefunc/pull/262
+      const { rootFromVite } = globalObject
       if (rootFromVite) {
         assertPosixPath(rootFromVite)
         return rootFromVite
@@ -684,7 +687,6 @@ function applyBroadcastConfig(val: unknown): void {
   }
 }
 
-let rootFromVite: string | null = null
 function setRootFromVite(root: string) {
-  rootFromVite = root
+  globalObject.rootFromVite = root
 }

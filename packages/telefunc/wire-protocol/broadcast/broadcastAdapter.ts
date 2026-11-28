@@ -13,11 +13,10 @@ export type {
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
-import { CHANNEL_HOLD_MAX_BYTES } from '../constants.js'
+import { CHANNEL_HOLD_MAX_BYTES, HELD_SEND_OVERHEAD_BYTES } from '../constants.js'
 import { ChannelOverflowError } from '../channel/channelErrors.js'
 import { Outcome } from '../channel/channel.js'
 import type { PublishBody } from '../channel/server/PublishBody.js'
-import { HELD_SEND_OVERHEAD_BYTES } from '../channel/server/channelMemory.js'
 import type { WirePublishInfo } from '../wire/publishInfo.js'
 
 /** Transport-level publish result. */

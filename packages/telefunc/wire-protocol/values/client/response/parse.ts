@@ -19,17 +19,12 @@ import { SseStreamReader } from './SseStreamReader.js'
 import { ClientChannel, type ConnectionOptions } from '../../../channel/client/ClientChannel.js'
 import { ClientBroadcast } from '../../../channel/client/ClientBroadcast.js'
 import { wrapProxy } from '../../../../utils/wrapProxy.js'
-import { GcRegistry } from '../../../../utils/GcRegistry.js'
+import { getGcRegistry } from '../../../../utils/GcRegistry.js'
 import { ChannelStreamSource } from '../../ChannelStreamSource.js'
 import { createReadableChunkStream } from '../../createReadableChunkStream.js'
 import { readChunksToBytes } from '../../readChunksToBytes.js'
 import { STREAMING_ERROR_TYPE } from '../../../constants.js'
 import { ownIndexedPayload } from '../../../wire/envelope.js'
-import { getGlobalObject } from '../../../../utils/getGlobalObject.js'
-
-const globalObject = getGlobalObject('wire-protocol/values/client/response/parse.ts', {
-  gcRegistry: new GcRegistry(),
-})
 
 // ===== Types =====
 
@@ -153,7 +148,7 @@ async function reviveResponse(
 
       assert(isObjectOrFunction(value))
       const wrapper = wrapProxy(value)
-      const forget = globalObject.gcRegistry.register(wrapper, close)
+      const forget = getGcRegistry().register(wrapper, close)
       // Forgotten at its value's end, as the value may keep what its wrapper returned, which keeps the wrapper.
       onEnd?.(forget)
       closeHandlers.set(wrapper, close)

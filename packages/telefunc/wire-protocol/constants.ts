@@ -17,6 +17,11 @@ export const SERIALIZER_PREFIX_BROADCAST = '!TelefuncBroadcast:'
  *  caller's side — keeps the channel oblivious to shield semantics. */
 export const FN_SHIELD_ERROR_KEY = '__telefunc_fn_shield_error'
 
+/** What a held send takes beyond its payload, its callbacks and promise, rounded up: one buffered, waiting as a lossy
+ *  channel's newest, awaiting its answer or credit, kept to replay, or waiting in the in-memory broadcast adapter. A
+ *  lossy send kept to replay is a publish, and holds what one does. */
+export const HELD_SEND_OVERHEAD_BYTES = 512
+
 // ===== Channel pump frame tags =====
 
 /** 1-byte tag prefixed to every binary send in per-channel streaming pumps. */
