@@ -58,7 +58,7 @@ class LossyDelivery<U> {
   /** A page that is behind, out of credit, or short of memory keeps only the newest send of this stream waiting. */
   send(stream: string, unit: U, held = this.host.bytes(unit)): void {
     if (!this.host.peer() || this.replaces(held)) this.letWaitingGo(stream)
-    if (this.waiting.length > 0 || this.holdsBack() || this.memoryFull(2 * held)) {
+    if (this.waiting.length > 0 || this.holdsBack() || this.memoryFull(held, held)) {
       this.host.hold(unit)
       this.waiting.push({ stream, unit, held })
       return
@@ -107,12 +107,14 @@ class LossyDelivery<U> {
 
   /** Whether a newer send takes the place of those no wire has taken. */
   replaces(held?: number): boolean {
-    return this.isBehind() || this.host.outOfCredit() || (held !== undefined && this.memoryFull(2 * held))
+    return this.isBehind() || this.host.outOfCredit() || (held !== undefined && this.memoryFull(held, held))
   }
 
-  /** Leaves room for a successor once a publish is awaiting confirmation. */
-  private memoryFull(bytes: number): boolean {
-    return nearBudget(bytes) && this.host.peer() !== null && this.host.replay()?.unconfirmedSince !== undefined
+  /** Reserve room for a successor only while a lossy publish is due for prompt confirmation. */
+  private memoryFull(held: number, successor = 0): boolean {
+    if (!nearBudget(held + successor) || this.host.peer() === null) return false
+    const replay = this.host.replay()
+    return replay?.unconfirmedSince !== undefined && (successor === 0 || replay.hasUnconfirmedLossy || nearBudget(held))
   }
 
   /** Takes out those waiting of `stream`, all of them without `stream`, oldest first. */

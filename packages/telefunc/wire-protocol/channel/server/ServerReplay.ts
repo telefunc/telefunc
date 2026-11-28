@@ -113,6 +113,10 @@ class ServerReplay {
     return this.frames.length > 0 || this.publishes.length > 0
   }
 
+  get hasUnconfirmedLossy(): boolean {
+    return (this.lossyHeld?.size ?? 0) > 0
+  }
+
   /** Its page's wire went at `at`: what the page hasn't confirmed is dated from then, unless it is already. */
   dateStall(at: number): void {
     if (this.stallDate === null && this.unconfirmed) this.stallDate = { since: at }

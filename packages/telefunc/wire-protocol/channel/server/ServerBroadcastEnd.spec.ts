@@ -268,6 +268,25 @@ function useSmallMemory(reserved = 0) {
   })
 }
 
+it('sends a lossy publish that fits while a small reliable publish is unconfirmed', async () => {
+  useSmallMemory()
+  const key = crypto.randomUUID()
+  const broadcast = new ServerBroadcast<string>({ key })
+  const { end } = pageEnd(600, 0, broadcast)
+  try {
+    await Broadcast.publishBinary(key, new Uint8Array(10))
+    await Broadcast.publishBinary(key, new Uint8Array(1152 * 1024), { lossy: true })
+    const sizes = replayOf(end)
+      .getAfter(0)
+      .map(decode)
+      .flatMap((frame) => (frame.tag === TAG.PUBLISH_BINARY ? [binaryData(frame.data).byteLength] : []))
+    expect(sizes).toEqual([10, 1152 * 1024])
+  } finally {
+    end.abort()
+    end._release()
+  }
+})
+
 it.each(['measured', 'unmeasured'] as const)(
   'with a %s link on a 2 MiB server, a page stays open and gets the latest lossy publish',
   async (link) => {
