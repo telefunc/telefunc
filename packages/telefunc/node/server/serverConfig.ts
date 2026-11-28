@@ -122,23 +122,21 @@ type ChannelConfigUser = {
    */
   pingInterval?: number
   /**
-   * The most all channels on this server hold queued for their clients, in bytes or as `'4g'`, `'512m'`.
-   * Part of this limit is reserved for sends that wait, and each wire may carry one frame of the largest
-   * size past it. One channel holds at most 320 MiB of it by default.
+   * The maximum memory all channels on this server can use for buffered data.
    *
    * https://telefunc.com/channel-config
    *
-   * @default a quarter of the memory the process reports (1 GiB fallback, 64 MiB on Cloudflare)
+   * @default 25% of available process memory (1 GiB fallback, 64 MiB on Cloudflare)
    */
   maxMemory?: number | string
-  /** The most one channel holds for its client, of its sends, of what awaits acknowledgement and of the messages its
-   *  listeners work on, in bytes, within `maxMemory`. @default 335544320 */
+  /**
+   * The maximum number of bytes a single channel can buffer within `maxMemory`.
+   *
+   * @default 335544320
+   */
   maxPendingBytes?: number
   /**
-   * How long, in milliseconds, a newly created channel waits for the client to
-   * connect before it is closed automatically, and a telefunction call waits for
-   * a broadcast subscription its client made before it to take effect before
-   * that broadcast is closed.
+   * How long, in milliseconds, a newly created channel waits for the client to connect before closing automatically.
    */
   connectTtl?: number
   /**

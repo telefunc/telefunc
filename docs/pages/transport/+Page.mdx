@@ -102,6 +102,8 @@ config.channel.allowedOrigins = ['https://app.example.com']
 ```
 
 > A leading `*.` stands for any one subdomain, as in `'https://*.example.com'`.
+>
+> If your reverse proxy rewrites `Host`, configure the trusted proxy to overwrite any client-supplied `X-Forwarded-Host` with the public host.
 
 
 
