@@ -12,8 +12,7 @@ import {
   setAdapterMaxFrameBytes,
   setAdapterMaxMemory,
 } from '../node/server/serverConfig.js'
-import { serveRuntimeRequest } from '../node/server/telefunc.js'
-import { noTransportEvidence } from '../node/server/runTelefunc/clientLeft.js'
+import { serve } from '../node/server/telefunc.js'
 import { installBroadcastAdapter } from '../wire-protocol/broadcast/broadcastAdapter.js'
 import {
   CloudflareBroadcastAuthorityState,
@@ -147,10 +146,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
           return crosswsAdapter.handleDurableUpgrade(this, request)
         }
         const context = getContext ? await getContext(request, this.env) : undefined
-        const httpResponse = await serveRuntimeRequest(context ? { request, context } : { request }, {
-          clientLeft: noTransportEvidence,
-          clientGone: request.signal,
-        })
+        const httpResponse = await serve(context ? { request, context } : { request })
         const headers = new Headers(httpResponse.headers)
         // The page names it from then on, so it reaches this Durable Object from any region.
         if (target) headers.set(SESSION_HOME_HEADER, target.locationBucket)

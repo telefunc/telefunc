@@ -1,9 +1,7 @@
 export { testAbort }
 
-import { connect } from 'node:net'
-import { once } from 'node:events'
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { resetCleanupState, getCleanupState, navigate, getResult, serverRuntime, sleep } from '../../e2e-utils'
+import { resetCleanupState, getCleanupState, navigate, getResult, serverRuntime } from '../../e2e-utils'
 
 function testAbort() {
   // ── Generator abort mechanisms ──────────────────────────────────────
@@ -138,28 +136,6 @@ function testAbort() {
   })
 
   // ── Upload abort ────────────────────────────────────────────────────
-
-  // Through Telefunc's adapter for Bun.serve or Deno.serve, which says how its server shows the client left. Node's
-  // playground route hands Telefunc srvx's `Request`, which carries no evidence of its transport: a client that leaves
-  // there is printed (serve/node.requestBody.spec.ts holds the rows of Node's `serve({ req, res })`).
-  if (serverRuntime() !== 'node')
-    test('abort: a text call whose client leaves in the middle of its body prints nothing on the server', async () => {
-      await resetCleanupState()
-      const { hostname, port } = new URL(getServerUrl())
-      const socket = connect(Number(port), hostname)
-      await once(socket, 'connect')
-      socket.write(
-        'POST /_telefunc HTTP/1.1\r\nHost: localhost\r\nx-telefunc-request: txt\r\nContent-Type: text/plain\r\nContent-Length: 1000\r\n\r\n{"file":',
-      )
-      // The server has the request and waits for the rest of its body.
-      await sleep(500)
-      socket.destroy()
-      // An error printed fails the test (test-e2e reads the server's stderr); `onBug()` hears the call that failed.
-      await autoRetry(async () => {
-        const state = await getCleanupState()
-        expect(state['bug:The client disconnected before the end of the request body']).toBe('reported')
-      })
-    })
 
   // 1MB file with sleep(100) between reads — the client aborts while the server reads it
   // Node only: Bun and Deno hand the server the whole 1 MB the browser sent before it aborted, and only then report the disconnect.

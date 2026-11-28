@@ -1,4 +1,4 @@
-// The client of serve/deno.clientLeft.spec.ts's rows, which its Deno server (deno.clientLeft.server.fixture.mjs) runs in
+// The client of serve/deno.upload.spec.ts's rows, which its Deno server (deno.upload.server.fixture.mjs) runs in
 // its own process: a row's binary call with a File, its bytes built by the page's own encoder, over a raw socket, which
 // alone holds a body open at an exact part and leaves at an exact moment.
 
@@ -11,8 +11,8 @@ import { REQUEST_KIND, REQUEST_KIND_HEADER } from '../wire-protocol/wire/request
 export { PART, TELEFUNC_FILE, WINDOW_MS, sendRest, startCall }
 export type { Row }
 
-/** The rows' telefunctions (deno.clientLeft.telefunc.js), as Telefunc loads them. */
-const TELEFUNC_FILE = '/deno.clientLeft.telefunc.js'
+/** The rows' telefunctions (deno.upload.telefunc.js), as Telefunc loads them. */
+const TELEFUNC_FILE = '/deno.upload.telefunc.js'
 /** The channels' connect window (`config.channel.connectTtl`). */
 const WINDOW_MS = 1000
 /** The File's bytes go in parts of this size. */

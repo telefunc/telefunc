@@ -1,4 +1,4 @@
-export { serve, serveNode, serveRuntimeRequest, telefunc }
+export { serve, serveNode, telefunc }
 
 import { runTelefunc, HttpResponse } from './runTelefunc.js'
 import { Telefunc } from './context/getContext.js'
@@ -7,7 +7,6 @@ import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
 import { nodeReadableToWebRequest, normalizeHeaders } from '../../utils/nodeReadableToWebRequest.js'
 import type { Readable, Writable } from 'node:stream'
-import { noTransportEvidence, socketShowsClientLeft, type ClientLeft } from './runTelefunc/clientLeft.js'
 
 type HttpRequestResolved = {
   request: Request
@@ -18,14 +17,8 @@ type HttpRequestResolved = {
    *  `undefined` on Web-runtime adapters (`{ request }` input from Bun / Deno / edge). */
   readable?: Readable
   context?: Telefunc.Context
-  /** Whether a failed read of the body is the client leaving, on the evidence of the server that received the request. */
-  clientLeft: ClientLeft
-  /** Aborts once the client left, and only then, on the same evidence: from the answer on, a read of the body may not end
-   *  by itself where its client leaves. */
+  /** Signals a disconnect even if a read of the request body stays pending. */
   clientGone: AbortSignal
-  /** Called once the request's body is read, or, where it streams for as long as the call's channels live, once that
-   *  stream opens: from then on, telefunc alone ends the request. */
-  onBodyRead?: () => void
 }
 
 type HttpRequest =
@@ -96,17 +89,6 @@ async function serveNode(
   return httpResponse
 }
 
-/** `serve()` for the adapters handed a `Request` with what its server shows: how its client left (`Bun.serve`,
- *  `Deno.serve`), and what it does once the body is read (`Bun.serve`). */
-async function serveRuntimeRequest(
-  httpRequest: Extract<HttpRequest, { request: Request }>,
-  server: Pick<HttpRequestResolved, 'clientLeft' | 'clientGone' | 'onBodyRead'>,
-): Promise<HttpResponse> {
-  assertHttpRequest(httpRequest, 1)
-  assertRequestSignalFlag()
-  return runTelefunc({ request: httpRequest.request, context: httpRequest.context, ...server })
-}
-
 /** @deprecated `telefunc()` is deprecated, use `new Telefunc()` instead, see https://telefunc.com/Telefunc */
 async function telefunc(httpRequest: HttpRequest): Promise<HttpResponse> {
   // TO-DO/next-major-release: remove
@@ -125,7 +107,6 @@ async function resolveHttpRequest(
     return {
       request: httpRequest.request,
       context: httpRequest.context,
-      clientLeft: noTransportEvidence,
       clientGone: httpRequest.request.signal,
     }
   }
@@ -143,7 +124,6 @@ async function resolveHttpRequest(
       request,
       readable: httpRequest.readable,
       context: httpRequest.context,
-      clientLeft: socketShowsClientLeft(httpRequest.readable),
       clientGone,
       unwatch,
     }
@@ -157,7 +137,6 @@ async function resolveHttpRequest(
   return {
     request,
     context: httpRequest.context,
-    clientLeft: noTransportEvidence,
     clientGone: request.signal,
   }
 }

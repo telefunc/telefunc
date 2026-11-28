@@ -1,4 +1,4 @@
-// The Deno server of serve/deno.clientLeft.spec.ts, which runs it from Telefunc's sources (`--sloppy-imports` takes
+// The Deno server of serve/deno.upload.spec.ts, which runs it from Telefunc's sources (`--sloppy-imports` takes
 // their `.js` specifiers to the `.ts` files, as Vitest does) in either of Deno's signal modes. Each entry an app hands
 // Telefunc a request through listens on a port of its own:
 // - `adapter`: `telefunc/deno`, as docs/pages/Telefunc shows it;
@@ -11,7 +11,7 @@
 //   and srvx's Node servers build one: its body `Readable.toWeb(req)`, its signal the framework's own), answered with
 //   `httpResponse.body`.
 // Its control route, `POST /run {entry, row}` on a port of its own, runs a row's call through an entry from this process
-// (deno.clientLeft.client.fixture.ts), and answers with how its client's rest went and what its telefunction saw once
+// (deno.upload.client.fixture.ts), and answers with how its client's rest went and what its telefunction saw once
 // that settled. It prints `READY {"control":<port>,"entries":{<entry>:<port>,…}}` once every entry listens.
 
 import { createServer } from 'node:http'
@@ -20,8 +20,8 @@ import { fileURLToPath } from 'node:url'
 import { Telefunc } from './deno.js'
 import { serve } from '../node/server/telefunc.js'
 import { config } from '../node/server/serverConfig.js'
-import { TELEFUNC_FILE, WINDOW_MS, sendRest, startCall } from './deno.clientLeft.client.fixture.js'
-import { seen } from './deno.clientLeft.telefunc.js'
+import { TELEFUNC_FILE, WINDOW_MS, sendRest, startCall } from './deno.upload.client.fixture.js'
+import { seen } from './deno.upload.telefunc.js'
 import { frameworkRequest } from './frameworkRequest.fixture.js'
 
 config.root = dirname(fileURLToPath(import.meta.url))

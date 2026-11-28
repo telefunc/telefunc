@@ -1,8 +1,7 @@
 export { Telefunc }
 
 import crossws from 'crossws/adapters/node'
-import { serveNode, serveRuntimeRequest } from '../node/server/telefunc.js'
-import { noTransportEvidence } from '../node/server/runTelefunc/clientLeft.js'
+import { serve as serveTelefunc, serveNode } from '../node/server/telefunc.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig, getTelefuncUrl } from '../node/server/serverConfig.js'
 import { getTelefuncChannelOptions } from '../wire-protocol/channel/server/ws.js'
@@ -75,13 +74,8 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
   async function serve(input: ServeInput<Req, Res>): Promise<boolean | Response | undefined> {
     if (!isNodeServeInput(input)) {
       if (!isTelefuncRequest(input.request)) return undefined
-      const httpResponse = await serveRuntimeRequest(
-        input.context ? { request: input.request, context: input.context } : { request: input.request },
-        {
-          clientLeft: noTransportEvidence,
-          clientGone: input.request.signal,
-        },
-      )
+      const { request, context } = input
+      const httpResponse = await serveTelefunc(context ? { request, context } : { request })
       return toResponse(httpResponse)
     }
 

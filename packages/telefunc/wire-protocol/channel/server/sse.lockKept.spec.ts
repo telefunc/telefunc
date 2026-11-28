@@ -50,7 +50,7 @@ const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
 function post(body: BodyInit) {
   // A stream body is sent half duplex, which a `RequestInit` literal doesn't type.
   const init = { method: 'POST', body, duplex: 'half' }
-  return handleSseChannelRequest(new Request(url, init), undefined, () => false)
+  return handleSseChannelRequest(new Request(url, init), undefined)
 }
 
 test.each([

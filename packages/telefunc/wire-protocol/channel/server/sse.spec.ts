@@ -16,7 +16,7 @@ function post(body: BodyInit) {
   const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
   // Node's Request takes `duplex`, which the DOM's RequestInit doesn't name.
   const init = { method: 'POST', body, duplex: 'half' }
-  return handleSseChannelRequest(new Request(url, init), undefined, () => false)
+  return handleSseChannelRequest(new Request(url, init), undefined)
 }
 
 /** The event stream an open POST was answered with. */

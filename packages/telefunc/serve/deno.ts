@@ -1,8 +1,7 @@
 export { Telefunc }
 
 import crossws from 'crossws/adapters/deno'
-import { serveRuntimeRequest } from '../node/server/telefunc.js'
-import { hasProp } from '../utils/hasProp.js'
+import { serve } from '../node/server/telefunc.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig } from '../node/server/serverConfig.js'
 import { getTelefuncChannelOptions } from '../wire-protocol/channel/server/ws.js'
@@ -46,22 +45,8 @@ function telefunc(): TelefuncServe {
         return ws.handleUpgrade(request, info) as Response | Promise<Response>
       }
 
-      // Deno.serve aborts `request.signal` once its client leaves while the response is open, and, in its legacy abort
-      // mode, at every response's end. See workarounds/denoUploadResponseHold.ts.
-      const httpResponse = await serveRuntimeRequest(context ? { request, context } : { request }, {
-        clientLeft: (err) => isDenoConnectionError(err, globalThis),
-        clientGone: request.signal,
-      })
+      const httpResponse = await serve(context ? { request, context } : { request })
       return toResponse(httpResponse)
     },
   }
-}
-
-/** Deno.serve fails the read of a request it made with its own `BadResource` (the client closed) or `Http` (the client
- *  reset) error. `global` is `globalThis`, whose `Deno` isn't typed here. */
-function isDenoConnectionError(err: unknown, global: object): boolean {
-  if (!hasProp(global, 'Deno', 'object') || !hasProp(global.Deno, 'errors', 'object')) return false
-  const { errors } = global.Deno
-  if (!hasProp(errors, 'BadResource', 'function') || !hasProp(errors, 'Http', 'function')) return false
-  return err instanceof errors.BadResource || err instanceof errors.Http
 }

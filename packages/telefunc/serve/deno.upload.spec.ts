@@ -6,7 +6,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isObject } from '../utils/isObject.js'
-import { PART, type Row } from './deno.clientLeft.client.fixture.js'
+import { PART, type Row } from './deno.upload.client.fixture.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 type Mode = 'legacy' | 'modern'
@@ -27,7 +27,7 @@ async function startServer(mode: Mode): Promise<Served> {
   const flags = mode === 'modern' ? ['--unstable-no-legacy-abort'] : []
   const server = spawn(
     'deno',
-    ['run', '-A', '--sloppy-imports', '--node-modules-dir=manual', ...flags, 'deno.clientLeft.server.fixture.mjs'],
+    ['run', '-A', '--sloppy-imports', '--node-modules-dir=manual', ...flags, 'deno.upload.server.fixture.mjs'],
     { cwd: here, stdio: ['ignore', 'pipe', 'inherit'] },
   )
   const ready = await new Promise<string>((resolve, reject) => {

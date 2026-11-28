@@ -81,15 +81,7 @@ class SseServerTransport {
     close: (wire, { refusal }, held) => this.endStream(wire, refusal, held),
   }
 
-  /** `clientLeft` says whether a failed read of the upload is its client leaving, as the server that received it does,
-   *  or null where it can't say; `onBodyRead`, what the server
-   *  does once the body is read. */
-  async handleRequest(
-    request: Request,
-    readable: Readable | undefined,
-    clientLeft: (err: unknown) => boolean | null,
-    onBodyRead?: () => void,
-  ): Promise<SseChannelHttpResponse> {
+  async handleRequest(request: Request, readable: Readable | undefined): Promise<SseChannelHttpResponse> {
     if (!getServerConfig().channel.transports.includes(CHANNEL_TRANSPORT.SSE)) return refuse(REFUSED.notServed)
     if (request.method !== 'POST') return refuse(REFUSED.notPost)
     if (!namesWireVersion(request)) return refuse(WIRE_VERSION_REFUSAL, STATUS_CODE_WIRE_VERSION)
@@ -100,7 +92,7 @@ class SseServerTransport {
     // and should answer with a Node `Readable` so it pipes straight to the socket. Web
     // adapters get `request.body` (no `readable`) and want a `ReadableStream` back.
     const useNodeStream = readable !== undefined
-    const reader = new BodyReader(source, clientLeft)
+    const reader = new BodyReader(source)
     let metadata: SseRequestMetadata
     try {
       const rawMetadata = await reader.readFrame(SSE_METADATA_MAX_BYTES)
@@ -112,9 +104,6 @@ class SseServerTransport {
       throw err
     }
     const { connId } = metadata
-    // The page's streaming upload lasts as long as its wire, whose ping deadline watches it; every other body ends.
-    if (metadata.kind === 'streamRequest') onBodyRead?.()
-    else reader.onEnd = onBodyRead
     try {
       switch (metadata.kind) {
         case 'streamResponse':
@@ -495,9 +484,7 @@ function okResponse(): SseChannelHttpResponse {
 async function handleSseChannelRequest(
   request: Request,
   readable: Readable | undefined,
-  clientLeft: (err: unknown) => boolean | null,
-  onBodyRead?: () => void,
 ): Promise<SseChannelHttpResponse> {
   globalObject.sseTransport ??= new SseServerTransport()
-  return globalObject.sseTransport.handleRequest(request, readable, clientLeft, onBodyRead)
+  return globalObject.sseTransport.handleRequest(request, readable)
 }

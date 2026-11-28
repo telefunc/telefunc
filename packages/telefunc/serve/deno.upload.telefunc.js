@@ -1,4 +1,4 @@
-// The telefunctions of serve/deno.clientLeft.spec.ts, which its Deno server (deno.clientLeft.server.fixture.mjs) loads
+// The telefunctions of serve/deno.upload.spec.ts, which its Deno server (deno.upload.server.fixture.mjs) loads
 // as an app's. The server reads what each call saw in its own process (`seen`).
 
 import { Channel } from '../wire-protocol/channel/server/ServerChannel.js'

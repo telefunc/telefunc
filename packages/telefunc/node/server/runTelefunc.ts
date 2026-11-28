@@ -35,7 +35,6 @@ import {
 } from '../../shared/constants.js'
 import { STREAM_TRANSPORT } from '../../wire-protocol/constants.js'
 import { createRequestContext, type RequestContext } from './context/requestContext.js'
-import type { ClientLeft } from './runTelefunc/clientLeft.js'
 import { getChannelMux } from '../../wire-protocol/channel/server/ChannelMux.js'
 import type { ResponseHold } from '../../workarounds/denoUploadResponseHold.js'
 
@@ -290,16 +289,12 @@ async function runTelefunc_(
     request,
     readable,
     context,
-    clientLeft,
     clientGone,
-    onBodyRead,
   }: {
     request: Request
     readable?: StreamReadableNode
     context?: Telefunc.Context
-    clientLeft: ClientLeft
     clientGone: AbortSignal
-    onBodyRead?: () => void
   },
   requestContext: RequestContext,
 ): Promise<HttpResponseParts> {
@@ -311,9 +306,7 @@ async function runTelefunc_(
     objectAssign(runContext, {
       request,
       readable,
-      clientLeft,
       clientGone,
-      onBodyRead,
       serverConfig,
       appRootDir: serverConfig.root,
       telefuncFilesManuallyProvidedByUser: serverConfig.telefuncFiles,

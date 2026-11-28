@@ -82,7 +82,7 @@ vi.mock('../../../node/server/serverConfig.js', () => ({
 }))
 
 vi.mock('../../../node/server/telefunc.js', () => ({
-  serveRuntimeRequest: mocks.telefuncMock,
+  serve: mocks.telefuncMock,
 }))
 
 vi.mock('../../broadcast/broadcastAdapter.js', () => ({
@@ -282,10 +282,10 @@ describe('cloudflare adapter entrypoint', () => {
         headers: { 'x-telefunc-shard': 'telefunc-shard-weur-1', 'x-telefunc-broadcast-bucket': 'weur' },
       }),
     )
-    expect(mocks.telefuncMock).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ clientGone: expect.any(AbortSignal) }),
-    )
+    expect(mocks.telefuncMock).toHaveBeenCalledWith({
+      request: expect.any(Request),
+      context: { userId: 'user-1' },
+    })
     expect(response.headers.get('x-telefunc-home')).toBe('weur')
     expect(mocks.transportInstances[0]?.attachIsolateInfo).toHaveBeenCalledWith('weur')
 

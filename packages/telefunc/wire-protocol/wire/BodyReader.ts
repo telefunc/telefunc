@@ -18,9 +18,7 @@ type ChunkSource = {
   letGo(): void
 }
 
-/** Why the reader reads no more: the body ended, it was let go of, or a read failed as the client leaving, as nothing
- *  says (`unknown`, a truncation either way), or as the app's own error. */
-type Stop = { why: 'ended' | 'letGo' } | { why: 'clientLeft' | 'unknown' | 'app'; error: unknown }
+type Stop = { why: 'ended' | 'letGo' } | { why: 'client'; error: unknown }
 
 /** A length-prefixed chunk says it is over the reader's limit. `head`: as much of the chunk's start as the reader was
  *  asked to read of it, so that the caller can say whose it was. */
@@ -80,9 +78,6 @@ class BodyReader {
   /** Once set, the drain alone may read the source. */
   private discarding: Promise<void> | null = null
   private readonly drainEnd = createDeferred<void>()
-  /** Whether a read's failure is the client leaving, or null where nothing says, on the evidence of the server that
-   *  received the request, passed by the caller. */
-  private clientLeft: (err: unknown) => boolean | null
   /** Called for each chunk the source yields. */
   onBytes?: () => void
   /** Called once the source ends, read to its end. */
@@ -93,11 +88,7 @@ class BodyReader {
     return this.drainEnd.promise
   }
 
-  constructor(
-    source: ReadableStream<Uint8Array<ArrayBuffer>> | Readable,
-    clientLeft: (err: unknown) => boolean | null,
-  ) {
-    this.clientLeft = clientLeft
+  constructor(source: ReadableStream<Uint8Array<ArrayBuffer>> | Readable) {
     if (source instanceof ReadableStream) {
       const reader = source.getReader()
       this.source = {
@@ -161,7 +152,7 @@ class BodyReader {
   /** Stop an outstanding read when the adapter knows that the client left. */
   leftByClient(reason: unknown): void {
     if (this.stop === null) {
-      this.stop = { why: 'clientLeft', error: reason }
+      this.stop = { why: 'client', error: reason }
       this.buffer = EMPTY
       this.collected.length = 0
       this.onEnd = undefined
@@ -319,12 +310,9 @@ class BodyReader {
     return this.discarding === null ? chunk : null
   }
 
-  /** Pulls a source chunk, or returns null at EOF or a client disconnect. App errors propagate. */
+  /** Pulls a source chunk, or returns null when the body stops. */
   private async readChunk() {
-    if (this.stop) {
-      if (this.stop.why === 'app') throw this.stop.error
-      return null
-    }
+    if (this.stop) return null
     try {
       this.reading = this.source.next()
       const { value, done } = await this.reading
@@ -346,9 +334,7 @@ class BodyReader {
       // lock fails the read), or its client's leaving as the request's signal says it (`leftByClient`).
       if (this.stop !== null) return null
       this.source.letGo()
-      const clientLeft = this.clientLeft(error)
-      this.stop = { why: clientLeft === null ? 'unknown' : clientLeft ? 'clientLeft' : 'app', error }
-      if (this.stop.why === 'app') throw error
+      this.stop = { why: 'client', error }
       return null
     } finally {
       this.reading = null
@@ -356,9 +342,9 @@ class BodyReader {
   }
 
   /** A server-ended file stays truncated even if the background drain later fails. */
-  private fileError(): unknown {
+  private fileError(): StreamTruncatedError {
     if (this.filesEndedBy === 'server') return new StreamTruncatedError('server')
-    return this.stop?.why === 'app' ? this.stop.error : this.truncation()
+    return this.truncation()
   }
 
   /** The body stopped short, said by who stopped it, with the runtime's error as the cause where a read failed. With no
@@ -368,7 +354,7 @@ class BodyReader {
     if (stop === null || (stop.why === 'ended' && this.filesEndedBy !== null))
       return new StreamTruncatedError(this.filesEndedBy ?? 'server')
     if (!('error' in stop)) return new StreamTruncatedError(stop.why === 'letGo' ? 'server' : 'body')
-    return new StreamTruncatedError(stop.why === 'app' ? 'body' : 'client', { cause: stop.error })
+    return new StreamTruncatedError('client', { cause: stop.error })
   }
 
   /** Take up to `max` bytes from the internal buffer, or null if empty. */

@@ -9,7 +9,6 @@ import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/values/server/request/registry.js'
 import { BodyReader, OversizeFrameError, StreamTruncatedError } from '../../../wire-protocol/wire/BodyReader.js'
-import type { ClientLeft } from './clientLeft.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire-protocol/wire/requestKind.js'
 import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
@@ -37,12 +36,7 @@ type RunContext = {
    *  consumers (SSE upstream, binary RPC) prefer it over `request.body` to skip Node's
    *  webstreams `dequeueValue` overhead. Other runtimes only ever pass `request`. */
   readable?: Readable
-  /** Whether a failed read of the body is the client leaving, as the adapter that received the request says. */
-  clientLeft: ClientLeft
-  /** Aborts once the client left, and only then, as the same adapter says. */
   clientGone: AbortSignal
-  /** The adapter's, called once the body is read: `HttpRequestResolved['onBodyRead']`. */
-  onBodyRead?: () => void
   requestContext: RequestContext
   logMalformedRequests: boolean
   serverConfig: {
@@ -80,7 +74,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   assertUrl(runContext)
   if (isWrongMethod(runContext)) return { isMalformedRequest: true }
 
-  const { request, readable, clientLeft, onBodyRead, requestContext, serverConfig } = runContext
+  const { request, readable, requestContext, serverConfig } = runContext
   const requestKind = getRequestKind(request, serverConfig.telefuncUrl)
 
   if (requestKind === REQUEST_KIND.INVALID) {
@@ -91,7 +85,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     return { isMalformedRequest: true, refusal: REQUEST_KIND_REFUSAL }
   }
   if (requestKind === REQUEST_KIND.SSE) {
-    const sseResponse = await handleSseChannelRequest(request, readable, clientLeft, onBodyRead)
+    const sseResponse = await handleSseChannelRequest(request, readable)
     return { isMalformedRequest: false, isSseRequest: true, sseResponse }
   }
 
@@ -101,7 +95,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     carryChannel(channel, requestContext)
     return channel
   }
-  const body = await readBody(request, readable, clientLeft, requestKind, runContext)
+  const body = await readBody(request, readable, requestKind, runContext)
   if (body.isMalformedRequest) return body
   const { text, registerFile } = body
   const baseContext: Omit<ServerReviverContext, 'validators'> = {
@@ -184,7 +178,6 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
 async function readBody(
   request: Request,
   readable: Readable | undefined,
-  clientLeft: ClientLeft,
   requestKind: typeof REQUEST_KIND.BINARY | typeof REQUEST_KIND.TEXT,
   runContext: RunContext,
 ): Promise<
@@ -202,7 +195,7 @@ async function readBody(
       logParseError('The binary request ends before its envelope is complete.', runContext)
       return { isMalformedRequest: true }
     }
-    const reader = new BodyReader(source, clientLeft)
+    const reader = new BodyReader(source)
     // On Deno, the hold keeps the response open until the upload is over (workarounds/denoUploadResponseHold.ts).
     const hold = holdUploadResponse(request, runContext.clientGone, reader.restRead)
     runContext.requestContext.responseHold = hold
@@ -211,10 +204,7 @@ async function readBody(
     if (clientGone.aborted) leftByClient()
     else clientGone.addEventListener('abort', leftByClient, { once: true })
     const unwatch = () => clientGone.removeEventListener('abort', leftByClient)
-    reader.onEnd = () => {
-      unwatch()
-      runContext.onBodyRead?.()
-    }
+    reader.onEnd = unwatch
     runContext.requestContext.onClose(async () => {
       // On Node 22.0 the socket's abort listeners run before its combined signal updates.
       if (!clientGone.aborted) await node22AbortSignalLag()
@@ -240,7 +230,6 @@ async function readBody(
     }
     const envelope = metadata ?? reader.truncation()
     if (envelope instanceof StreamTruncatedError) {
-      // A client that left, or a read nothing explains: the call's truncation.
       if (envelope.by !== 'body') throw envelope
       logParseError('The binary request ends before its envelope is complete.', runContext)
       return { isMalformedRequest: true }
@@ -251,28 +240,15 @@ async function readBody(
       registerFile: (i, s) => reader.registerFile(i, s),
     }
   }
-  const text = await readText(request, clientLeft)
-  runContext.onBodyRead?.()
   return {
     isMalformedRequest: false,
-    text,
+    text: await request.text(),
     registerFile: () => () =>
       new ReadableStream<Uint8Array<ArrayBuffer>>({
         start(controller) {
           controller.error(new Error('No binary frame'))
         },
       }),
-  }
-}
-
-/** A text call's body, as the platform reads it. A read that fails as its client leaves is a truncated body, as a binary
- *  call's is; any other failure, and one nothing explains (`noTransportEvidence`), is thrown as it is. */
-async function readText(request: Request, clientLeft: ClientLeft): Promise<string> {
-  try {
-    return await request.text()
-  } catch (err) {
-    if (clientLeft(err)) throw new StreamTruncatedError('client', { cause: err })
-    throw err
   }
 }
 
