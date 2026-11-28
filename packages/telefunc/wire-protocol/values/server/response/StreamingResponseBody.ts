@@ -24,7 +24,9 @@ import { assert } from '../../../../utils/assert.js'
 
 const EMPTY = new Uint8Array(0)
 
-type Settled = { entry: StreamingValueServer; result: IteratorResult<Uint8Array<ArrayBuffer>> } | { err: unknown }
+type Settled =
+  | { ok: true; entry: StreamingValueServer; result: IteratorResult<Uint8Array<ArrayBuffer>> }
+  | { ok: false; err: unknown }
 
 /**
  * Stream the inline response body: framed metadata + multiplexed streaming values.
@@ -106,7 +108,7 @@ function buildInlineResponseBody(runContext: {
   }
   // Ends the merge after what settled before it, and stops the producers now: the page may not read the body again.
   const onResponseAborted = (err: unknown) => {
-    settle({ err })
+    settle({ ok: false, err })
     cancelProducers()
   }
 
@@ -126,9 +128,9 @@ function buildInlineResponseBody(runContext: {
   }
   const pullNext = async (entry: StreamingValueServer) => {
     try {
-      settle({ entry, result: await entry.producer.chunks.next() })
+      settle({ ok: true, entry, result: await entry.producer.chunks.next() })
     } catch (err) {
-      settle({ err })
+      settle({ ok: false, err })
     }
   }
 
@@ -139,7 +141,7 @@ function buildInlineResponseBody(runContext: {
       if (cancelled) return
       const next = settled.shift()
       assert(next)
-      if ('err' in next) throw next.err
+      if (!next.ok) throw next.err
       const { entry, result } = next
       if (result.done) {
         // An empty payload marks the end of this index.
@@ -157,7 +159,7 @@ function buildInlineResponseBody(runContext: {
   function throwIfResponseAborted() {
     if (!producersStopped) return
     const next = settled.shift()
-    assert(next && 'err' in next)
+    assert(next && !next.ok)
     throw next.err
   }
 

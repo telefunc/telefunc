@@ -103,7 +103,7 @@ function isServersHost(origin: string, protocol: string, request: Request, host:
 /** Whether `config.channel.allowedOrigins` lists the page at `page`, whose origin is `origin`. */
 function isAllowed(page: URL, origin: string): boolean {
   return getAllowedOrigins().some((allowed) => {
-    if ('origin' in allowed) return allowed.origin === origin
+    if (allowed.kind === 'exact') return allowed.origin === origin
     const label = page.hostname.slice(0, -(allowed.parent.length + 1))
     return (
       page.protocol === allowed.protocol &&

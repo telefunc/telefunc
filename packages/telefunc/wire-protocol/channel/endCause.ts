@@ -98,14 +98,23 @@ type FrameRefusalCause = 'frameOverLimit' | 'frameRefused'
 type SessionCause = 'unreadable' | 'receiveBudget' | 'sendBudget'
 /** The causes a `frames` refusal names. */
 type RefusalCause = FrameRefusalCause | SessionCause
+type RefusalEndCause = (typeof END_CAUSE)[RefusalCause]
 /** What a `frames` refusal's cause ends: the channel it names, or the page's session, naming none. */
 type RefusalScope = 'channel' | 'session'
 
-const causeOfCode: ReadonlyMap<number, (typeof END_CAUSE)[keyof typeof END_CAUSE]> = new Map(
-  Object.values(END_CAUSE).map((cause) => [cause.code, cause]),
-)
+const causeOfCode: ReadonlyMap<number, EndCause> = new Map(Object.values(END_CAUSE).map((cause) => [cause.code, cause]))
 // Two causes on one code would end a channel with one cause's error on one end and the other's on the other.
 assert(causeOfCode.size === Object.keys(END_CAUSE).length)
+
+const refusalCauseOfCode: ReadonlyMap<number, RefusalEndCause> = new Map(
+  [
+    END_CAUSE.frameOverLimit,
+    END_CAUSE.frameRefused,
+    END_CAUSE.unreadable,
+    END_CAUSE.receiveBudget,
+    END_CAUSE.sendBudget,
+  ].map((cause) => [cause.code, cause]),
+)
 
 /** The cause `code` names; undefined for one this copy of Telefunc doesn't know. */
 function endCauseOf(code: number): EndCause | undefined {
@@ -113,9 +122,8 @@ function endCauseOf(code: number): EndCause | undefined {
 }
 
 /** The cause of a `frames` refusal `code` names, with its scope; undefined for a code no refusal names. */
-function refusalCauseOf(code: number) {
-  const cause = causeOfCode.get(code)
-  return cause !== undefined && 'scope' in cause ? cause : undefined
+function refusalCauseOf(code: number): RefusalEndCause | undefined {
+  return refusalCauseOfCode.get(code)
 }
 
 /** A frame the server can't take for `reason`, the sentence its refusal carries. */

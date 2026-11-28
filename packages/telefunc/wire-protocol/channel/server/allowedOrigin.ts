@@ -14,7 +14,9 @@ const NOT_AN_ORIGIN =
 const ORIGIN_MAX = 36 + '://'.length + 253 + ':65535'.length
 
 /** An entry of `config.channel.allowedOrigins`: one origin, or any one subdomain label under `parent`. */
-type AllowedOrigin = { origin: string } | { protocol: string; port: string; parent: string }
+type AllowedOrigin =
+  | { kind: 'exact'; origin: string }
+  | { kind: 'subdomain'; protocol: string; port: string; parent: string }
 
 /** The origin of `url` in the one form the upgrade rule compares: the URL standard's serialization where it gives one
  *  (`http`, `https`, `ws`, `wss`, `ftp`); for the scheme of an app shell's own (`capacitor://localhost`), whose origin
@@ -43,11 +45,11 @@ function parseAllowedOrigin(entry: string): AllowedOrigin | string {
   const url = new URL(concrete)
   const origin = originOf(url)
   if (origin === null) return NOT_AN_ORIGIN
-  if (!anySubdomain) return { origin }
+  if (!anySubdomain) return { kind: 'exact', origin }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     const why = "a leading '*.' stands for a subdomain on http and https only"
     // A scheme the URL standard gives no origin is an app shell's own (`capacitor:`); `ws:`, `wss:` and `ftp:` are none.
     return url.origin === 'null' ? `${why}: list an app shell's origin as it is, such as 'capacitor://localhost'` : why
   }
-  return { protocol: url.protocol, port: url.port, parent: url.hostname.slice('x.'.length) }
+  return { kind: 'subdomain', protocol: url.protocol, port: url.port, parent: url.hostname.slice('x.'.length) }
 }
