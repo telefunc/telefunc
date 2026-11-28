@@ -1148,6 +1148,53 @@ test('plain RPC: DataView response chunks reject with TypeError, cancel the body
   expect(body.locked).toBe(false)
 })
 
+test('plain RPC: a detached response chunk rejects with TypeError, cancels the body and releases its reader', async () => {
+  const { call } = await page()
+  const detached = textEncoder.encode('WORLD')
+  structuredClone(detached.buffer, { transfer: [detached.buffer] })
+  const chunks = [textEncoder.encode('{"ret":"hello '), detached, textEncoder.encode('!"}')]
+  const cancel = vi.fn()
+  const body = new ReadableStream(
+    {
+      pull(controller) {
+        const chunk = chunks.shift()
+        if (chunk) controller.enqueue(chunk)
+        else controller.close()
+      },
+      cancel,
+    },
+    { highWaterMark: 0 },
+  )
+  respond = () => new Response(body)
+  await expect(call([])).rejects.toBeInstanceOf(TypeError)
+  expect(cancel).toHaveBeenCalledOnce()
+  expect(body.locked).toBe(false)
+})
+
+test('plain RPC: a shared response chunk reaches the text decoder in a non-shared buffer', async () => {
+  const { call } = await page()
+  const encoded = textEncoder.encode('{"ret":"ok"}')
+  const buffer: SharedArrayBuffer = runInNewContext('new SharedArrayBuffer(length)', { length: encoded.length + 2 })
+  const bytes = Buffer.from(buffer, 1, encoded.length)
+  bytes.set(encoded)
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes)
+      controller.close()
+    },
+  })
+  respond = () => new Response(body)
+  const decode = vi.spyOn(TextDecoder.prototype, 'decode')
+  try {
+    await expect(call([])).resolves.toBe('ok')
+    const [chunk] = decode.mock.calls[0] ?? []
+    assert(ArrayBuffer.isView(chunk))
+    expect(Object.prototype.toString.call(chunk.buffer)).toBe('[object ArrayBuffer]')
+  } finally {
+    decode.mockRestore()
+  }
+})
+
 test('plain RPC: Uint8Array response chunks from another realm are accepted', async () => {
   const { call } = await page()
   const bytes: Uint8Array = runInNewContext('new Uint8Array(bytes)', { bytes: textEncoder.encode('{"ret":"ok"}') })

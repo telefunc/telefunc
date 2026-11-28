@@ -130,7 +130,14 @@ async function readText(response: Response, callContext: CallContext): Promise<s
       if (Reflect.get(typedArrayPrototype, Symbol.toStringTag, value) !== 'Uint8Array') {
         throw new TypeError('Response body chunks must be Uint8Array')
       }
-      text += decoder.decode(value, { stream: true })
+      const { buffer } = value
+      if ((buffer as ArrayBuffer).detached) throw new TypeError('Response body chunk buffer is detached')
+      // TextDecoder in browsers requires a non-shared buffer.
+      const bytes =
+        !(buffer instanceof ArrayBuffer) && Object.prototype.toString.call(buffer) === '[object SharedArrayBuffer]'
+          ? new Uint8Array(value)
+          : value
+      text += decoder.decode(bytes, { stream: true })
     }
   } catch (err) {
     // Fetch can error the body on abort. For other failures, attempt cancellation and keep the read error.
