@@ -3,6 +3,7 @@ export { testRun }
 import { page, test, expect, expectLog, run, getServerUrl, autoRetry, fetchHtml } from '@brillout/test-e2e'
 import { testCounter } from '../utils'
 import { readFileSync } from 'node:fs'
+import { posix } from 'node:path'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   run(cmd, {
@@ -182,7 +183,28 @@ function onDemandCode(pageId: string) {
     expect(scripts.has(file)).toBe(false)
     if (feature !== streamEntry) expect(streamScripts.has(file)).toBe(false)
   }
+  const modulesByChunk: Record<string, string[]> = JSON.parse(
+    readFileSync(new URL('./dist/nested/client/chunk-modules.json', import.meta.url), 'utf8'),
+  )
+  const channelAndBroadcastModules = ['ClientChannel', 'ClientConnection', 'ClientBroadcast']
+  expectExcludedModules(scripts, modulesByChunk, [
+    'FrameDemuxer',
+    'StreamReader',
+    'SseStreamReader',
+    ...channelAndBroadcastModules,
+  ])
+  expectExcludedModules(streamScripts, modulesByChunk, channelAndBroadcastModules)
   const onDemand = new Set([...closure(features)].filter((script) => !scripts.has(script)))
   const streams = [...streamScripts].filter((script) => onDemand.has(script)).sort()
   return { onDemand, streams }
+}
+
+function expectExcludedModules(scripts: Set<string>, modulesByChunk: Record<string, string[]>, moduleNames: string[]) {
+  const included: string[] = []
+  for (const script of scripts) {
+    const modules = modulesByChunk[script]
+    if (!modules) throw new Error(`The client build has no module list for ${script}`)
+    included.push(...modules.filter((id) => moduleNames.includes(posix.basename(id, '.js'))))
+  }
+  expect(included.join('\n')).toBe('')
 }

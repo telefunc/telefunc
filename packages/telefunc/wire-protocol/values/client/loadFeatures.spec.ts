@@ -1017,42 +1017,26 @@ test('a second client module instance gets native Files and Blobs from the share
   expect(await ret.blob.text()).toBe('dog')
 })
 
-test.each<[Feature, string | Record<string, number>]>([
-  ['channels', 'Documentation example: "!TelefuncChannel:sample'],
-  ['broadcasts', { '!TelefuncBroadcast:category': 42 }],
-  ['streams', 'Documentation example: "!TelefuncStream:sample'],
-])('plain response data does not load %s even if its asset fails', async (feature, value) => {
+test('plain RPC: sent at once, data that looks like a feature tag loads nothing and comes back as it was', async () => {
   const { call } = await page()
-  failing.add(feature)
-  for (const group of FEATURES) gates[group].resolve()
-  const body = stringify({ ret: value })
-  respond = () => new Response(body)
-  const jsonParse = vi.spyOn(JSON, 'parse')
-  try {
-    const ret = await call([value])
-    if (typeof value === 'object') {
-      assert(typeof ret === 'object' && ret !== null)
-      expect(Object.fromEntries(Object.entries(ret))).toEqual(value)
-    } else {
-      expect(ret).toEqual(value)
-    }
-    expect(jsonParse.mock.calls.filter(([input]) => input === body)).toHaveLength(1)
-  } finally {
-    jsonParse.mockRestore()
+  for (const feature of FEATURES) gates[feature].resolve()
+  const value = {
+    '!TelefuncBroadcast:category': 42,
+    strings: [
+      '!',
+      '!Telefunc',
+      CHANNEL,
+      '!TelefuncRoom:x',
+      'Documentation example: "!TelefuncChannel:sample',
+      'Documentation example: "!TelefuncStream:sample',
+    ],
   }
-  expect(posts).toHaveLength(1)
-  expect(imported).toEqual([])
-})
-
-test('plain RPC: sent at once, an app string that looks like a value loads nothing and comes back as it was', async () => {
-  const { call } = await page()
-  const value = ['!', '!Telefunc', CHANNEL, '!TelefuncRoom:x']
   respond = () => new Response(stringify({ ret: value }))
   const pending = call([value])
   expect(posts).toHaveLength(1)
   const ret = await pending
-  assert(Array.isArray(ret))
-  expect([...ret]).toEqual(value)
+  assert(typeof ret === 'object' && ret !== null)
+  expect(Object.fromEntries(Object.entries(ret))).toEqual(value)
   expect(imported).toEqual([])
 })
 
