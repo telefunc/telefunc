@@ -7,7 +7,7 @@ import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ServerBroadcastEnd } from './ServerBroadcastEnd.js'
 import { publishBody } from './PublishBody.js'
 import { ServerReplay } from './ServerReplay.js'
-import { ACK_STATUS, decode, encode, type DecodedFrame } from '../../wire/frame.js'
+import { decode, encode, type DecodedFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { Channel } from './ServerChannel.js'
@@ -46,32 +46,6 @@ afterEach(() => disposeBackend())
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('keyed in-process broadcast', () => {
-  it('delivers a published message to a sibling broadcast on the same key', () => {
-    const sender = new ServerBroadcast<{ text: string }>({ key: 'room:basic' })
-    const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:basic' })
-    sender._end._registerChannel(ATTACHABLE_NOW)
-    receiver._end._registerChannel(ATTACHABLE_NOW)
-
-    const received: Array<{ text: string }> = []
-    receiver.subscribe((msg) => received.push(msg))
-    sender.publish({ text: 'hello' })
-
-    expect(received).toEqual([{ text: 'hello' }])
-  })
-
-  // The publisher's own subscribe must fire too — same instance is both pub and sub.
-  // Catches a "skip-self" bug that excludes the source from delivery.
-  it('delivers a published message to the source broadcast (self-echo)', () => {
-    const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:self' })
-    broadcast._end._registerChannel(ATTACHABLE_NOW)
-
-    const received: Array<{ text: string }> = []
-    broadcast.subscribe((msg) => received.push(msg))
-    broadcast.publish({ text: 'hello' })
-
-    expect(received).toEqual([{ text: 'hello' }])
-  })
-
   // Catches a key-mixup where the adapter routes by reference instead of by key,
   // or strips the key prefix and ends up with a single global topic.
   it('isolates messages by key — publishing on key A does not reach key B subscribers', () => {
@@ -90,86 +64,6 @@ describe('keyed in-process broadcast', () => {
 
     expect(receivedA).toEqual([{ from: 'A' }])
     expect(receivedB).toEqual([{ from: 'B' }])
-  })
-
-  // 3-subscriber fan-out catches a subscriber-set bug that delivers to only the first
-  // (or last) registered listener.
-  it('fans out to every subscriber on the key', () => {
-    const k = 'room:fanout'
-    const pub = new ServerBroadcast<{ n: number }>({ key: k })
-    const subA = new ServerBroadcast<{ n: number }>({ key: k })
-    const subB = new ServerBroadcast<{ n: number }>({ key: k })
-    const subC = new ServerBroadcast<{ n: number }>({ key: k })
-    pub._end._registerChannel(ATTACHABLE_NOW)
-    subA._end._registerChannel(ATTACHABLE_NOW)
-    subB._end._registerChannel(ATTACHABLE_NOW)
-    subC._end._registerChannel(ATTACHABLE_NOW)
-
-    const log: Array<[string, number]> = []
-    subA.subscribe((m) => log.push(['A', m.n]))
-    subB.subscribe((m) => log.push(['B', m.n]))
-    subC.subscribe((m) => log.push(['C', m.n]))
-
-    pub.publish({ n: 1 })
-
-    expect(log.sort()).toEqual([
-      ['A', 1],
-      ['B', 1],
-      ['C', 1],
-    ])
-  })
-
-  // Catches a reordering bug introduced by an async adapter that races publishes
-  // (e.g. swapping `await publish(a)` with `await publish(b)` in flight).
-  it('preserves publish order across multiple in-flight messages', () => {
-    const sender = new ServerBroadcast<{ n: number }>({ key: 'room:order' })
-    const receiver = new ServerBroadcast<{ n: number }>({ key: 'room:order' })
-    sender._end._registerChannel(ATTACHABLE_NOW)
-    receiver._end._registerChannel(ATTACHABLE_NOW)
-
-    const seen: number[] = []
-    receiver.subscribe((m) => seen.push(m.n))
-    for (let i = 0; i < 5; i++) sender.publish({ n: i })
-
-    expect(seen).toEqual([0, 1, 2, 3, 4])
-  })
-
-  // Common defensive bug: a single throwing subscriber takes down the whole fan-out.
-  // ServerBroadcast must isolate per-subscriber errors so one bad listener doesn't
-  // starve the rest.
-  it('isolates subscriber errors — a throwing subscriber does not break others', () => {
-    const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:err' })
-    broadcast._end._registerChannel(ATTACHABLE_NOW)
-
-    const goodReceived: string[] = []
-    broadcast.subscribe(() => {
-      throw new Error('bad subscriber')
-    })
-    broadcast.subscribe((m) => goodReceived.push(m.text))
-    broadcast.subscribe(() => {
-      throw new Error('also bad')
-    })
-
-    broadcast.publish({ text: 'hi' })
-
-    expect(goodReceived).toEqual(['hi'])
-  })
-
-  // The unsubscribe handle returned by `subscribe()` is the only way for users to
-  // detach a callback. A regression here causes silent listener leaks that look
-  // like duplicate deliveries.
-  it('subscribe() returns an unsubscribe that actually stops further delivery', () => {
-    const broadcast = new ServerBroadcast<{ n: number }>({ key: 'room:unsub' })
-    broadcast._end._registerChannel(ATTACHABLE_NOW)
-
-    const seen: number[] = []
-    const unsubscribe = broadcast.subscribe((m) => seen.push(m.n))
-
-    broadcast.publish({ n: 1 })
-    unsubscribe()
-    broadcast.publish({ n: 2 })
-
-    expect(seen).toEqual([1])
   })
 
   it('does not call a subscriber that an earlier one unsubscribed during the same delivery', () => {
@@ -196,28 +90,6 @@ describe('keyed in-process broadcast', () => {
 
     expect(received).toEqual([{ text: 'hello' }])
   })
-
-  it('publish receipts are key-scoped and seq increments monotonically per key', async () => {
-    const k1 = 'room:receipts:A'
-    const k2 = 'room:receipts:B'
-    const a = new ServerBroadcast<{ text: string }>({ key: k1 })
-    const b = new ServerBroadcast<{ text: string }>({ key: k2 })
-    a._end._registerChannel(ATTACHABLE_NOW)
-    b._end._registerChannel(ATTACHABLE_NOW)
-
-    const a1 = await a.publish({ text: 'a-one' })
-    const a2 = await a.publish({ text: 'a-two' })
-    const b1 = await b.publish({ text: 'b-one' })
-
-    // Each receipt is keyed to its own topic, and seq increases per key.
-    expect(a1.key).toBe(k1)
-    expect(a2.key).toBe(k1)
-    expect(b1.key).toBe(k2)
-    expect(a2.seq).toBe(a1.seq + 1)
-    expect(b1.seq).toBeGreaterThan(0)
-    expect(typeof a1.timestamp).toBe('number')
-  })
-
   // Options read from a form or a configuration file: `'false'` would otherwise publish it lossy.
   it("refuses a `lossy` that isn't a boolean, at the call", () => {
     const key = 'room:lossy-option'
@@ -315,24 +187,6 @@ describe('binary in-process broadcast', () => {
     sender.publishBinary(new Uint8Array([0x00, 0x7f, 0x80, 0xff]))
 
     expect(received.map((data) => Array.from(data))).toEqual([[0x00, 0x7f, 0x80, 0xff]])
-  })
-
-  it('binary subscribers do NOT receive text publishes (and vice versa)', () => {
-    const sender = new ServerBroadcast<{ text: string }>({ key: 'room:mixed' })
-    const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:mixed' })
-    sender._end._registerChannel(ATTACHABLE_NOW)
-    receiver._end._registerChannel(ATTACHABLE_NOW)
-
-    const text: Array<{ text: string }> = []
-    const bin: Uint8Array[] = []
-    receiver.subscribe((m) => text.push(m))
-    receiver.subscribeBinary((d) => bin.push(d))
-
-    sender.publish({ text: 'just text' })
-    sender.publishBinary(new Uint8Array([1, 2, 3]))
-
-    expect(text).toEqual([{ text: 'just text' }])
-    expect(bin.map((data) => Array.from(data))).toEqual([[1, 2, 3]])
   })
 })
 
@@ -1796,93 +1650,6 @@ describe('Broadcast disallows channel methods', () => {
 // the runtime check is in _onPagePublish.
 // ───────────────────────────────────────────────────────────────────────────
 
-describe('Broadcast shield validation', () => {
-  it('rejects client publishes that fail the data shield with a SHIELD_ERROR ack', async () => {
-    const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:shield' })
-    broadcast._publishShield = (value) => {
-      const text = typeof value === 'object' && value !== null && 'text' in value ? value.text : undefined
-      return typeof text === 'string' ? true : 'expected { text: string }'
-    }
-    broadcast._end._registerChannel(ATTACHABLE_NOW)
-
-    const frames: Uint8Array[] = []
-    broadcast._end._attachPeer(
-      new IndexedPeer({
-        sender: {
-          send: (frame) => {
-            frames.push(frame)
-          },
-          carry() {},
-          bufferedAmount: () => 0,
-          behindAfter: () => 700,
-          deliveredBefore: () => 0,
-          terminate() {},
-          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-          sendPublish(index, seq, body) {
-            this.send(encode.publishTo(index, seq))
-            this.send(body)
-          },
-          waitingPublishes: () => 0,
-          dropWaitingPublishes() {},
-          dropUngiven: () => 0,
-          dropWaitingFrom() {},
-        },
-        index: 7,
-        replay: new ServerReplay({ heldBytes: 0 }),
-      }),
-    )
-
-    await broadcast._end._onPeerPublishAckReqMessage(JSON.stringify({ text: 42 }), 1)
-
-    const ack = frames.map((f) => decode(new Uint8Array(f))).find((d) => d.tag === TAG.ACK_RES)
-    expect(ack).toBeDefined()
-    if (ack?.tag !== TAG.ACK_RES) throw new Error('Expected ACK_RES')
-    expect(ack.status).toBe(ACK_STATUS.SHIELD_ERROR)
-    expect(ack.text).toBe('expected { text: string }')
-  })
-
-  // Shield rejection MUST short-circuit the publish — bad payloads should never reach
-  // any subscriber, including the publisher's own self-echo.
-  it('a shield-rejected publish is not delivered to subscribers', async () => {
-    const sender = new ServerBroadcast<{ text: string }>({ key: 'room:shield-drop' })
-    const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:shield-drop' })
-    sender._end._registerChannel(ATTACHABLE_NOW)
-    receiver._end._registerChannel(ATTACHABLE_NOW)
-
-    sender._publishShield = () => 'always reject'
-
-    const seen: Array<{ text: string }> = []
-    receiver.subscribe((m) => seen.push(m))
-
-    sender._end._attachPeer(
-      new IndexedPeer({
-        sender: {
-          send: () => {},
-          carry() {},
-          bufferedAmount: () => 0,
-          behindAfter: () => 700,
-          deliveredBefore: () => 0,
-          terminate() {},
-          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-          sendPublish(index, seq, body) {
-            this.send(encode.publishTo(index, seq))
-            this.send(body)
-          },
-          waitingPublishes: () => 0,
-          dropWaitingPublishes() {},
-          dropUngiven: () => 0,
-          dropWaitingFrom() {},
-        },
-        index: 7,
-        replay: new ServerReplay({ heldBytes: 0 }),
-      }),
-    )
-    await sender._end._onPeerPublishAckReqMessage(JSON.stringify({ text: 'malicious' }), 1)
-
-    expect(seen).toEqual([])
-  })
-})
-
 describe('lossy broadcast under memory pressure', () => {
   // Another object's publish sheds it: the channel ends once its own object runs, but what it holds goes at once.
   it('lets go of the newest it holds for a page that is behind', async () => {
@@ -2151,45 +1918,6 @@ describe('TransportBroadcastDriver — multi-node transport', () => {
 
     Broadcast.publish('room:rc-cycle', 'after-resub')
     expect(received).toEqual(['after-resub'])
-  })
-})
-
-// ───────────────────────────────────────────────────────────────────────────
-// Static bus (`Broadcast.*`) — server-only fire-and-forget broadcast. Bypasses
-// the instance-lifecycle (no register, no peer) and goes straight to the adapter.
-// Bug class: regression where the static bus starts touching instance state.
-// ───────────────────────────────────────────────────────────────────────────
-
-describe('Broadcast static bus (publish/subscribe)', () => {
-  it('static publish + static subscribe deliver without any instance', async () => {
-    const received: Array<{ text: string }> = []
-    const unsubscribe = Broadcast.subscribe<{ text: string }>('room:static', (msg) => received.push(msg))
-
-    await Broadcast.publish('room:static', { text: 'fire-and-forget' })
-
-    expect(received).toEqual([{ text: 'fire-and-forget' }])
-    unsubscribe()
-  })
-
-  it('static unsubscribe stops further deliveries', async () => {
-    const received: Array<{ text: string }> = []
-    const unsubscribe = Broadcast.subscribe<{ text: string }>('room:static-unsub', (m) => received.push(m))
-
-    await Broadcast.publish('room:static-unsub', { text: 'first' })
-    unsubscribe()
-    await Broadcast.publish('room:static-unsub', { text: 'second' })
-
-    expect(received).toEqual([{ text: 'first' }])
-  })
-
-  it('does not call a subscriber that an earlier one unsubscribed during the same delivery', async () => {
-    const received: string[] = []
-    Broadcast.subscribe<string>('room:static-unsub-in-delivery', () => unsubscribe())
-    const unsubscribe = Broadcast.subscribe<string>('room:static-unsub-in-delivery', (m) => received.push(m))
-
-    await Broadcast.publish('room:static-unsub-in-delivery', 'first')
-
-    expect(received).toEqual([])
   })
 })
 

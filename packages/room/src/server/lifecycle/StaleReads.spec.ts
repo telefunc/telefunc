@@ -23,20 +23,6 @@ describe('StaleReads', () => {
     vi.restoreAllMocks()
   })
 
-  it('warns once, naming the room, at a read a heartbeat past when it was last current', () => {
-    const { reads } = staleReads()
-    vi.advanceTimersByTime(ROOM_HEARTBEAT_INTERVAL_MS)
-    reads.read()
-    expect(warn).not.toHaveBeenCalled()
-    vi.advanceTimersByTime(1)
-    reads.read()
-    reads.read()
-    expect(warn).toHaveBeenCalledOnce()
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining("Room 'lobby' was read 30 s after it was last current on this server"),
-    )
-  })
-
   it('stays quiet while followed, on a closed room, and after a Room.get() caught it up', () => {
     const { reads, model, lanePlan } = staleReads()
     vi.advanceTimersByTime(2 * ROOM_HEARTBEAT_INTERVAL_MS)
@@ -62,6 +48,7 @@ describe('StaleReads', () => {
     reads.read()
     expect(warn).not.toHaveBeenCalled()
     vi.advanceTimersByTime(1)
+    reads.read()
     reads.read()
     expect(warn).toHaveBeenCalledOnce()
   })

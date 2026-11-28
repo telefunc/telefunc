@@ -2240,6 +2240,8 @@ function testRoomRedisPublishLimit() {
 }
 
 function testRoomLongWaits() {
+  testRoomStaleRead()
+
   test('room: a tail nobody subscribes to within 60 seconds drops what it held, and the server logs it', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-tail-lease')
