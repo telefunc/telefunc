@@ -15,7 +15,7 @@ async function nodeReadableToWebRequest(
   headers: Headers,
   nativeBody: boolean,
   response?: Writable,
-): Promise<{ request: Request; unwatch: () => void; clientGone: AbortSignal }> {
+): Promise<{ request: Request; unwatch: () => void; unwatchClientGone: () => void; clientGone: AbortSignal }> {
   // Even a closed readable can still emit its error on the next tick.
   const unwatchEarlyError = () => {
     readable.off('error', ignoreEarlyReadableError)
@@ -67,12 +67,17 @@ async function nodeReadableToWebRequest(
     unwatch = () => socket.off('close', abort)
   }
   // Even after unwatch(), a socket that closes before the body's end interrupts its upload.
+  let unwatchClientGone = () => {}
   if (socket && !readable.readableEnded) {
     const left = () => gone.abort()
     socket.once('close', left)
-    readable.once('end', () => socket.off('close', left))
+    unwatchClientGone = () => {
+      socket.off('close', left)
+      readable.off('end', unwatchClientGone)
+    }
+    readable.once('end', unwatchClientGone)
   }
-  return { request, unwatch, clientGone: gone.signal }
+  return { request, unwatch, unwatchClientGone, clientGone: gone.signal }
 }
 
 function ignoreEarlyReadableError(): void {}

@@ -67,11 +67,16 @@ async function serve(httpRequest: HttpRequest): Promise<HttpResponse> {
 
 async function runRequest(httpRequest: HttpRequest, response?: Writable): Promise<HttpResponse> {
   const httpRequestResolved = await resolveHttpRequest(httpRequest, response)
+  let releaseClientGone = true
   try {
-    return await runTelefunc(httpRequestResolved)
+    const httpResponse = await runTelefunc(httpRequestResolved)
+    // A 2xx call can return a channel/stream that keeps reading its upload after answering.
+    if (httpResponse.statusCode < 400) releaseClientGone = false
+    return httpResponse
   } finally {
     // Past this, `httpResponse.pipe(res)` ends a streaming response's body once the client is gone.
     httpRequestResolved.unwatch?.()
+    if (releaseClientGone) httpRequestResolved.unwatchClientGone?.()
   }
 }
 
@@ -102,6 +107,10 @@ async function serveNode(
   httpResponse.headers.forEach(([name, value]) => res.setHeader(name, value))
   res.statusCode = httpResponse.statusCode
   res.socket?.setNoDelay(true)
+  // An HTTP/1.1 400 response that refused an unread body cannot reuse the keep-alive socket (RFC 9112 §9.6).
+  if (req.httpVersionMajor < 2 && httpResponse.statusCode === 400 && !req.readableEnded) {
+    res.setHeader('Connection', 'close')
+  }
   res.flushHeaders()
   await httpResponse.pipe(res)
   return true
@@ -119,7 +128,7 @@ async function telefunc(httpRequest: HttpRequest): Promise<HttpResponse> {
 async function resolveHttpRequest(
   httpRequest: HttpRequest,
   response?: Writable,
-): Promise<HttpRequestResolved & { unwatch?: () => void }> {
+): Promise<HttpRequestResolved & { unwatch?: () => void; unwatchClientGone?: () => void }> {
   if ('request' in httpRequest) {
     // A `Request` handed over as it is: its signal says its client left, as the Fetch standard has it.
     return {
@@ -135,7 +144,7 @@ async function resolveHttpRequest(
     const headers = new Headers(normalizeHeaders(httpRequest.headers))
     const kind = headers.get(REQUEST_KIND_HEADER)
     const nativeBody = kind === REQUEST_KIND.BINARY || kind === REQUEST_KIND.SSE
-    const { request, unwatch, clientGone } = await nodeReadableToWebRequest(
+    const { request, unwatch, unwatchClientGone, clientGone } = await nodeReadableToWebRequest(
       httpRequest.readable,
       url.href,
       httpRequest.method,
@@ -149,6 +158,7 @@ async function resolveHttpRequest(
       context: httpRequest.context,
       clientGone,
       unwatch,
+      unwatchClientGone,
     }
   }
   // Backward compat: construct a Request from primitives
